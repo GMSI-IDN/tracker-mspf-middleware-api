@@ -81,6 +81,10 @@ function normalizeDevice(d) {
     phone: d.mobileNo || undefined, model: d.deviceType || undefined,
     source: 'mspf', group: `mspf_${d.bcId}`,
     lastUpdate: d.lastCommunicatedAt || undefined,
+    voltage: d.tags?.volt ?? undefined,
+    internalBattery: d.tags?.addr_IB ?? undefined,
+    batteryLevel: undefined,
+    ignition: undefined,
     attributes: {
       ...(d.tags || {}),
       bcId: d.bcId,
@@ -249,6 +253,7 @@ async function enrichPositions(positions) {
     return {
       ...p,
       speed: p.speed || st?.speed || 0,
+      course: p.course || mccs?.dir || 0,
       attributes: {
         ...p.attributes,
         ...(st?.tags || {}),
@@ -332,6 +337,8 @@ async function enrichDevice(device) {
   const deviceIgnition = st?.ignition === 'ON' ? true : (st?.ignition === 'OFF' ? false : undefined);
   const running = deviceRunning && deviceRunning !== 'UNKNOWN' ? deviceRunning : calcRunningStatus(deviceIgnition, st?.speed, st?.lastCommunicatedAt);
 
+  const enrichedAttrs = { ...device.attributes, ...mccs, ...(st?.tags ? { tags: st.tags } : {}) };
+
   return {
     ...device,
     ...(st ? {
@@ -343,11 +350,9 @@ async function enrichDevice(device) {
       speed: st.speed,
       sats: st.sats,
     } : {}),
-    attributes: {
-      ...device.attributes,
-      ...mccs,
-      ...(st?.tags ? { tags: st.tags } : {}),
-    },
+    internalBattery: enrichedAttrs.addr_IB ?? undefined,
+    batteryLevel: enrichedAttrs.batteryLevel ?? undefined,
+    attributes: enrichedAttrs,
   };
 }
 
@@ -442,10 +447,51 @@ async function init() {
 
 init().catch(() => {});
 
+async function getDeviceParking(deviceId, params = {}) {
+  const res = await getApi().get(`/v3/stats/devices/${deviceId}/parking`, { params });
+  return res.data;
+}
+
+async function getDeviceParkingAll(deviceId, params = {}) {
+  const results = [];
+  let next = null;
+  do {
+    const page = await getDeviceParking(deviceId, { ...params, start: next });
+    results.push(...(page.data || []));
+    next = page.next;
+  } while (next && results.length < 1000);
+  return results;
+}
+
+async function getDeviceTrip(deviceId, params = {}) {
+  const res = await getApi().get(`/v4/stats/devices/${deviceId}/trip`, { params });
+  return res.data;
+}
+
+async function getStatsSummary(params = {}) {
+  const res = await getApi().get('/v3/stats/devices/summary', { params });
+  return res.data;
+}
+
+async function getMspfEvents(params = {}) {
+  const res = await getApi().get('/v4/events', { params });
+  return res.data?.data || res.data || [];
+}
+
+async function getMspfClosedEvents(params = {}) {
+  const res = await getApi().get('/v4/closed-events', { params });
+  return res.data?.data || res.data || [];
+}
+
 module.exports = {
   init, getApi, normalizeDevice, normalizePosition, enrichDevice,
   getDevices, searchDevices, getDevice, getBcList, getBc,
   getPositions, getDeviceRoute,
   getDeviceStatus, getDeviceStatusList,
   activateDevice, getCommandHistory,
+  getDeviceParking, getDeviceParkingAll,
+  getDeviceTrip,
+  getStatsSummary,
+  getMspfEvents,
+  getMspfClosedEvents,
 };

@@ -21,13 +21,28 @@ function filterActivePositions(positions) {
 }
 
 function normalizeTraccarPosition(p) {
-  return { ...p, source: 'traccar' };
+  const pos = { ...p, source: 'traccar' };
+  pos.voltage = pos.attributes?.power ?? undefined;
+  pos.internalBattery = pos.attributes?.addr_IB ?? undefined;
+  pos.batteryLevel = pos.attributes?.batteryLevel ?? undefined;
+  pos.ignition = pos.attributes?.ignition ?? undefined;
+  return pos;
+}
+
+function enrichPositionRootFields(pos) {
+  const attr = pos.attributes || {};
+  if (pos.voltage === undefined) pos.voltage = attr.voltage ?? attr.power ?? attr.volt ?? undefined;
+  if (pos.internalBattery === undefined) pos.internalBattery = attr.addr_IB ?? undefined;
+  if (pos.batteryLevel === undefined) pos.batteryLevel = attr.batteryLevel ?? undefined;
+  if (pos.ignition === undefined) pos.ignition = attr.ignition ?? undefined;
+  return pos;
 }
 
 async function applyCustomAttributes(positions, user) {
   if (!user) return;
   for (const pos of positions) {
     if (!pos.deviceId) continue;
+    enrichPositionRootFields(pos);
     const rules = await getDeviceRules(pos.deviceId, pos.source);
     if (rules.length > 0) {
       if (user.role === 'admin') {
@@ -53,6 +68,11 @@ router.get('/', async (req, res, next) => {
       if (!devSource) devSource = deviceRouter.getSourceByDeviceId(idNum);
       if (!devSource) throw createError(404, 'Device not found', { code: 'ERR_NOT_FOUND' });
 
+      if (req.user.role !== 'admin' && req.user.groups?.length > 0) {
+        const dg = await db('device_groups').where({ device_id: idNum, source: devSource }).whereIn('group_id', req.user.groups).first();
+        if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+      }
+
       let positions;
       if (devSource === 'traccar') {
         const data = await traccar.getPositions({ deviceId: idNum, from, to, limit });
@@ -60,7 +80,7 @@ router.get('/', async (req, res, next) => {
       } else {
         positions = from || to
           ? await mspf.getDeviceRoute(idNum, { from, to })
-          : (await mspf.getPositions({ limit: 200 })).filter(p => p.deviceId === idNum);
+          : (await mspf.getPositions({ limit })).filter(p => p.deviceId === idNum);
       }
       await applyCustomAttributes(positions, req.user);
       return res.json(positions);
@@ -68,12 +88,20 @@ router.get('/', async (req, res, next) => {
 
     const [traccarResult, mspfResult] = await Promise.allSettled([
       traccar.getPositions({ limit }),
-      mspf.getPositions({ limit: Math.min(limit, 200) }),
+      mspf.getPositions({ limit }),
     ]);
 
-    const positions = [];
+    let positions = [];
     if (traccarResult.status === 'fulfilled') positions.push(...traccarResult.value.map(normalizeTraccarPosition));
     if (mspfResult.status === 'fulfilled') positions.push(...filterActivePositions(mspfResult.value));
+
+    const userGroups = req.user.groups || [];
+    if (req.user.role !== 'admin' && userGroups.length > 0) {
+      const mappings = await db('device_groups').whereIn('group_id', userGroups).select('device_id', 'source');
+      const allowed = new Set(mappings.map(m => `${m.source}:${m.device_id}`));
+      positions = positions.filter(p => allowed.has(`${p.source}:${p.deviceId}`));
+    }
+
     await applyCustomAttributes(positions, req.user);
     res.json(positions);
   } catch (err) {
@@ -92,6 +120,11 @@ router.get('/latest', async (req, res, next) => {
       if (!devSource) devSource = deviceRouter.getSourceByDeviceId(idNum);
       if (!devSource) throw createError(404, 'Device not found', { code: 'ERR_NOT_FOUND' });
 
+      if (req.user.role !== 'admin' && req.user.groups?.length > 0) {
+        const dg = await db('device_groups').where({ device_id: idNum, source: devSource }).whereIn('group_id', req.user.groups).first();
+        if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+      }
+
       if (devSource === 'traccar') {
         const data = await traccar.getPositions({ deviceId: idNum });
         return res.json((data || []).map(normalizeTraccarPosition));
@@ -107,9 +140,17 @@ router.get('/latest', async (req, res, next) => {
       mspf.getPositions({ limit: 100 }),
     ]);
 
-    const positions = [];
+    let positions = [];
     if (traccarResult.status === 'fulfilled') positions.push(...traccarResult.value.map(normalizeTraccarPosition));
     if (mspfResult.status === 'fulfilled') positions.push(...mspfResult.value);
+
+    const userGroups = req.user.groups || [];
+    if (req.user.role !== 'admin' && userGroups.length > 0) {
+      const mappings = await db('device_groups').whereIn('group_id', userGroups).select('device_id', 'source');
+      const allowed = new Set(mappings.map(m => `${m.source}:${m.device_id}`));
+      positions = positions.filter(p => allowed.has(`${p.source}:${p.deviceId}`));
+    }
+
     await applyCustomAttributes(positions, req.user);
     res.json(positions);
   } catch (err) {

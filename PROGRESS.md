@@ -65,7 +65,7 @@
 | **Device rules cache** — 120s TTL, 0 DB query per request | ✅ |
 | **Root fields** — id, name, status, speed tetap muncul (tidak terpengaruh) | ✅ |
 | **Pagination stable** — device list sorted by ID (no duplicate/leak on cache refresh) | ✅ |
-| **Unit tests** — 36 tests (incl. stable pagination test) | ✅ |
+| **Unit tests** — 74 tests (incl. stable pagination test) | ✅ |
 | **Available fields** — GET /api/admin/custom-attributes/available-fields | ✅ |
 | **Group preview** — GET /api/groups/:id/preview (daftar atribut yang muncul di FE) | ✅ |
 | **Reports route fix** — auto-probe cache miss, tidak intermittent 404 | ✅ |
@@ -80,3 +80,34 @@
 | **Group preview admin** — visibleAttributes untuk admin include enriched default attributes + custom rules | ✅ |
 | **Reports/positions admin** — `/api/reports/route` & `/api/positions` admin lihat enriched + custom rename/compute | ✅ |
 | **Device metadata** — tabel `device_metadata`, PUT /api/devices/:id/metadata, enrich di device list & detail | ✅ |
+| **WS customer access filter** — perbaiki race condition, filter position & device-status per customer group | ✅ |
+| **Positions customer filter** — `GET /api/positions` & `/latest` filter by `device_groups` untuk non-admin | ✅ |
+| **Reports route customer filter** — `GET /api/reports/route` check access `device_groups` untuk non-admin | ✅ |
+| **Parking endpoint** — `GET /api/reports/parking` unified Traccar (stops) + MSPF (parking) per-device | ✅ |
+| **Traccar getReportStops** — service function `GET /reports/stops` dengan filter engineHours=0 (parking only) | ✅ |
+| **MSPF getDeviceParkingAll** — service function `GET /v3/stats/devices/{id}/parking` dengan auto-pagination via next token | ✅ |
+| **Idle endpoint** — `GET /api/reports/idle` per-device, Traccar (engineHours>0) + MSPF (kalkulasi dari route positions) | ✅ |
+| **calculateIdleSegments utility** — fungsi kalkulasi segmen idle dari array positions (speed=0 + ignition=true) | ✅ |
+| **Trip reports** — `GET /api/reports/trips` per-device, Traccar (data lengkap) + MSPF (enriched via route: distance, speed) | ✅ |
+| **Haversine distance utility** — kalkulasi jarak antar koordinat untuk enrichment MSPF trip | ✅ |
+| **MSPF trip enrichment** — distance (akumulasi Haversine via route), maxSpeed, averageSpeed dari route positions | ✅ |
+| **Traccar getReportTrips** — service function `GET /reports/trips` dengan konversi knots→km/h, meters→km | ✅ |
+| **MSPF getDeviceTrip** — service function `GET /v4/stats/devices/{id}/trip` | ✅ |
+| **Summary report** — `GET /api/reports/summary` per-device, per-group, atau semua device | ✅ |
+| **Traccar getReportSummary** — service `GET /reports/summary` dengan konversi knots→km/h, meters→km | ✅ |
+| **MSPF getStatsSummary** — service `GET /v3/stats/devices/summary` untuk multi-device summary | ✅ |
+| **MSPF single device enrichment** — route-based kalkulasi distance, maxSpeed, averageSpeed, duration | ✅ |
+| **Event history** — `GET /api/reports/events` per-device (enriched) + multi-device (fast) | ✅ |
+| **Traccar events** — service `GET /reports/events` + `GET /geofences` untuk enrich nama geofence | ✅ |
+| **MSPF events** — service `GET /v4/events` + `GET /v4/closed-events` via bcId | ✅ |
+| **Event status derivation** — mapping Traccar event type → OPEN/CLOSE | ✅ |
+| **Event name derivation** — Traccar: nama geofence atau human-readable name. MSPF: monitorName | ✅ |
+| **Dashboard endpoint** — `GET /api/dashboard` ringkasan device stats, running status, summary, recent events | ✅ |
+| **Dashboard route** — `src/routes/dashboard.js` + registered di `app.js` | ✅ |
+| **Voltage & internalBattery di root** — WS position, device list/detail, positions endpoint | ✅ |
+| **WebSocket root battery** — `emitPosition` extract voltage + internalBattery ke root payload | ✅ |
+| **REST battery enrichment** — device list (normalize), device detail (enrichDevice), positions (enrichPositionRootFields) | ✅ |
+| **batteryLevel** — root field baru di WS + REST, dari Traccar `attributes.batteryLevel` (0-100%) | ✅ |
+| **Course enrichment MSPF** — `enrichPositions` pakai `mccs.dir` untuk root `course` jika raw position 0 | ✅ |
+| **Ignition di root** — semua endpoint (WS, positions, devices) extract `ignition` ke root level | ✅ |
+| **Fix MSPF positions limit** — hapus cap 200, pakai `limit` dari query langsung (max 1000) | ✅ |

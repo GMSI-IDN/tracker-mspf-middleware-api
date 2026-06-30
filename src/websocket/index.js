@@ -6,6 +6,7 @@ const mspf = require('../services/mspf');
 const { deriveRunningStatus } = require('../utils/deviceStatus');
 const { applyRules, computeFormula, getDeviceRules } = require('../services/customAttributes');
 const { logger } = require('../middleware/logger');
+const db = require('../db');
 
 let io = null;
 let mspfPollTimer = null;
@@ -36,6 +37,25 @@ function setupWebSocket(httpServer) {
   });
 
   setupRedisAdapter(io);
+
+  io.on('connection', async (socket) => {
+    const user = socket.user;
+    if (user.role !== 'admin') {
+      socket.allowedDevices = new Set();
+      if (user.groups?.length > 0) {
+        try {
+          const mappings = await db('device_groups').whereIn('group_id', user.groups).select('device_id', 'source');
+          for (const m of mappings) socket.allowedDevices.add(`${m.source}:${m.device_id}`);
+          console.log(`[WS] ${user.username} (${user.role}) connect, groups:${JSON.stringify(user.groups)}, allowedDevices:${socket.allowedDevices.size}`);
+        } catch (err) {
+          logger.warn(`WS: failed to load allowed devices for ${user.username}: ${err.message}`);
+        }
+      } else {
+        console.log(`[WS] ${user.username} (${user.role}) connect, groups:[] → allowedDevices:0`);
+      }
+    }
+  });
+
   startMspfPolling();
   connectTraccarWs();
 
@@ -89,12 +109,24 @@ async function emitPosition(data) {
   const name = getDeviceName(data.deviceId, data.source);
   const sockets = io ? [...io.sockets.sockets.values()] : [];
   const users = sockets.map(s => s.user?.username || '?').join(',');
-  console.log(`[WS] position → {id:${data.deviceId}, name:"${name}", src:${data.source}, lat:${data.latitude}, lng:${data.longitude}, speed:${data.speed}, course:${data.course}, alt:${data.altitude}, time:${data.deviceTime}, valid:${data.valid}, attrs:${JSON.stringify(data.attributes)}}`);
+  // console.log(`[WS] position → {id:${data.deviceId}, name:"${name}", ...}`);
   const rules = await getDeviceRules(data.deviceId, data.source);
   for (const socket of sockets) {
     const user = socket.user;
     if (!user) continue;
+    if (user.role !== 'admin' && !socket.allowedDevices.has(`${data.source}:${data.deviceId}`)) {
+      console.log(`[WS] ${user.username}: ${data.source}:${data.deviceId} BLOCKED (${socket.allowedDevices?.size || 0} allowed)`);
+      continue;
+    }
+    if (user.role !== 'admin') {
+      console.log(`[WS] ${user.username}: ${data.source}:${data.deviceId} ALLOWED`);
+    }
     let payload = { ...data, attributes: { ...data.attributes } };
+    const attr = payload.attributes;
+    payload.voltage = attr.voltage ?? attr.power ?? attr.volt ?? undefined;
+    payload.internalBattery = attr.addr_IB ?? undefined;
+    payload.batteryLevel = attr.batteryLevel ?? undefined;
+    payload.ignition = attr.ignition ?? undefined;
     if (user.role !== 'admin') {
       if (rules.length > 0) {
         applyRules(payload, rules);
@@ -114,10 +146,19 @@ async function emitPosition(data) {
       }
     }
     socket.emit('position', payload);
-    console.log(`  → ${user.username}: attrs=${JSON.stringify(payload.attributes)}`);
+    // console.log(`  → ${user.username}: attrs=...`);
   }
 }
-function emitDeviceStatus(data) { if (io) io.emit('device-status', data); }
+function emitDeviceStatus(deviceId, source, data) {
+  if (!io) return;
+  const sockets = [...io.sockets.sockets.values()];
+  for (const socket of sockets) {
+    const user = socket.user;
+    if (!user) continue;
+    if (user.role !== 'admin' && !socket.allowedDevices.has(`${source}:${deviceId}`)) continue;
+    socket.emit('device-status', data);
+  }
+}
 function emitCommandResult(data) { if (io) io.emit('command-result', data); }
 function getIO() { return io; }
 
@@ -127,13 +168,15 @@ function emitDeviceStatusFrom(item) {
   const ignition = item.attributes?.ignition;
   const running = deriveRunningStatus(item.attributes, speed, lastUpdate);
 
-  emitDeviceStatus({
+  emitDeviceStatus(item.deviceId, item.source, {
     deviceId: item.deviceId,
     source: item.source,
     lastUpdate: lastUpdate || new Date().toISOString(),
     running,
     ignition: ignition !== undefined ? ignition : undefined,
     voltage: item.attributes?.voltage || item.attributes?.power || undefined,
+    internalBattery: item.attributes?.addr_IB || undefined,
+    batteryLevel: item.attributes?.batteryLevel || undefined,
   });
 }
 
@@ -170,9 +213,9 @@ function startMspfPolling() {
             emitDeviceStatusFrom(item);
           }
         }
-        const rawCount = data.length;
-        const allowed = activeIds ? activeIds.size : 0;
-        logger.info(`[WS] MSPF: emit ${filtered.length} device (${rawCount} raw, ${allowed} allowed)`);
+        // const rawCount = data.length;
+        // const allowed = activeIds ? activeIds.size : 0;
+        // logger.info(`[WS] MSPF: emit ${filtered.length} device (${rawCount} raw, ${allowed} allowed)`);
       }
     } catch (err) {
       logger.warn(`WS MSPF poll: ${err.message}`);

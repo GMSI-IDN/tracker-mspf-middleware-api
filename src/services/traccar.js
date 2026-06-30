@@ -62,6 +62,44 @@ async function getHealth() {
   return res.data;
 }
 
+async function getReportStops(params = {}) {
+  const res = await traccarApi.get('/reports/stops', { params });
+  return res.data;
+}
+
+async function getReportTrips(params = {}) {
+  const res = await traccarApi.get('/reports/trips', { params });
+  return (res.data || []).map(t => ({
+    ...t,
+    maxSpeed: t.maxSpeed ? parseFloat((t.maxSpeed * 1.852).toFixed(2)) : undefined,
+    averageSpeed: t.averageSpeed ? parseFloat((t.averageSpeed * 1.852).toFixed(2)) : undefined,
+    distance: t.distance ? parseFloat((t.distance / 1000).toFixed(2)) : undefined,
+  }));
+}
+
+async function getReportSummary(params = {}) {
+  const res = await traccarApi.get('/reports/summary', { params });
+  return (res.data || []).map(s => ({
+    deviceId: s.deviceId,
+    deviceName: s.deviceName || '',
+    maxSpeed: s.maxSpeed ? parseFloat((s.maxSpeed * 1.852).toFixed(2)) : undefined,
+    averageSpeed: s.averageSpeed ? parseFloat((s.averageSpeed * 1.852).toFixed(2)) : undefined,
+    distance: s.distance ? parseFloat((s.distance / 1000).toFixed(2)) : 0,
+    spentFuel: s.spentFuel || undefined,
+    engineHours: s.engineHours || undefined,
+  }));
+}
+
+async function getReportEvents(params = {}) {
+  const res = await traccarApi.get('/reports/events', { params });
+  return res.data || [];
+}
+
+async function getGeofences(params = {}) {
+  const res = await traccarApi.get('/geofences', { params });
+  return res.data || [];
+}
+
 module.exports = {
   getDevices,
   getGroups,
@@ -70,4 +108,9 @@ module.exports = {
   getCommandTypes,
   sendCommand,
   getHealth,
+  getReportStops,
+  getReportTrips,
+  getReportSummary,
+  getReportEvents,
+  getGeofences,
 };

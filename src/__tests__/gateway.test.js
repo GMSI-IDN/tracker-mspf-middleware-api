@@ -8,6 +8,11 @@ jest.mock('../services/traccar', () => ({
   getCommandTypes: jest.fn(),
   sendCommand: jest.fn(),
   getHealth: jest.fn(),
+  getReportStops: jest.fn(),
+  getReportTrips: jest.fn(),
+  getReportSummary: jest.fn(),
+  getReportEvents: jest.fn(),
+  getGeofences: jest.fn(),
 }));
 
 jest.mock('../services/mspf', () => {
@@ -27,6 +32,12 @@ jest.mock('../services/mspf', () => {
     getDeviceStatusList: jest.fn(),
     getCommandHistory: jest.fn(),
     activateDevice: jest.fn(),
+    getDeviceParking: jest.fn(),
+    getDeviceParkingAll: jest.fn(),
+    getDeviceTrip: jest.fn(),
+    getStatsSummary: jest.fn(),
+    getMspfEvents: jest.fn(),
+    getMspfClosedEvents: jest.fn(),
   };
 });
 
@@ -562,6 +573,563 @@ describe('Custom Attributes', () => {
 
   test('GET without auth returns 401', async () => {
     const res = await request(app).get('/api/admin/custom-attributes');
+    expect(res.status).toBe(401);
+  });
+});
+
+describe('Parking Reports', () => {
+  let token;
+  const traccarDeviceId = 999991;
+  const mspfDeviceId = 999992;
+
+  beforeAll(async () => {
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'admin', password: 'admin123' });
+    token = login.body.token;
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('GET /api/reports/parking without deviceId returns 400', async () => {
+    const res = await request(app)
+      .get('/api/reports/parking')
+      .set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('ERR_VALIDATION');
+  });
+
+  test('GET /api/reports/parking without from returns 400', async () => {
+    const res = await request(app)
+      .get(`/api/reports/parking?deviceId=${traccarDeviceId}`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('ERR_VALIDATION');
+  });
+
+  test('GET /api/reports/parking without token returns 401', async () => {
+    const res = await request(app)
+      .get(`/api/reports/parking?deviceId=${traccarDeviceId}&from=2026-06-01T00:00:00Z`);
+    expect(res.status).toBe(401);
+  });
+
+  test('GET /api/reports/parking returns Traccar parking data', async () => {
+    traccar.getDevices.mockResolvedValue([{ id: traccarDeviceId, name: 'Test Traccar', uniqueId: 'test', status: 'online', groupId: 5 }]);
+    traccar.getReportStops.mockResolvedValue([
+      { deviceId: traccarDeviceId, startTime: '2026-06-15T10:00:00Z', endTime: '2026-06-15T10:30:00Z', duration: 1800, lat: -6.2088, lon: 106.8456, address: 'Jl. Sudirman', engineHours: 0 },
+      { deviceId: traccarDeviceId, startTime: '2026-06-15T11:00:00Z', endTime: '2026-06-15T11:15:00Z', duration: 900, lat: -6.2090, lon: 106.8460, address: 'Jl. Thamrin', engineHours: 0 },
+    ]);
+
+    const res = await request(app)
+      .get(`/api/reports/parking?deviceId=${traccarDeviceId}&from=2026-06-01T00:00:00Z&to=2026-06-30T00:00:00Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.source).toBe('traccar');
+    expect(res.body.deviceId).toBe(traccarDeviceId);
+    expect(res.body.parking.length).toBe(2);
+    expect(res.body.parking[0]).toHaveProperty('startTime');
+    expect(res.body.parking[0]).toHaveProperty('duration');
+    expect(res.body.parking[0]).toHaveProperty('latitude');
+    expect(res.body.parking[0]).toHaveProperty('address');
+    expect(res.body.summary.total).toBe(2);
+    expect(res.body.summary.totalDuration).toBe(2700);
+  });
+
+  test('GET /api/reports/parking filters out idle stops (engineHours > 0) for Traccar', async () => {
+    traccar.getDevices.mockResolvedValue([{ id: traccarDeviceId, name: 'Test Traccar', uniqueId: 'test', status: 'online', groupId: 5 }]);
+    traccar.getReportStops.mockResolvedValue([
+      { deviceId: traccarDeviceId, startTime: '2026-06-15T10:00:00Z', endTime: '2026-06-15T10:30:00Z', duration: 1800, lat: -6.2088, lon: 106.8456, address: 'Jl. Sudirman', engineHours: 0 },
+      { deviceId: traccarDeviceId, startTime: '2026-06-15T11:00:00Z', endTime: '2026-06-15T11:15:00Z', duration: 900, lat: -6.2090, lon: 106.8460, address: 'Jl. Thamrin', engineHours: 900 },
+    ]);
+
+    const res = await request(app)
+      .get(`/api/reports/parking?deviceId=${traccarDeviceId}&from=2026-06-01T00:00:00Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.parking.length).toBe(1);
+    expect(res.body.parking[0].duration).toBe(1800);
+  });
+
+  test('GET /api/reports/parking returns MSPF parking data', async () => {
+    traccar.getDevices.mockResolvedValue([]);
+    mspf.getDevice.mockResolvedValue({ id: mspfDeviceId, status: 'WORKING' });
+    mspf.getDeviceParkingAll.mockResolvedValue([
+      { parkingStartTime: '2026-06-15T12:00:00Z', parkingTime: 90, position: { lat: -7.3235, lon: 112.7410 } },
+      { parkingStartTime: '2026-06-15T14:00:00Z', parkingTime: 30, position: { lat: -7.3236, lon: 112.7411 } },
+    ]);
+
+    const res = await request(app)
+      .get(`/api/reports/parking?deviceId=${mspfDeviceId}&from=2026-06-01T00:00:00Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.source).toBe('mspf');
+    expect(res.body.deviceId).toBe(mspfDeviceId);
+    expect(res.body.parking.length).toBe(2);
+    expect(res.body.parking[0].duration).toBe(1800);
+    expect(res.body.parking[1].duration).toBe(5400);
+    expect(res.body.summary.total).toBe(2);
+    expect(res.body.summary.totalDuration).toBe(7200);
+  });
+
+  test('GET /api/reports/parking returns empty list when no stops', async () => {
+    traccar.getDevices.mockResolvedValue([{ id: traccarDeviceId, name: 'Test', uniqueId: 'test', status: 'online', groupId: 5 }]);
+    traccar.getReportStops.mockResolvedValue([]);
+
+    const res = await request(app)
+      .get(`/api/reports/parking?deviceId=${traccarDeviceId}&from=2026-06-01T00:00:00Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.parking).toEqual([]);
+    expect(res.body.summary.total).toBe(0);
+    expect(res.body.summary.totalDuration).toBe(0);
+  });
+});
+
+describe('Idle Reports', () => {
+  let token;
+  const traccarDeviceId = 999993;
+  const mspfDeviceId = 999994;
+
+  beforeAll(async () => {
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'admin', password: 'admin123' });
+    token = login.body.token;
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('GET /api/reports/idle without deviceId returns 400', async () => {
+    const res = await request(app)
+      .get('/api/reports/idle')
+      .set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('ERR_VALIDATION');
+  });
+
+  test('GET /api/reports/idle without from returns 400', async () => {
+    const res = await request(app)
+      .get(`/api/reports/idle?deviceId=${traccarDeviceId}`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('ERR_VALIDATION');
+  });
+
+  test('GET /api/reports/idle without token returns 401', async () => {
+    const res = await request(app)
+      .get(`/api/reports/idle?deviceId=${traccarDeviceId}&from=2026-06-01T00:00:00Z`);
+    expect(res.status).toBe(401);
+  });
+
+  test('GET /api/reports/idle returns Traccar idle data (engineHours > 0)', async () => {
+    traccar.getDevices.mockResolvedValue([{ id: traccarDeviceId, name: 'Test', uniqueId: 'test', status: 'online', groupId: 5 }]);
+    traccar.getReportStops.mockResolvedValue([
+      { deviceId: traccarDeviceId, startTime: '2026-06-15T10:00:00Z', endTime: '2026-06-15T10:30:00Z', duration: 1800, lat: -6.2088, lon: 106.8456, address: 'Jl. Sudirman', engineHours: 0 },
+      { deviceId: traccarDeviceId, startTime: '2026-06-15T11:00:00Z', endTime: '2026-06-15T11:15:00Z', duration: 900, lat: -6.2090, lon: 106.8460, address: 'Jl. Thamrin', engineHours: 900 },
+    ]);
+
+    const res = await request(app)
+      .get(`/api/reports/idle?deviceId=${traccarDeviceId}&from=2026-06-01T00:00:00Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.source).toBe('traccar');
+    expect(res.body.idle.length).toBe(1);
+    expect(res.body.idle[0].duration).toBe(900);
+    expect(res.body.idle[0].address).toBe('Jl. Thamrin');
+    expect(res.body.summary.total).toBe(1);
+    expect(res.body.summary.totalDuration).toBe(900);
+  });
+
+  test('GET /api/reports/idle returns MSPF idle from route positions', async () => {
+    traccar.getDevices.mockResolvedValue([]);
+    mspf.getDevice.mockResolvedValue({ id: mspfDeviceId, status: 'WORKING' });
+    mspf.getDeviceRoute.mockResolvedValue([
+      { deviceId: mspfDeviceId, latitude: -7.3235, longitude: 112.7410, speed: 50, deviceTime: '2026-06-15T09:00:00Z', attributes: { ignition: true } },
+      { deviceId: mspfDeviceId, latitude: -7.3235, longitude: 112.7410, speed: 0, deviceTime: '2026-06-15T09:05:00Z', attributes: { ignition: true } },
+      { deviceId: mspfDeviceId, latitude: -7.3235, longitude: 112.7410, speed: 0, deviceTime: '2026-06-15T09:15:00Z', attributes: { ignition: true } },
+      { deviceId: mspfDeviceId, latitude: -7.3236, longitude: 112.7411, speed: 40, deviceTime: '2026-06-15T09:20:00Z', attributes: { ignition: true } },
+      { deviceId: mspfDeviceId, latitude: -7.3236, longitude: 112.7411, speed: 0, deviceTime: '2026-06-15T09:30:00Z', attributes: { ignition: true } },
+      { deviceId: mspfDeviceId, latitude: -7.3236, longitude: 112.7411, speed: 0, deviceTime: '2026-06-15T09:40:00Z', attributes: { ignition: true } },
+    ]);
+
+    const res = await request(app)
+      .get(`/api/reports/idle?deviceId=${mspfDeviceId}&from=2026-06-01T00:00:00Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.source).toBe('mspf');
+    expect(res.body.idle.length).toBe(2);
+    expect(res.body.idle[1].duration).toBe(600);
+    expect(res.body.idle[0].duration).toBe(600);
+  });
+
+  test('GET /api/reports/idle returns empty list when no idle events', async () => {
+    traccar.getDevices.mockResolvedValue([{ id: traccarDeviceId, name: 'Test', uniqueId: 'test', status: 'online', groupId: 5 }]);
+    traccar.getReportStops.mockResolvedValue([]);
+
+    const res = await request(app)
+      .get(`/api/reports/idle?deviceId=${traccarDeviceId}&from=2026-06-01T00:00:00Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.idle).toEqual([]);
+    expect(res.body.summary.total).toBe(0);
+    expect(res.body.summary.totalDuration).toBe(0);
+  });
+});
+
+describe('Trip Reports', () => {
+  let token;
+  const traccarDeviceId = 999995;
+  const mspfDeviceId = 999996;
+
+  beforeAll(async () => {
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'admin', password: 'admin123' });
+    token = login.body.token;
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('GET /api/reports/trips without deviceId returns 400', async () => {
+    const res = await request(app)
+      .get('/api/reports/trips')
+      .set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('ERR_VALIDATION');
+  });
+
+  test('GET /api/reports/trips without from returns 400', async () => {
+    const res = await request(app)
+      .get(`/api/reports/trips?deviceId=${traccarDeviceId}`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(400);
+  });
+
+  test('GET /api/reports/trips without token returns 401', async () => {
+    const res = await request(app)
+      .get(`/api/reports/trips?deviceId=${traccarDeviceId}&from=2026-06-01T00:00:00Z`);
+    expect(res.status).toBe(401);
+  });
+
+  test('GET /api/reports/trips returns Traccar trip data', async () => {
+    traccar.getDevices.mockResolvedValue([{ id: traccarDeviceId, name: 'Test', uniqueId: 'test', status: 'online', groupId: 5 }]);
+    traccar.getReportTrips.mockResolvedValue([
+      { deviceId: traccarDeviceId, startTime: '2026-06-15T08:00:00Z', endTime: '2026-06-15T09:30:00Z', duration: 5400, startLat: -6.2088, startLon: 106.8456, endLat: -6.4032, endLon: 106.8183, startAddress: 'Jl. A', endAddress: 'Jl. B', distance: 25.5, averageSpeed: 45.2, maxSpeed: 80.5, spentFuel: 5.2, driverName: 'John' },
+    ]);
+
+    const res = await request(app)
+      .get(`/api/reports/trips?deviceId=${traccarDeviceId}&from=2026-06-01T00:00:00Z&to=2026-06-30T00:00:00Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.source).toBe('traccar');
+    expect(res.body.trips.length).toBe(1);
+    expect(res.body.trips[0].duration).toBe(5400);
+    expect(res.body.trips[0].distance).toBe(25.5);
+    expect(res.body.trips[0].averageSpeed).toBe(45.2);
+    expect(res.body.trips[0].maxSpeed).toBe(80.5);
+    expect(res.body.trips[0].driverName).toBe('John');
+    expect(res.body.summary.total).toBe(1);
+    expect(res.body.summary.totalDistance).toBe(25.5);
+  });
+
+  test('GET /api/reports/trips returns MSPF enriched trip data', async () => {
+    traccar.getDevices.mockResolvedValue([]);
+    mspf.getDevice.mockResolvedValue({ id: mspfDeviceId, status: 'WORKING' });
+    mspf.getDeviceTrip.mockResolvedValue([
+      { timeStart: '2026-06-15T08:00:00Z', timeEnd: '2026-06-15T09:00:00Z', positionStart: { lat: -6.2088, lon: 106.8456 }, positionEnd: { lat: -6.4032, lon: 106.8183 } },
+    ]);
+    mspf.getDeviceRoute.mockResolvedValue([
+      { deviceId: mspfDeviceId, latitude: -6.2088, longitude: 106.8456, speed: 0, deviceTime: '2026-06-15T08:00:00Z' },
+      { deviceId: mspfDeviceId, latitude: -6.2500, longitude: 106.8500, speed: 40, deviceTime: '2026-06-15T08:20:00Z' },
+      { deviceId: mspfDeviceId, latitude: -6.3000, longitude: 106.8300, speed: 50, deviceTime: '2026-06-15T08:40:00Z' },
+      { deviceId: mspfDeviceId, latitude: -6.4032, longitude: 106.8183, speed: 0, deviceTime: '2026-06-15T09:00:00Z' },
+    ]);
+
+    const res = await request(app)
+      .get(`/api/reports/trips?deviceId=${mspfDeviceId}&from=2026-06-01T00:00:00Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.source).toBe('mspf');
+    expect(res.body.trips.length).toBe(1);
+    expect(res.body.trips[0].duration).toBe(3600);
+    expect(res.body.trips[0].distance).toBeGreaterThan(0);
+    expect(res.body.trips[0].maxSpeed).toBe(50);
+    expect(res.body.trips[0].averageSpeed).toBeGreaterThan(0);
+    expect(res.body.summary.total).toBe(1);
+  });
+
+  test('GET /api/reports/trips returns empty list when no trips', async () => {
+    traccar.getDevices.mockResolvedValue([{ id: traccarDeviceId, name: 'Test', uniqueId: 'test', status: 'online', groupId: 5 }]);
+    traccar.getReportTrips.mockResolvedValue([]);
+
+    const res = await request(app)
+      .get(`/api/reports/trips?deviceId=${traccarDeviceId}&from=2026-06-01T00:00:00Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.trips).toEqual([]);
+    expect(res.body.summary.total).toBe(0);
+    expect(res.body.summary.totalDistance).toBe(0);
+  });
+});
+
+describe('Summary Reports', () => {
+  let token;
+  const traccarDeviceId = 999997;
+  const mspfDeviceId = 999998;
+
+  beforeAll(async () => {
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'admin', password: 'admin123' });
+    token = login.body.token;
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('GET /api/reports/summary without token returns 401', async () => {
+    const res = await request(app)
+      .get('/api/reports/summary');
+    expect(res.status).toBe(401);
+  });
+
+  test('GET /api/reports/summary returns all devices admin', async () => {
+    traccar.getReportSummary.mockResolvedValue([
+      { deviceId: 1, deviceName: 'Device A', distance: 500, maxSpeed: 80, averageSpeed: 40, spentFuel: 30, engineHours: 10 },
+    ]);
+    mspf.getStatsSummary.mockResolvedValue({
+      data: [{ deviceId: 2, totalMileage: 300, totalDrivingTime: 8 }],
+    });
+
+    const res = await request(app)
+      .get('/api/reports/summary?from=2026-06-01T00:00:00Z&to=2026-06-30T00:00:00Z')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.summaries.length).toBe(2);
+    expect(res.body.total.devices).toBe(2);
+    expect(res.body.total.distance).toBe(800);
+  });
+
+  test('GET /api/reports/summary returns Traccar single device summary', async () => {
+    traccar.getDevices.mockResolvedValue([{ id: traccarDeviceId, name: 'Test', uniqueId: 'test', status: 'online', groupId: 5 }]);
+    traccar.getReportSummary.mockResolvedValue([
+      { deviceId: traccarDeviceId, deviceName: 'Test Device', distance: 250.5, maxSpeed: 95.3, averageSpeed: 42.1, spentFuel: 18.2, engineHours: 6 },
+    ]);
+
+    const res = await request(app)
+      .get(`/api/reports/summary?deviceId=${traccarDeviceId}&from=2026-06-01T00:00:00Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.summaries.length).toBe(1);
+    expect(res.body.summaries[0].source).toBe('traccar');
+    expect(res.body.summaries[0].distance).toBe(250.5);
+    expect(res.body.summaries[0].maxSpeed).toBe(95.3);
+    expect(res.body.summaries[0].spentFuel).toBe(18.2);
+    expect(res.body.summaries[0].engineHours).toBe(6);
+    expect(res.body.total.distance).toBe(250.5);
+  });
+
+  test('GET /api/reports/summary returns enriched MSPF single device summary', async () => {
+    traccar.getDevices.mockResolvedValue([]);
+    mspf.getDevice.mockResolvedValue({ id: mspfDeviceId, status: 'WORKING' });
+    mspf.getDeviceRoute.mockResolvedValue([
+      { deviceId: mspfDeviceId, latitude: -6.2088, longitude: 106.8456, speed: 0, deviceTime: '2026-06-15T08:00:00Z' },
+      { deviceId: mspfDeviceId, latitude: -6.2500, longitude: 106.8500, speed: 40, deviceTime: '2026-06-15T08:20:00Z' },
+      { deviceId: mspfDeviceId, latitude: -6.3000, longitude: 106.8300, speed: 60, deviceTime: '2026-06-15T08:40:00Z' },
+      { deviceId: mspfDeviceId, latitude: -6.4032, longitude: 106.8183, speed: 0, deviceTime: '2026-06-15T09:00:00Z' },
+    ]);
+
+    const res = await request(app)
+      .get(`/api/reports/summary?deviceId=${mspfDeviceId}&from=2026-06-01T00:00:00Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.summaries.length).toBe(1);
+    expect(res.body.summaries[0].source).toBe('mspf');
+    expect(res.body.summaries[0].distance).toBeGreaterThan(0);
+    expect(res.body.summaries[0].maxSpeed).toBe(60);
+    expect(res.body.summaries[0].averageSpeed).toBeGreaterThan(0);
+    expect(res.body.summaries[0].duration).toBe(3600);
+    expect(res.body.summaries[0].spentFuel).toBeNull();
+  });
+
+  test('GET /api/reports/summary returns empty when no devices', async () => {
+    traccar.getReportSummary.mockResolvedValue([]);
+    mspf.getStatsSummary.mockResolvedValue({ data: [] });
+
+    const res = await request(app)
+      .get('/api/reports/summary?from=2026-06-01T00:00:00Z')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.summaries).toEqual([]);
+    expect(res.body.total.devices).toBe(0);
+    expect(res.body.total.distance).toBe(0);
+  });
+});
+
+describe('Event Reports', () => {
+  let token;
+  const traccarDeviceId = 999999;
+
+  beforeAll(async () => {
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'admin', password: 'admin123' });
+    token = login.body.token;
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('GET /api/reports/events without token returns 401', async () => {
+    const res = await request(app).get('/api/reports/events?from=2026-06-01T00:00:00Z');
+    expect(res.status).toBe(401);
+  });
+
+  test('GET /api/reports/events returns Traccar multi-device events (no enrich)', async () => {
+    traccar.getReportEvents.mockResolvedValue([
+      { id: 1, type: 'geofenceEnter', eventTime: '2026-06-15T10:00:00Z', deviceId: 2, geofenceId: 5 },
+      { id: 2, type: 'ignitionOn', eventTime: '2026-06-15T11:00:00Z', deviceId: 3 },
+    ]);
+    mspf.getMspfEvents.mockResolvedValue([]);
+
+    const res = await request(app)
+      .get('/api/reports/events?from=2026-06-01T00:00:00Z&to=2026-06-30T00:00:00Z')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.events.length).toBe(2);
+    expect(res.body.events[0].name).toBeNull();
+    expect(res.body.events[0].status).toBe('OPEN');
+    expect(res.body.summary.total).toBe(2);
+  });
+
+  test('GET /api/reports/events returns Traccar single device with enriched names', async () => {
+    traccar.getDevices.mockResolvedValue([{ id: traccarDeviceId, name: 'Test', uniqueId: 'test', status: 'online', groupId: 5 }]);
+    traccar.getReportEvents.mockResolvedValue([
+      { id: 1, type: 'geofenceEnter', eventTime: '2026-06-15T10:00:00Z', deviceId: traccarDeviceId, geofenceId: 5 },
+      { id: 2, type: 'ignitionOn', eventTime: '2026-06-15T11:00:00Z', deviceId: traccarDeviceId },
+    ]);
+    traccar.getGeofences.mockResolvedValue([
+      { id: 5, name: 'Gudang A' },
+    ]);
+
+    const res = await request(app)
+      .get(`/api/reports/events?deviceId=${traccarDeviceId}&from=2026-06-01T00:00:00Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.events.length).toBe(2);
+    expect(res.body.events[0].name).toBe('Ignition ON');
+    expect(res.body.events[0].status).toBe('OPEN');
+    expect(res.body.events[1].name).toBe('Gudang A');
+    expect(res.body.events[1].status).toBe('OPEN');
+    expect(res.body.events[1].geofenceId).toBe(5);
+    expect(res.body.summary.total).toBe(2);
+  });
+
+  test('GET /api/reports/events filters by status and name', async () => {
+    traccar.getDevices.mockResolvedValue([{ id: traccarDeviceId, name: 'Test', uniqueId: 'test', status: 'online', groupId: 5 }]);
+    traccar.getReportEvents.mockResolvedValue([
+      { id: 1, type: 'geofenceEnter', eventTime: '2026-06-15T10:00:00Z', deviceId: traccarDeviceId, geofenceId: 5 },
+      { id: 2, type: 'geofenceExit', eventTime: '2026-06-15T12:00:00Z', deviceId: traccarDeviceId, geofenceId: 5 },
+    ]);
+    traccar.getGeofences.mockResolvedValue([{ id: 5, name: 'Gudang A' }]);
+
+    const res = await request(app)
+      .get(`/api/reports/events?deviceId=${traccarDeviceId}&from=2026-06-01T00:00:00Z&status=OPEN`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.events.length).toBe(1);
+    expect(res.body.events[0].status).toBe('OPEN');
+    expect(res.body.summary.total).toBe(1);
+  });
+});
+
+describe('Dashboard', () => {
+  let token;
+
+  beforeAll(async () => {
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'admin', password: 'admin123' });
+    token = login.body.token;
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('GET /api/dashboard returns device stats and running status without from', async () => {
+    const cache = require('../services/cache');
+    cache.set('devices:merged', [
+      { id: 1, source: 'traccar', status: 'online', running: 'RUN' },
+      { id: 2, source: 'traccar', status: 'offline', running: 'STOP' },
+      { id: 3, source: 'mspf', status: 'online', running: 'IDLING' },
+    ], 120);
+
+    const res = await request(app)
+      .get('/api/dashboard')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.devices.total).toBe(3);
+    expect(res.body.devices.online).toBe(2);
+    expect(res.body.devices.offline).toBe(1);
+    expect(res.body.devices.bySource.traccar).toBe(2);
+    expect(res.body.devices.bySource.mspf).toBe(1);
+    expect(res.body.runningStatus.RUN).toBe(1);
+    expect(res.body.runningStatus.IDLING).toBe(1);
+    expect(res.body.runningStatus.STOP).toBe(1);
+    expect(res.body.summary).toBeNull();
+  });
+
+  test('GET /api/dashboard returns summary when from is provided', async () => {
+    const cache = require('../services/cache');
+    cache.set('devices:merged', [
+      { id: 1, source: 'traccar', status: 'online', running: 'RUN' },
+    ], 120);
+
+    traccar.getReportSummary.mockResolvedValue([
+      { deviceId: 1, deviceName: 'Test', distance: 500, maxSpeed: 80, averageSpeed: 40, spentFuel: 30, engineHours: 10 },
+    ]);
+    mspf.getStatsSummary.mockResolvedValue({ data: [] });
+
+    const res = await request(app)
+      .get('/api/dashboard?from=2026-06-01T00:00:00Z')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.summary.totalDistance).toBe(500);
+    expect(res.body.summary.totalFuel).toBe(30);
+    expect(res.body.summary.totalEngineHours).toBe(10);
+    expect(res.body.summary.totalDrivingHours).toBeDefined();
+  });
+
+  test('GET /api/dashboard without token returns 401', async () => {
+    const res = await request(app).get('/api/dashboard');
     expect(res.status).toBe(401);
   });
 });

@@ -341,6 +341,382 @@ Mengembalikan riwayat posisi device dalam range waktu tertentu. Format mengikuti
 
 ---
 
+### GET /api/reports/parking
+
+Mengembalikan riwayat parking device dalam range waktu tertentu. Data dari Traccar difilter hanya `engineHours == 0` (parkir, mesin mati). Idle (mesin hidup tapi diam) tidak termasuk.
+
+> Gateway otomatis mendeteksi sumber device (Traccar/MSPF) melalui cache atau probing.
+> **Access control:** Admin melihat semua data. Customer hanya bisa akses device yang ada di group assign-nya (403 jika tidak punya akses).
+
+**Query Parameters:**
+
+| Parameter | Tipe | Wajib | Deskripsi |
+|-----------|------|-------|-----------|
+| `deviceId` | integer | ✅ | Device ID |
+| `group` | string | - | Group/BC ID (membantu routing) |
+| `from` | string | ✅ | ISO 8601 — awal range |
+| `to` | string | - | ISO 8601 — akhir range (default: sekarang) |
+
+**Response 200 — Traccar device:**
+```json
+{
+  "deviceId": 2,
+  "source": "traccar",
+  "period": { "from": "2026-06-01T00:00:00Z", "to": "2026-06-30T00:00:00Z" },
+  "parking": [
+    {
+      "startTime": "2026-06-15T10:00:00Z",
+      "endTime": "2026-06-15T10:30:00Z",
+      "duration": 1800,
+      "latitude": -6.2088,
+      "longitude": 106.8456,
+      "address": "Jl. Sudirman, Jakarta"
+    }
+  ],
+  "summary": {
+    "total": 1,
+    "totalDuration": 1800
+  }
+}
+```
+
+**Response 200 — MSPF device:**
+```json
+{
+  "deviceId": 10258579,
+  "source": "mspf",
+  "period": { "from": "2026-06-01T00:00:00Z", "to": "2026-06-30T00:00:00Z" },
+  "parking": [
+    {
+      "startTime": "2026-06-15T12:00:00Z",
+      "endTime": "2026-06-15T13:30:00Z",
+      "duration": 5400,
+      "latitude": -7.3235,
+      "longitude": 112.7410,
+      "address": null
+    }
+  ],
+  "summary": {
+    "total": 1,
+    "totalDuration": 5400
+  }
+}
+```
+
+---
+
+### GET /api/reports/idle
+
+Mengembalikan riwayat idle device (mesin hidup, kendaraan diam) dalam range waktu tertentu.
+
+> **Traccar:** Akurat — filter `engineHours > 0` dari endpoint `/api/reports/stops`.
+> **MSPF:** Approximate — dihitung dari route history (posisi dengan `speed=0` & `ignition=true`).
+>
+> Gateway otomatis mendeteksi sumber device (Traccar/MSPF) melalui cache atau probing.
+> **Access control:** Admin melihat semua data. Customer hanya bisa akses device yang ada di group assign-nya (403 jika tidak punya akses).
+
+**Query Parameters:**
+
+| Parameter | Tipe | Wajib | Deskripsi |
+|-----------|------|-------|-----------|
+| `deviceId` | integer | ✅ | Device ID |
+| `group` | string | - | Group/BC ID (membantu routing) |
+| `from` | string | ✅ | ISO 8601 — awal range |
+| `to` | string | - | ISO 8601 — akhir range (default: sekarang) |
+
+**Response 200 — Traccar device:**
+```json
+{
+  "deviceId": 2,
+  "source": "traccar",
+  "period": { "from": "2026-06-01T00:00:00Z", "to": "2026-06-30T00:00:00Z" },
+  "idle": [
+    {
+      "startTime": "2026-06-15T11:00:00Z",
+      "endTime": "2026-06-15T11:15:00Z",
+      "duration": 900,
+      "latitude": -6.2090,
+      "longitude": 106.8460,
+      "address": "Jl. Thamrin, Jakarta"
+    }
+  ],
+  "summary": {
+    "total": 1,
+    "totalDuration": 900
+  }
+}
+```
+
+**Response 200 — MSPF device:**
+```json
+{
+  "deviceId": 10258579,
+  "source": "mspf",
+  "period": { "from": "2026-06-01T00:00:00Z", "to": "2026-06-30T00:00:00Z" },
+  "idle": [
+    {
+      "startTime": "2026-06-15T09:05:00Z",
+      "endTime": "2026-06-15T09:15:00Z",
+      "duration": 600,
+      "latitude": -7.3235,
+      "longitude": 112.7410,
+      "address": null
+    }
+  ],
+  "summary": {
+    "total": 1,
+    "totalDuration": 600
+  }
+}
+```
+
+---
+
+### GET /api/reports/trips
+
+Mengembalikan riwayat perjalanan device dalam range waktu tertentu.
+
+> **Traccar:** Data lengkap dari `/api/reports/trips` dengan speed (knots→km/h) dan distance (meters→km).
+> **MSPF:** Data trip dari `/v4/stats/devices/{id}/trip` diperkaya dengan distance (akumulasi Haversine via route), averageSpeed, dan maxSpeed.
+>
+> Gateway otomatis mendeteksi sumber device (Traccar/MSPF) melalui cache atau probing.
+> **Access control:** Admin melihat semua data. Customer hanya bisa akses device yang ada di group assign-nya (403 jika tidak punya akses).
+
+**Query Parameters:**
+
+| Parameter | Tipe | Wajib | Deskripsi |
+|-----------|------|-------|-----------|
+| `deviceId` | integer | ✅ | Device ID |
+| `group` | string | - | Group/BC ID (membantu routing) |
+| `from` | string | ✅ | ISO 8601 — awal range |
+| `to` | string | - | ISO 8601 — akhir range (default: sekarang) |
+
+**Response 200 — Traccar device:**
+```json
+{
+  "deviceId": 2,
+  "source": "traccar",
+  "period": { "from": "2026-06-01T00:00:00Z", "to": "2026-06-30T00:00:00Z" },
+  "trips": [
+    {
+      "startTime": "2026-06-15T08:00:00Z",
+      "endTime": "2026-06-15T09:30:00Z",
+      "duration": 5400,
+      "startLatitude": -6.2088,
+      "startLongitude": 106.8456,
+      "endLatitude": -6.4032,
+      "endLongitude": 106.8183,
+      "startAddress": "Jl. A, Jakarta",
+      "endAddress": "Jl. B, Jakarta",
+      "distance": 25.5,
+      "averageSpeed": 45.2,
+      "maxSpeed": 80.5,
+      "spentFuel": 5.2,
+      "driverName": "John"
+    }
+  ],
+  "summary": {
+    "total": 1,
+    "totalDuration": 5400,
+    "totalDistance": 25.5
+  }
+}
+```
+
+**Response 200 — MSPF device:**
+```json
+{
+  "deviceId": 10258579,
+  "source": "mspf",
+  "period": { "from": "2026-06-01T00:00:00Z", "to": "2026-06-30T00:00:00Z" },
+  "trips": [
+    {
+      "startTime": "2026-06-15T08:00:00Z",
+      "endTime": "2026-06-15T09:00:00Z",
+      "duration": 3600,
+      "startLatitude": -6.2088,
+      "startLongitude": 106.8456,
+      "endLatitude": -6.4032,
+      "endLongitude": 106.8183,
+      "distance": 24.8,
+      "averageSpeed": 24.8,
+      "maxSpeed": 50
+    }
+  ],
+  "summary": {
+    "total": 1,
+    "totalDuration": 3600,
+    "totalDistance": 24.8
+  }
+}
+```
+
+---
+
+### GET /api/reports/summary
+
+Mengembalikan ringkasan device dalam range waktu tertentu. Bisa per-device, per-group, atau semua device.
+
+> **Traccar:** Data lengkap dari `/api/reports/summary` — distance, maxSpeed, averageSpeed, spentFuel, engineHours.
+> **MSPF:** Single device — enriched dari route (distance, maxSpeed, averageSpeed, duration). Multi-device — dari `stats/summary` (totalMileage, totalDrivingTime). `maxSpeed`/`averageSpeed` = null untuk multi-device.
+>
+> Gateway otomatis mendeteksi sumber device (Traccar/MSPF) melalui cache atau probing.
+> **Access control:** Admin melihat semua data. Customer hanya melihat device yang ada di group assign-nya.
+
+**Query Parameters:**
+
+| Parameter | Tipe | Wajib | Deskripsi |
+|-----------|------|-------|-----------|
+| `deviceId` | integer | - | Filter by single device |
+| `group` | integer | - | Filter by custom group ID |
+| `from` | string | ✅ | ISO 8601 — awal range |
+| `to` | string | - | ISO 8601 — akhir range |
+
+> Jika `deviceId` dan `group` tidak diberikan, mengembalikan semua device (difilter sesuai role).
+
+**Response 200 — Traccar single device:**
+```json
+{
+  "deviceId": 2,
+  "source": "traccar",
+  "period": { "from": "2026-06-01T00:00:00Z", "to": "2026-06-30T00:00:00Z" },
+  "summaries": [
+    {
+      "deviceId": 2,
+      "deviceName": "Concox et200",
+      "source": "traccar",
+      "distance": 1250.5,
+      "maxSpeed": 120.3,
+      "averageSpeed": 45.2,
+      "duration": 54000,
+      "engineHours": 42,
+      "spentFuel": 85.5
+    }
+  ],
+  "total": { "devices": 1, "distance": 1250.5, "duration": 54000 }
+}
+```
+
+**Response 200 — MSPF single device (enriched):**
+```json
+{
+  "deviceId": 10258579,
+  "source": "mspf",
+  "period": { "from": "2026-06-01T00:00:00Z", "to": "2026-06-30T00:00:00Z" },
+  "summaries": [
+    {
+      "deviceId": 10258579,
+      "deviceName": "Box Cooler 5",
+      "source": "mspf",
+      "distance": 890.2,
+      "maxSpeed": 80.5,
+      "averageSpeed": 35.0,
+      "duration": 36000,
+      "engineHours": 36000,
+      "spentFuel": null
+    }
+  ],
+  "total": { "devices": 1, "distance": 890.2, "duration": 36000 }
+}
+```
+
+**Response 200 — All devices (admin):**
+```json
+{
+  "period": { "from": "2026-06-01T00:00:00Z", "to": "2026-06-30T00:00:00Z" },
+  "summaries": [
+    { "deviceId": 1, "deviceName": "Device A", "source": "traccar", "distance": 500, "maxSpeed": 80, "averageSpeed": 40, "duration": 20000, "engineHours": 10, "spentFuel": 30 },
+    { "deviceId": 2, "deviceName": "Device B", "source": "mspf", "distance": 300, "maxSpeed": null, "averageSpeed": null, "duration": 8000, "engineHours": 8000, "spentFuel": null }
+  ],
+  "total": { "devices": 2, "distance": 800, "duration": 28000 }
+}
+```
+
+---
+
+### GET /api/reports/events
+
+Mengembalikan riwayat event device dalam range waktu tertentu. Mendukung Traccar (event built-in) dan MSPF (monitor-based events).
+
+> **Traccar:** Event dari `/api/reports/events` — type built-in (`geofenceEnter`, `ignitionOn`, dll). Status `OPEN`/`CLOSE` did derive dari type. Nama geofence di-enrich dari `GET /geofences` (single device).
+> **MSPF:** Event dari `/v4/events` + `/v4/closed-events` — `monitorName` sebagai type, native `openedAt`/`closedAt`.
+>
+> **Multi-device:** Cepat, tanpa enrich nama. **Single device:** Lengkap dengan nama event & device.
+> **Access control:** Admin semua, customer hanya device di group assign-nya.
+
+**Query Parameters:**
+
+| Parameter | Tipe | Wajib | Deskripsi |
+|-----------|------|-------|-----------|
+| `deviceId` | integer | - | Single device (enriched) |
+| `group` | integer | - | Filter by custom group ID |
+| `from` | string | ✅ | ISO 8601 — awal range |
+| `to` | string | - | ISO 8601 — akhir range |
+| `status` | string | - | Filter: `OPEN` atau `CLOSE` |
+| `name` | string | - | Cari event berdasarkan nama |
+
+**Response 200 — single device (Traccar):**
+```json
+{
+  "deviceId": 2,
+  "source": "traccar",
+  "period": { "from": "...", "to": "..." },
+  "events": [
+    {
+      "name": "Gudang A",
+      "eventTime": "2026-06-15T10:00:00Z",
+      "status": "OPEN",
+      "deviceId": 2,
+      "source": "traccar",
+      "geofenceId": 5
+    },
+    {
+      "name": "Ignition ON",
+      "eventTime": "2026-06-15T11:00:00Z",
+      "status": "OPEN",
+      "deviceId": 2,
+      "source": "traccar"
+    }
+  ],
+  "summary": { "total": 2, "open": 2, "closed": 0 }
+}
+```
+
+**Response 200 — single device (MSPF):**
+```json
+{
+  "deviceId": 10258579,
+  "source": "mspf",
+  "period": { "from": "...", "to": "..." },
+  "events": [
+    {
+      "name": "Voltage Alert",
+      "eventTime": "2026-06-15T12:00:00Z",
+      "status": "OPEN",
+      "deviceId": 10258579,
+      "source": "mspf",
+      "monitorId": 3,
+      "openedAt": "2026-06-15T12:00:00Z",
+      "closedAt": null
+    }
+  ],
+  "summary": { "total": 1, "open": 1, "closed": 0 }
+}
+```
+
+**Response 200 — multi-device (admin):**
+```json
+{
+  "period": { "from": "...", "to": "..." },
+  "events": [
+    { "name": null, "eventTime": "2026-06-15T10:00:00Z", "status": "OPEN", "deviceId": 2, "source": "traccar" }
+  ],
+  "summary": { "total": 1 }
+}
+```
+
+---
+
 ## 5. Commands
 
 ### POST /api/commands
@@ -764,7 +1140,61 @@ Mengembalikan daftar atribut yang akan muncul di FE untuk group tertentu. Atribu
 
 ---
 
-## 8. Health
+## 8. Dashboard
+
+### GET /api/dashboard
+
+Mengembalikan ringkasan dashboard untuk tampilan awal aplikasi. Menggabungkan device stats, running status, summary period, dan recent events dalam 1 response.
+
+> **Data device** dari cache (device:merged). **Summary** hanya jika `from` diberikan.
+> **Access control:** Admin semua device. Customer hanya device di group assign-nya.
+
+**Query Parameters:**
+
+| Parameter | Tipe | Wajib | Deskripsi |
+|-----------|------|-------|-----------|
+| `from` | string | - | ISO 8601 — untuk summary period |
+| `to` | string | - | ISO 8601 — akhir range |
+
+**Response 200:**
+```json
+{
+  "period": { "from": "2026-06-01T00:00:00Z", "to": "2026-06-30T00:00:00Z" },
+  "devices": {
+    "total": 139,
+    "online": 85,
+    "offline": 54,
+    "bySource": { "traccar": 45, "mspf": 94 }
+  },
+  "runningStatus": {
+    "RUN": 32, "IDLING": 12, "STOP": 85, "TOWING": 3, "UNKNOWN": 7
+  },
+  "summary": {
+    "totalDistance": 1250.5,
+    "totalDrivingHours": 15.0,
+    "totalFuel": 85.5,
+    "totalEngineHours": 42
+  },
+  "recentEvents": [
+    { "name": "Ignition ON", "eventTime": "2026-06-15T10:00:00Z", "deviceId": 2, "source": "traccar" }
+  ]
+}
+```
+
+**Response 200 (tanpa `from` — summary = null):**
+```json
+{
+  "period": { "from": null, "to": "..." },
+  "devices": { "total": 139, "online": 85, "offline": 54, "bySource": { "traccar": 45, "mspf": 94 } },
+  "runningStatus": { "RUN": 32, "IDLING": 12, "STOP": 85, "TOWING": 3, "UNKNOWN": 7 },
+  "summary": null,
+  "recentEvents": []
+}
+```
+
+---
+
+## 9. Health
 
 ### GET /health
 
@@ -791,7 +1221,7 @@ Mengembalikan daftar atribut yang akan muncul di FE untuk group tertentu. Atribu
 
 ---
 
-## 8. WebSocket
+## 10. WebSocket
 
 ### Connection
 
@@ -812,6 +1242,10 @@ Dikirim setiap ada update posisi dari Traccar (via WebSocket real-time atau REST
 > - **Admin:** Mendapatkan semua enriched data + hasil custom attributes (rename/compute/passthrough).
 > - **Customer:** Hanya mendapat custom attributes sesuai aturan group device-nya. Jika tidak ada aturan, `attributes: {}`.
 
+**Root fields (selalu ada untuk semua role):** `deviceId`, `latitude`, `longitude`, `speed`, `course`*, `altitude`, `deviceTime`, `valid`, `source`, **`voltage`**, **`internalBattery`**, **`batteryLevel`**, **`ignition`**.
+
+> \* `course` untuk MSPF device di-enrich dari MCCS `mobilityData.dir` jika data raw position tidak ada.
+
 **Admin — enriched + custom attributes:**
 ```json
 {
@@ -823,9 +1257,11 @@ Dikirim setiap ada update posisi dari Traccar (via WebSocket real-time atau REST
   "deviceTime": "2026-06-18T04:05:12Z",
   "valid": true,
   "source": "mspf",
+  "voltage": 13.59,
+  "internalBattery": 3.98,
+  "batteryLevel": 75,
+  "ignition": true,
   "attributes": {
-    "ignition": true,
-    "voltage": 13.59,
     "sats": 16,
     "rssi": -57,
     "running": "IDLING",
@@ -851,6 +1287,10 @@ Dikirim setiap ada update posisi dari Traccar (via WebSocket real-time atau REST
   "deviceTime": "2026-06-18T04:05:12Z",
   "valid": true,
   "source": "mspf",
+  "voltage": 13.59,
+  "internalBattery": 3.98,
+  "batteryLevel": 75,
+  "ignition": true,
   "attributes": {
     "EB": 13.44,
     "AD": 0.017,
@@ -859,9 +1299,11 @@ Dikirim setiap ada update posisi dari Traccar (via WebSocket real-time atau REST
 }
 ```
 
+> `voltage`, `internalBattery`, dan `batteryLevel` selalu muncul di root level, tidak terpengaruh aturan custom attributes.
+
 #### `device-status`
 
-Dikirim bersamaan dengan event `position`, berisi data status device yang sering berubah. Event ini **broadcast sama** ke semua user (tidak difilter per-role seperti `position`).
+Dikirim bersamaan dengan event `position`, berisi data status device yang sering berubah.
 
 ```json
 {
@@ -870,7 +1312,9 @@ Dikirim bersamaan dengan event `position`, berisi data status device yang sering
   "lastUpdate": "2026-06-18T04:05:12Z",
   "running": "IDLING",
   "ignition": true,
-  "voltage": 13.59
+  "voltage": 13.59,
+  "internalBattery": 3.98,
+  "batteryLevel": 75
 }
 ```
 
@@ -902,7 +1346,7 @@ Dikirim sebagai konfirmasi eksekusi command.
 
 ---
 
-## 9. Error Codes
+## 11. Error Codes
 
 | HTTP | Code | Arti |
 |------|------|------|

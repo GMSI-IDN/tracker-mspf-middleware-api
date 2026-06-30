@@ -20,6 +20,7 @@ const groupsAdminRoutes = require('./routes/groupsAdmin');
 const deviceGroupsRoutes = require('./routes/deviceGroups');
 const groupSyncRoutes = require('./routes/groupSync');
 const customAttributesRoutes = require('./routes/customAttributes');
+const dashboardRoutes = require('./routes/dashboard');
 
 const app = express();
 
@@ -48,6 +49,7 @@ app.use('/api/admin/groups', authMiddleware, adminOnly, groupsAdminRoutes);
 app.use('/api/admin/device-groups', authMiddleware, adminOnly, deviceGroupsRoutes);
 app.use('/api/admin/group-sync', authMiddleware, adminOnly, groupSyncRoutes);
 app.use('/api/admin/custom-attributes', authMiddleware, adminOnly, customAttributesRoutes);
+app.use('/api/dashboard', authMiddleware, dashboardRoutes);
 
 app.use(errorHandler);
 

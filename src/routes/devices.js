@@ -20,6 +20,10 @@ function normalizeTraccarDevice(d) {
     phone: d.phone || undefined, model: d.model || undefined,
     source: 'traccar', group: `traccar_${d.groupId}`,
     lastUpdate: d.lastUpdate || undefined,
+    voltage: d.attributes?.power ?? undefined,
+    internalBattery: d.attributes?.addr_IB ?? undefined,
+    batteryLevel: d.attributes?.batteryLevel ?? undefined,
+    ignition: d.attributes?.ignition ?? undefined,
     attributes: d.attributes || {},
   };
 }
@@ -110,7 +114,7 @@ router.get('/', async (req, res, next) => {
 
       merged = [];
       let traccarCount = 0, mspfCount = 0;
-      if (traccarResult.status === 'fulfilled') {
+      if (traccarResult.status === 'fulfilled' && traccarResult.value) {
         const mapped = traccarResult.value.map(normalizeTraccarDevice);
         merged.push(...mapped);
         traccarCount = mapped.length;
