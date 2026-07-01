@@ -115,7 +115,7 @@ async function emitPosition(data) {
     const user = socket.user;
     if (!user) continue;
     if (user.role !== 'admin' && !socket.allowedDevices.has(`${data.source}:${data.deviceId}`)) {
-      console.log(`[WS] ${user.username}: ${data.source}:${data.deviceId} BLOCKED (${socket.allowedDevices?.size || 0} allowed)`);
+      // console.log(`[WS] ${user.username}: ${data.source}:${data.deviceId} BLOCKED (${socket.allowedDevices?.size || 0} allowed)`);
       continue;
     }
     if (user.role !== 'admin') {
@@ -193,11 +193,23 @@ function getActiveMspfDeviceIds() {
   return lastKnownMspfIds;
 }
 
+function getMspfBcIds() {
+  try {
+    const cache = require('../services/cache');
+    const merged = cache.get('devices:merged');
+    if (!merged) return [];
+    return [...new Set(merged
+      .filter(d => d.source === 'mspf' && d.group)
+      .map(d => parseInt(d.group.replace('mspf_', ''), 10))
+    )];
+  } catch { return []; }
+}
+
 function startMspfPolling() {
   if (mspfPollTimer) clearInterval(mspfPollTimer);
   mspfPollTimer = setInterval(async () => {
     try {
-      const data = await mspf.getPositions({ limit: 1000 });
+      const data = await mspf.getPositions({ limit: 1000, bc: getMspfBcIds() });
       if (data && data.length > 0) {
         const activeIds = getActiveMspfDeviceIds();
         const filtered = activeIds ? data.filter(p => activeIds.has(p.deviceId)) : data;

@@ -238,7 +238,10 @@ Tanpa filter, mengembalikan posisi terbaru dari semua device yang aktif.
 | `group` | string | Group/BC ID |
 | `from` | string | ISO 8601 — awal waktu (untuk history) |
 | `to` | string | ISO 8601 — akhir waktu (untuk history) |
-| `limit` | integer | Jumlah data (max 1000) |
+| `offset` | integer | Offset untuk pagination (default: 0) |
+| `limit` | integer | Jumlah data per halaman (max 1000, default: 100) |
+
+> **Note:** Data positions di-refresh otomatis setiap 10 detik oleh background sync. Request FE tinggal baca dari cache — response dalam <10ms.
 
 > **Access control:** Admin mendapat enriched data + custom attributes. Customer hanya mendapat custom attributes sesuai aturan grup (sama seperti WebSocket `position`).
 
@@ -284,6 +287,8 @@ Mengembalikan riwayat posisi device dalam range waktu tertentu. Format mengikuti
 
 > Gateway otomatis mendeteksi sumber device (Traccar/MSPF) melalui cache. Jika belum ada di cache, Gateway akan probing langsung ke kedua backend untuk menemukan device-nya.
 > **Access control:** Admin mendapat enriched data + custom attributes (rename/compute). Customer hanya mendapat custom attributes sesuai aturan grup device-nya.
+>
+> **⚠️ Limitasi MSPF:** Range `from` dan `to` maksimal **7 hari**. Jika lebih, return `ERR_VALIDATION`.
 >
 > **Query Parameters:**
 

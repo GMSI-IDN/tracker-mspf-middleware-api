@@ -71,6 +71,14 @@ function getApi() {
   return mspfApi;
 }
 
+async function waitForInit(timeout = 15000) {
+  const start = Date.now();
+  while (!mspfApi) {
+    if (Date.now() - start > timeout) throw new Error('MSPF init timeout');
+    await new Promise(r => setTimeout(r, 200));
+  }
+}
+
 // ── Normalizers ───────────────────────────────────────
 
 function normalizeDevice(d) {
@@ -123,31 +131,16 @@ function normalizePositionsResponse(data) {
 
 // ── MCCS Data History ────────────────────────────────────
 
-const mccsDataCache = {};
-const mccsCacheOrder = [];
-let MCCS_CACHE_TTL = 10000;
-let MCCS_CACHE_MAX = 200;
+const NodeCache = require('node-cache');
+let mccsCacheTtl = 10000;
 try {
   const cfg = require('../config');
-  MCCS_CACHE_TTL = cfg.mspf.cacheTtl;
+  mccsCacheTtl = cfg.mspf.cacheTtl;
 } catch {}
-
-function setMccsCache(id, data) {
-  mccsDataCache[id] = { data, ts: Date.now() };
-  const pos = mccsCacheOrder.indexOf(id);
-  if (pos >= 0) mccsCacheOrder.splice(pos, 1);
-  mccsCacheOrder.push(id);
-  while (mccsCacheOrder.length > MCCS_CACHE_MAX) {
-    const oldest = mccsCacheOrder.shift();
-    delete mccsDataCache[oldest];
-  }
-}
-
-function getMccsCache(id) {
-  const entry = mccsDataCache[id];
-  if (!entry || (Date.now() - entry.ts) > MCCS_CACHE_TTL) return undefined;
-  return entry.data;
-}
+const mccsCache = new NodeCache({
+  stdTTL: Math.ceil(mccsCacheTtl / 1000),
+  checkperiod: 5,
+});
 
 async function getLatestMccsData(deviceId) {
   try {
@@ -175,19 +168,23 @@ async function getBatchMccsData(deviceIds, statusMap = {}) {
   });
 
   const results = {};
-  const toFetch = activeIds.filter(id => getMccsCache(id) === undefined);
-  const fromCache = activeIds.filter(id => getMccsCache(id) !== undefined);
+  const fromCacheIds = activeIds.filter(id => mccsCache.has(id));
 
-  for (const id of fromCache) results[id] = getMccsCache(id);
+  for (const id of fromCacheIds) results[id] = mccsCache.get(id);
   for (const id of ids.filter(id => !activeIds.includes(id))) results[id] = null;
 
+  const toFetch = activeIds.filter(id => !mccsCache.has(id));
   if (toFetch.length > 0) {
-    const fetched = await Promise.allSettled(toFetch.map(id => getLatestMccsData(id)));
-    for (let i = 0; i < toFetch.length; i++) {
-      const id = toFetch[i];
-      const data = fetched[i].status === 'fulfilled' ? fetched[i].value : null;
-      if (data) setMccsCache(id, data);
-      results[id] = data;
+    const CONCURRENCY = 10;
+    for (let i = 0; i < toFetch.length; i += CONCURRENCY) {
+      const batch = toFetch.slice(i, i + CONCURRENCY);
+      const fetched = await Promise.allSettled(batch.map(id => getLatestMccsData(id)));
+      for (let j = 0; j < batch.length; j++) {
+        const id = batch[j];
+        const data = fetched[j].status === 'fulfilled' ? fetched[j].value : null;
+        if (data) { try { mccsCache.set(id, data); } catch {} }
+        results[id] = data;
+      }
     }
   }
 
@@ -237,7 +234,8 @@ async function enrichPositions(positions) {
     for (const s of statusResult.data) statusMap[s.deviceId] = s;
   }
 
-  const mccsMap = await getBatchMccsData(deviceIds, statusMap);
+  let mccsMap = {};
+  try { mccsMap = await getBatchMccsData(deviceIds, statusMap); } catch {};
 
   return positions.map(p => {
     const st = statusMap[p.deviceId];
@@ -403,9 +401,17 @@ async function getBc(bcId) {
 }
 
 async function getPositions(params = {}) {
-  const res = await getApi().get('/v3/devices/positions', { params });
-  const positions = normalizePositionsResponse(res.data);
-  return enrichPositions(positions);
+  let all = [];
+  let start = undefined;
+  do {
+    const query = { ...params, limit: 1000 };
+    if (start) query.start = start;
+    const res = await getApi().get('/v3/devices/positions', { params: query });
+    const page = normalizePositionsResponse(res.data);
+    all.push(...page);
+    start = res.data.next;
+  } while (start);
+  return enrichPositions(all);
 }
 
 async function getDeviceRoute(deviceId, params = {}) {
@@ -484,7 +490,7 @@ async function getMspfClosedEvents(params = {}) {
 }
 
 module.exports = {
-  init, getApi, normalizeDevice, normalizePosition, enrichDevice,
+  init, waitForInit, getApi, normalizeDevice, normalizePosition, enrichDevice,
   getDevices, searchDevices, getDevice, getBcList, getBc,
   getPositions, getDeviceRoute,
   getDeviceStatus, getDeviceStatusList,

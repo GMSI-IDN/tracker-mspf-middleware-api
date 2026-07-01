@@ -111,3 +111,21 @@
 | **Course enrichment MSPF** — `enrichPositions` pakai `mccs.dir` untuk root `course` jika raw position 0 | ✅ |
 | **Ignition di root** — semua endpoint (WS, positions, devices) extract `ignition` ke root level | ✅ |
 | **Fix MSPF positions limit** — hapus cap 200, pakai `limit` dari query langsung (max 1000) | ✅ |
+| **MSPF positions pagination + BC filter** — `getPositions` pagination loop page 1000 + filter `bc[]` dari cache device | ✅ |
+| **MSPF BC extract** — `getMspfBcIds()` helper di positions route + websocket, extract bcId unik dari cache `devices:merged` | ✅ |
+| **MCCS concurrency limit** — `getBatchMccsData` batch 10 request per Promise.allSettled, cegah 504 timeout | ✅ |
+| **Background position sync** — `positionSync.js` fetch+enrich setiap 10 detik, cache `positions:merged` TTL 30s | ✅ |
+| **Positions pagination** — `GET /api/positions` pake `offset` + `limit`, baca dari cache (instan) | ✅ |
+| **Backup posision mute** — `console.log` WS BLOCKED di-disable, `PositionSync` count log ganti memory stats | ✅ |
+| **Traccar positions tanpa limit** — hapus `limit: 1000` di `getPositions()` biar aman >1000 device | ✅ |
+| **MCCS cache → NodeCache** — NodeCache stdTTL 10s, try-catch guard, tanpa maxKeys | ✅ |
+| **EnrichPositions graceful** — `getBatchMccsData` di try-catch, error tidak propagasi ke positions | ✅ |
+| **PositionSync guard** — cek `mspfResult.status !== 'fulfilled'`, bukan `positions.length === 0` (yang lolos saat Traccar sukses) | ✅ |
+| **Device cache eager startup** — `server.js` build `devices:merged` sebelum `startPositionSync`, tidak perlu nunggu hit FE | ✅ |
+| **PositionSync skip** — jika BC IDs kosong (device cache belum ready), skip sync + log warning | ✅ |
+| **PositionSync log MSPF error** — log `[PositionSync] MSPF failed: ...` saat MSPF gagal | ✅ |
+| **PositionSync BC fallback** — jika device cache kosong, fetch `getBcList()` dari MSPF API langsung | ✅ |
+| **PositionSync per-source log** — `cached: traccar X/exp, mspf Y/exp` untuk monitoring | ✅ |
+| **waitForInit** — `server.js` tunggu OAuth siap sebelum `mspf.getDevices()` di build cache | ✅ |
+| **PositionSync device cache expired guard** — jika `activeIds = null`, **rebuild otomatis** device cache + retry sync | ✅ |
+| **Route date range validation** — MSPF max 7 hari, error jelas `Date range max 7 days for MSPF devices` | ✅ |

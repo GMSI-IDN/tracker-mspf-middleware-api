@@ -59,6 +59,14 @@ router.get('/route', async (req, res, next) => {
       if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
     }
 
+    if (devSource === 'mspf' && from && to) {
+      const fromMs = new Date(from).getTime();
+      const toMs = new Date(to).getTime();
+      if (toMs - fromMs > 7 * 24 * 3600 * 1000) {
+        throw createError(400, 'Date range max 7 days for MSPF devices', { code: 'ERR_VALIDATION' });
+      }
+    }
+
     let positions;
     if (devSource === 'traccar') {
       const data = await traccar.getPositions({ deviceId: idNum, from, to });
