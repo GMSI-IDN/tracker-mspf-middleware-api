@@ -116,6 +116,13 @@ jobs:
             mv /tmp/docker-compose.deploy.yml "$DEPLOY_PATH/docker-compose.yml"
             cd "$DEPLOY_PATH"
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+            docker run --rm \
+              -e PORT -e NODE_ENV -e DB_DRIVER -e DB_PATH -e JWT_SECRET -e JWT_EXPIRY \
+              -e TRACCAR_URL -e TRACCAR_USERNAME -e TRACCAR_PASSWORD \
+              -e MSPF_URL -e MSPF_CLIENT_ID -e MSPF_CLIENT_SECRET -e MSPF_TOKEN_URL \
+              -e CACHE_DEVICE_TTL -e CACHE_PROVIDER -e MCCS_CACHE_TTL \
+              -v "$DEPLOY_PATH/data:/app/data" \
+              "$IMAGE:$IMAGE_TAG" node src/scripts/migrate.js
             docker compose pull
             docker compose up -d
             docker image prune -f

@@ -7,6 +7,7 @@ services:
       - VIRTUAL_HOST=${VIRTUAL_HOST}
       - VIRTUAL_PORT=${PORT}
       - PORT=${PORT}
+      - RUN_MIGRATIONS=false
       - NODE_ENV=${NODE_ENV}
       - DB_DRIVER=${DB_DRIVER}
       - DB_PATH=${DB_PATH}
