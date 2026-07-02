@@ -10,7 +10,7 @@ if (config.dbDriver === 'sqlite3') {
 }
 
 const knexfile = require(path.resolve(rootDir, 'knexfile.js'));
-const env = config.env === 'production' ? 'production' : 'development';
+const env = config.dbDriver === 'pg' ? 'production' : 'development';
 const db = require('knex')(knexfile[env]);
 
 let migrationDone = false;
