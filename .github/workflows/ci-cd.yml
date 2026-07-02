@@ -47,7 +47,8 @@ jobs:
         with:
           context: .
           push: true
-          no-cache: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           tags: |
             ${{ steps.meta.outputs.image }}:${{ github.ref_name }}
             ${{ steps.meta.outputs.image }}:${{ github.ref_name }}-${{ github.sha }}
@@ -116,9 +117,6 @@ jobs:
             cd "$DEPLOY_PATH"
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
             docker pull "$IMAGE:$IMAGE_TAG"
-            echo "--- image /app contents ---"
-            docker run --rm "$IMAGE:$IMAGE_TAG" ls -la /app
-            echo "----------------------------"
             docker run --rm \
               -e PORT -e NODE_ENV -e DB_DRIVER -e DB_PATH -e JWT_SECRET -e JWT_EXPIRY \
               -e TRACCAR_URL -e TRACCAR_USERNAME -e TRACCAR_PASSWORD \
