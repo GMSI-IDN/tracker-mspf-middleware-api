@@ -116,6 +116,9 @@ jobs:
             cd "$DEPLOY_PATH"
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
             docker pull "$IMAGE:$IMAGE_TAG"
+            echo "--- image /app contents ---"
+            docker run --rm "$IMAGE:$IMAGE_TAG" ls -la /app
+            echo "----------------------------"
             docker run --rm \
               -e PORT -e NODE_ENV -e DB_DRIVER -e DB_PATH -e JWT_SECRET -e JWT_EXPIRY \
               -e TRACCAR_URL -e TRACCAR_USERNAME -e TRACCAR_PASSWORD \
