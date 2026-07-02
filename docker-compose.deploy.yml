@@ -3,10 +3,9 @@ services:
     image: ${IMAGE}:${IMAGE_TAG}
     restart: unless-stopped
     environment:
-      # Otomatis untuk nginx-proxy & Let's Encrypt
+      # Otomatis untuk nginx-proxy
       - VIRTUAL_HOST=${VIRTUAL_HOST}
       - VIRTUAL_PORT=${PORT}
-      - LETSENCRYPT_HOST=${VIRTUAL_HOST}
       - PORT=${PORT}
       - NODE_ENV=${NODE_ENV}
       - DB_DRIVER=${DB_DRIVER}
@@ -21,6 +20,7 @@ services:
       - MSPF_CLIENT_SECRET=${MSPF_CLIENT_SECRET}
       - MSPF_TOKEN_URL=${MSPF_TOKEN_URL}
       - CACHE_DEVICE_TTL=${CACHE_DEVICE_TTL}
+      - CACHE_PROVIDER=${CACHE_PROVIDER}
       - MCCS_CACHE_TTL=${MCCS_CACHE_TTL}
       - RATE_LIMIT_WINDOW_MS=${RATE_LIMIT_WINDOW_MS}
       - RATE_LIMIT_MAX=${RATE_LIMIT_MAX}
