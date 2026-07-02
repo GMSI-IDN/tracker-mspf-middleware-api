@@ -1,0 +1,21 @@
+services:
+  gateway:
+    image: ${IMAGE}:${IMAGE_TAG}
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_started
+    volumes:
+      - ./data:/app/data
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:
