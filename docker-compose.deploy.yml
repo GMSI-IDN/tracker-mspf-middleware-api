@@ -33,25 +33,12 @@ services:
       - REQUEST_TIMEOUT=${REQUEST_TIMEOUT}
     expose:
       - "${PORT}"
-    depends_on:
-      redis:
-        condition: service_started
     volumes:
       - ./data:/app/data
     networks:
-      - default
       - net
-
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    volumes:
-      - redis_data:/data
 
 networks:
   net:
     external: true
     name: ${PROXY_NETWORK:-net}
-
-volumes:
-  redis_data:
