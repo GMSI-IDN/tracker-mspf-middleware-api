@@ -1,7 +1,7 @@
 services:
   gateway:
     image: ${IMAGE}:${IMAGE_TAG}
-    container_name: mspf-gateway-${IMAGE_TAG}
+    container_name: mspf-middleware-gateway-${IMAGE_TAG}
     restart: unless-stopped
     environment:
       # Otomatis untuk nginx-proxy
