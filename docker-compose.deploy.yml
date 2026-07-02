@@ -4,7 +4,31 @@ services:
     restart: unless-stopped
     ports:
       - "3000:3000"
-    env_file: .env
+    environment:
+      - PORT=${PORT}
+      - NODE_ENV=${NODE_ENV}
+      - DB_DRIVER=${DB_DRIVER}
+      - DB_PATH=${DB_PATH}
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_EXPIRY=${JWT_EXPIRY}
+      - TRACCAR_URL=${TRACCAR_URL}
+      - TRACCAR_USERNAME=${TRACCAR_USERNAME}
+      - TRACCAR_PASSWORD=${TRACCAR_PASSWORD}
+      - MSPF_URL=${MSPF_URL}
+      - MSPF_CLIENT_ID=${MSPF_CLIENT_ID}
+      - MSPF_CLIENT_SECRET=${MSPF_CLIENT_SECRET}
+      - MSPF_TOKEN_URL=${MSPF_TOKEN_URL}
+      - CACHE_DEVICE_TTL=${CACHE_DEVICE_TTL}
+      - MCCS_CACHE_TTL=${MCCS_CACHE_TTL}
+      - RATE_LIMIT_WINDOW_MS=${RATE_LIMIT_WINDOW_MS}
+      - RATE_LIMIT_MAX=${RATE_LIMIT_MAX}
+      - RATE_LIMIT_AUTH_MAX=${RATE_LIMIT_AUTH_MAX}
+      - WEBSOCKET_PATH=${WEBSOCKET_PATH}
+      - POLL_INTERVAL=${POLL_INTERVAL}
+      - REDIS_URL=${REDIS_URL}
+      - CORS_ORIGIN=${CORS_ORIGIN}
+      - LOG_LEVEL=${LOG_LEVEL}
+      - REQUEST_TIMEOUT=${REQUEST_TIMEOUT}
     depends_on:
       redis:
         condition: service_started
