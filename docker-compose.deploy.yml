@@ -4,9 +4,11 @@ services:
     container_name: mspf-middleware-gateway-${IMAGE_TAG}
     restart: unless-stopped
     environment:
-      # Otomatis untuk nginx-proxy
+      # Otomatis untuk nginx-proxy + acme-companion (HTTPS)
       - VIRTUAL_HOST=${VIRTUAL_HOST}
       - VIRTUAL_PORT=${PORT}
+      - LETSENCRYPT_HOST=${LETSENCRYPT_HOST}
+      - LETSENCRYPT_EMAIL=${LETSENCRYPT_EMAIL}
       - PORT=${PORT}
       - RUN_MIGRATIONS=false
       - NODE_ENV=${NODE_ENV}
