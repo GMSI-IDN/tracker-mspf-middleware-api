@@ -21,6 +21,7 @@ async function buildDeviceCache() {
     for (const d of traccarResult.value) merged.push({
       id: d.id, name: d.name, uniqueId: d.uniqueId,
       status: d.status || 'offline', source: 'traccar', group: `traccar_${d.groupId}`,
+      lastUpdate: d.lastUpdate || (d.attributes?.motionTime ? new Date(d.attributes.motionTime).toISOString() : undefined),
       voltage: d.attributes?.power ?? undefined,
       attributes: d.attributes || {},
     });

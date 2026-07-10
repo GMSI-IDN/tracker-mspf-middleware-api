@@ -19,7 +19,7 @@ function normalizeTraccarDevice(d) {
     status: d.status || 'offline',
     phone: d.phone || undefined, model: d.model || undefined,
     source: 'traccar', group: `traccar_${d.groupId}`,
-    lastUpdate: d.lastUpdate || undefined,
+    lastUpdate: d.lastUpdate || (d.attributes?.motionTime ? new Date(d.attributes.motionTime).toISOString() : undefined),
     voltage: d.attributes?.power ?? undefined,
     internalBattery: d.attributes?.addr_IB ?? undefined,
     batteryLevel: d.attributes?.batteryLevel ?? undefined,
@@ -156,7 +156,11 @@ router.get('/', async (req, res, next) => {
     if (!isAdmin && userGroups.length > 0) {
       for (const d of paged) {
         const rules = await getDeviceRules(d.id, d.source);
-        if (rules.length > 0) applyRules(d, rules);
+        if (rules.length > 0) {
+          const cloned = { ...d, attributes: { ...d.attributes } };
+          applyRules(cloned, rules);
+          Object.assign(d, cloned);
+        }
       }
     }
 
@@ -208,7 +212,11 @@ router.get('/:id', async (req, res, next) => {
     // Apply custom attributes per-device (non-admin only)
     if (!isAdmin && userGroups.length > 0) {
       const rules = await getDeviceRules(device.id, device.source);
-      if (rules.length > 0) applyRules(device, rules);
+      if (rules.length > 0) {
+        const cloned = { ...device, attributes: { ...device.attributes } };
+        applyRules(cloned, rules);
+        Object.assign(device, cloned);
+      }
     }
 
     // Enrich with custom groups
