@@ -90,7 +90,7 @@ function normalizeDevice(d) {
     source: 'mspf', group: `mspf_${d.bcId}`,
     lastUpdate: d.lastCommunicatedAt || undefined,
     voltage: d.tags?.volt ?? undefined,
-    internalBattery: d.tags?.addr_IB ?? undefined,
+    internalBattery: d.tags?.addr_IB ?? mccsCache.get(d.id)?.addr?.IB ?? undefined,
     batteryLevel: undefined,
     ignition: undefined,
     attributes: {
@@ -193,7 +193,7 @@ async function getBatchMccsData(deviceIds, statusMap = {}) {
 
 function normalizeMccsToAttributes(mccsData) {
   if (!mccsData) return {};
-  return {
+  const attrs = {
     tid: mccsData.tid, mid: mccsData.mid, ts: mccsData.ts, code: mccsData.code,
     kph: mccsData.kph, alt: mccsData.alt, dir: mccsData.dir,
     hdop: mccsData.hdop, sats: mccsData.sats,
@@ -209,6 +209,7 @@ function normalizeMccsToAttributes(mccsData) {
     addr_NT: mccsData.addr?.NT,
     addr_x: mccsData.addr?.x, addr_y: mccsData.addr?.y, addr_z: mccsData.addr?.z,
   };
+  return Object.fromEntries(Object.entries(attrs).filter(([_, v]) => v !== undefined));
 }
 
 // ── Enrich positions ─────────────────────────────────────
@@ -348,7 +349,7 @@ async function enrichDevice(device) {
       speed: st.speed,
       sats: st.sats,
     } : {}),
-    internalBattery: enrichedAttrs.addr_IB ?? undefined,
+    internalBattery: enrichedAttrs.mobilityData?.addr?.IB ?? enrichedAttrs.addr_IB ?? undefined,
     batteryLevel: enrichedAttrs.batteryLevel ?? undefined,
     attributes: enrichedAttrs,
   };

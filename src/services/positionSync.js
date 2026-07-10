@@ -91,7 +91,7 @@ async function syncPositions() {
       ]);
       const rebuild = [];
       if (t.status === 'fulfilled' && t.value) {
-        for (const d of t.value) rebuild.push({ id: d.id, name: d.name, uniqueId: d.uniqueId, status: d.status || 'offline', source: 'traccar', group: `traccar_${d.groupId}`, voltage: d.attributes?.power ?? undefined, attributes: d.attributes || {} });
+        for (const d of t.value) rebuild.push({ id: d.id, name: d.name, uniqueId: d.uniqueId, status: d.status || 'offline', source: 'traccar', group: `traccar_${d.groupId}`, lastUpdate: d.lastUpdate || (d.attributes?.motionTime ? new Date(d.attributes.motionTime).toISOString() : undefined), voltage: d.attributes?.power ?? undefined, attributes: d.attributes || {} });
       }
       if (m.status === 'fulfilled' && m.value?.data) rebuild.push(...m.value.data);
       rebuild.sort((a, b) => a.id - b.id || (a.source < b.source ? -1 : 1));

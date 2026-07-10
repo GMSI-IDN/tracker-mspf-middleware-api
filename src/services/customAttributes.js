@@ -43,8 +43,8 @@ function getField(device, path) {
   if (!path) return undefined;
   let val = device[path];
   if (val === undefined) val = device.attributes?.[path];
-  if (val === undefined && !path.startsWith('attributes.')) {
-    val = device['attributes.' + path];
+  if (val === undefined && path.includes('.')) {
+    val = path.split('.').reduce((obj, key) => obj?.[key], device.attributes);
   }
   return val;
 }
