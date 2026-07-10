@@ -99,8 +99,8 @@ function getField(obj, path) {
   if (!path) return undefined;
   let val = obj[path];
   if (val === undefined) val = obj.attributes?.[path];
-  if (val === undefined && !path.startsWith('attributes.')) {
-    val = obj['attributes.' + path];
+  if (val === undefined && path.includes('.')) {
+    val = path.split('.').reduce((o, key) => o?.[key], obj.attributes);
   }
   return val;
 }

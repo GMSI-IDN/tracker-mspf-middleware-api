@@ -129,3 +129,4 @@
 | **waitForInit** — `server.js` tunggu OAuth siap sebelum `mspf.getDevices()` di build cache | ✅ |
 | **PositionSync device cache expired guard** — jika `activeIds = null`, **rebuild otomatis** device cache + retry sync | ✅ |
 | **Route date range validation** — MSPF max 7 hari, error jelas `Date range max 7 days for MSPF devices` | ✅ |
+| **Traccar lastUpdate fallback** — pakai `attributes.motionTime` jika `lastUpdate` null | ✅ |

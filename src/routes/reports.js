@@ -14,17 +14,20 @@ function normalizeTraccarPosition(p) {
 
 async function applyCustomAttributes(positions, user) {
   if (!user) return;
-  for (const pos of positions) {
+  for (let i = 0; i < positions.length; i++) {
+    const pos = positions[i];
     if (!pos.deviceId) continue;
     const rules = await getDeviceRules(pos.deviceId, pos.source);
     if (rules.length > 0) {
+      const cloned = { ...pos, attributes: { ...pos.attributes } };
       if (user.role === 'admin') {
-        enrichWithRules(pos, rules);
+        enrichWithRules(cloned, rules);
       } else {
-        applyRules(pos, rules);
+        applyRules(cloned, rules);
       }
+      positions[i] = cloned;
     } else if (user.role !== 'admin') {
-      pos.attributes = {};
+      positions[i] = { ...pos, attributes: {} };
     }
   }
 }
