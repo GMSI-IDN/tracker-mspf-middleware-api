@@ -1,3 +1,4 @@
+const { evaluate } = require('mathjs');
 const set = require('lodash/set');
 const unset = require('lodash/unset');
 const db = require('../db');
@@ -52,8 +53,8 @@ function getField(device, path) {
 function computeFormula(expression, value, attrs) {
   if (!expression) return value;
   try {
-    const fn = new Function('value', 'attrs', `try { return (${expression}); } catch(e) { return null; }`);
-    return fn(value, attrs);
+    const scope = { value, attrs, ...(typeof attrs === 'object' && attrs ? attrs : {}) };
+    return evaluate(expression, scope);
   } catch {
     return null;
   }

@@ -44,3 +44,7 @@ Gunakan **Context7 MCP** (`context7_resolve-library-id` + `context7_query-docs`)
 5. **Jangan commit** perubahan kecuali diperintahkan
 6. **Gunakan tools yang ada** — prefer edit/write over bash untuk file, prefer grep/glob over find/grep
 7. **Jalankan test** setelah selesai implementasi: `npm test`
+8. **Update dokumentasi** setiap selesai implementasi — minimal:
+   - `CHANGELOG.md` — catat perubahan fitur/perbaikan
+   - `API_REFERENCE.md` — jika ada endpoint baru atau perubahan response
+   - `PROGRESS.md` — update progress tracker

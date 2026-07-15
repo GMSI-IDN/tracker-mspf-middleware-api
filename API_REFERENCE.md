@@ -960,6 +960,26 @@ Mengupdate nama/deskripsi grup.
 
 Menghapus grup. Semua mapping device ke grup ini otomatis terhapus.
 
+### GET /api/admin/groups/sources
+
+Mengembalikan daftar source groups dari backend (Traccar groups + MSPF BCs) untuk dropdown filter/assign device di halaman admin.
+
+**Response 200:**
+```json
+{
+  "sources": [
+    { "id": "traccar_5", "name": "Warehouse Jakarta", "source": "traccar" },
+    { "id": "traccar_8", "name": "Depot Bandung", "source": "traccar" },
+    { "id": "mspf_3", "name": "BC Surabaya", "source": "mspf" },
+    { "id": "mspf_7", "name": "BC Medan", "source": "mspf" }
+  ]
+}
+```
+
+> **Cache:** Response di-cache 5 menit di server. Data diambil dari Traccar (`/groups`) dan MSPF (`/v2/bc`).
+>
+> **Usage:** Gunakan `id` dari response ini untuk filter device via `?group=traccar_5` atau assign ke custom group.
+
 ### GET /api/admin/device-groups
 
 Melihat semua mapping device ke grup. Filter dengan `?groupId=x`.
@@ -1065,7 +1085,7 @@ Ada 3 mode:
 |------|--------|---------------|-----------|
 | `passthrough` | Field asli muncul di FE | ✅ Wajib | ❌ |
 | `rename` | Field asli diganti nama | ✅ Wajib | ❌ |
-| `compute` | Hasil kalkulasi dari formula | ✅ Opsional | ✅ Bisa JS |
+| `compute` | Hasil kalkulasi dari formula (ekspresi mathjs — aman, tanpa akses global) | ✅ Opsional | ✅ Ekspresi mathjs |
 
 **Request:**
 ```json
@@ -1088,7 +1108,9 @@ Ada 3 mode:
 }
 ```
 
-Example formula untuk `compute`: `value != null ? (53.869 * value - 250.292).toFixed(1) : null`
+Example formula untuk `compute`: `value != null ? round(53.869 * value - 250.292, 1) : null`
+
+Variable yang tersedia di ekspresi: `value`, `attrs`, dan semua key dari attributes (misal `kph`, `volt`). Fungsi mathjs seperti `round()`, `floor()`, `ceil()`, `abs()`, `min()`, `max()` tersedia.
 
 ### GET /api/admin/custom-attributes
 
