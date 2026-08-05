@@ -48,6 +48,12 @@ const config = {
     cacheTtl: parseInt(process.env.MCCS_CACHE_TTL, 10) || 10000,
   },
 
+  foxlogger: {
+    email: process.env.FOXLOGGER_EMAIL || '',
+    password: process.env.FOXLOGGER_PASSWORD || '',
+    timezone: process.env.FOXLOGGER_TIMEZONE || 'Asia/Jakarta',
+  },
+
   cache: {
     ttl: parseInt(process.env.CACHE_DEVICE_TTL, 10) || 120,
     provider: process.env.CACHE_PROVIDER || 'node-cache',

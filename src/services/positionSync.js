@@ -1,6 +1,7 @@
 const cache = require('./cache');
 const traccar = require('./traccar');
 const mspf = require('./mspf');
+const foxlogger = require('./foxlogger');
 const deviceRouter = require('./deviceRouter');
 const config = require('../config');
 const { logger } = require('../middleware/logger');
@@ -17,10 +18,16 @@ function getMspfBcIds() {
   )];
 }
 
-function getActiveMspfIds() {
+function getActiveIds(source) {
   const merged = cache.get('devices:merged');
   if (!merged) return null;
-  return new Set(merged.filter(d => d.source === 'mspf').map(d => d.id));
+  return new Set(merged.filter(d => d.source === source).map(d => d.id));
+}
+
+function getActiveFoxloggerIds() {
+  const merged = cache.get('devices:merged');
+  if (!merged) return null;
+  return new Set(merged.filter(d => d.source === 'foxlogger').map(d => d.id));
 }
 
 function normalizePosition(p) {
@@ -58,11 +65,13 @@ async function syncPositions() {
   let merged = cache.get('devices:merged');
   let expT = merged?.filter(d => d.source === 'traccar').length || 0;
   let expM = merged?.filter(d => d.source === 'mspf').length || 0;
-  let actT = 0, actM = 0;
+  let expF = merged?.filter(d => d.source === 'foxlogger').length || 0;
+  let actT = 0, actM = 0, actF = 0;
 
-  const [traccarResult, mspfResult] = await Promise.allSettled([
+  const [traccarResult, mspfResult, foxloggerResult] = await Promise.allSettled([
     traccar.getPositions(),
     mspf.getPositions({ limit: 1000, bc: bcIds }),
+    foxlogger.getPositions(),
   ]);
 
   if (mspfResult.status !== 'fulfilled') {
@@ -82,19 +91,28 @@ async function syncPositions() {
   }
 
   if (mspfResult.status === 'fulfilled' && mspfResult.value) {
-    let activeIds = getActiveMspfIds();
+    let activeIds = getActiveIds('mspf');
     if (!activeIds) {
       logger.warn('[PositionSync] device cache expired, rebuilding...');
-      const [t, m] = await Promise.allSettled([
+      const [t, m, f] = await Promise.allSettled([
         traccar.getDevices({ all: true }),
         mspf.waitForInit().then(() => mspf.getDevices()),
+        foxlogger.waitForInit().then(() => foxlogger.getDevices()),
       ]);
       const rebuild = [];
       if (t.status === 'fulfilled' && t.value) {
         for (const d of t.value) rebuild.push({ id: d.id, name: d.name, uniqueId: d.uniqueId, status: d.status || 'offline', source: 'traccar', group: `traccar_${d.groupId}`, lastUpdate: d.lastUpdate || (d.attributes?.motionTime ? new Date(d.attributes.motionTime).toISOString() : undefined), voltage: d.attributes?.power ?? undefined, attributes: d.attributes || {} });
       }
       if (m.status === 'fulfilled' && m.value?.data) rebuild.push(...m.value.data);
-      rebuild.sort((a, b) => a.id - b.id || (a.source < b.source ? -1 : 1));
+      if (f.status === 'fulfilled' && f.value?.data) rebuild.push(...f.value.data);
+      rebuild.sort((a, b) => {
+        const aId = String(a.id).padStart(20, '0');
+        const bId = String(b.id).padStart(20, '0');
+        if (aId !== bId) return aId < bId ? -1 : 1;
+        if (a.source < b.source) return -1;
+        if (a.source > b.source) return 1;
+        return 0;
+      });
       deviceRouter.buildDeviceMap(rebuild);
       cache.set('devices:merged', rebuild, config.cache.ttl || 120);
       logger.info(`Device cache rebuilt: ${rebuild.length} devices`);
@@ -113,10 +131,29 @@ async function syncPositions() {
     }
   }
 
+  // ── FoxLogger positions ──────────────────────────────
+  if (foxloggerResult.status === 'fulfilled' && foxloggerResult.value) {
+    let foxActiveIds = getActiveFoxloggerIds();
+    if (foxActiveIds && foxActiveIds.size > 0) {
+      // Map FoxLogger positions by IMEI (deviceId = imei in foxlogger)
+      const foxPosByImei = {};
+      for (const p of foxloggerResult.value) {
+        foxPosByImei[p.deviceId] = p;
+      }
+      for (const imei of foxActiveIds) {
+        const pos = foxPosByImei[imei];
+        if (pos) {
+          positions.push(normalizePosition({ ...pos, serverTime: pos.serverTime || now, source: 'foxlogger' }));
+          actF++;
+        }
+      }
+    }
+  }
+
   positions.sort((a, b) => new Date(b.deviceTime || 0) - new Date(a.deviceTime || 0));
   cache.set('positions:merged', positions, 30);
 
-  logger.info(`[PositionSync] cached: traccar ${actT}/${expT}, mspf ${actM}/${expM}`);
+  logger.info(`[PositionSync] cached: traccar ${actT}/${expT}, mspf ${actM}/${expM}, foxlogger ${actF}/${expF}`);
 
   const mem = process.memoryUsage();
   logger.info(`[Cache] RSS:${Math.round(mem.rss / 1024 / 1024)}MB | Heap:${Math.round(mem.heapUsed / 1024 / 1024)}MB | Keys:${cache.keys().length}`);

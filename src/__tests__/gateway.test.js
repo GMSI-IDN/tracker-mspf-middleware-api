@@ -36,10 +36,31 @@ jest.mock('../services/mspf', () => {
     getDeviceParkingAll: jest.fn(),
     getDeviceTrip: jest.fn(),
     getStatsSummary: jest.fn(),
+    getDeviceStatsReports: jest.fn(),
+    getBcStatsReports: jest.fn(),
     getMspfEvents: jest.fn(),
     getMspfClosedEvents: jest.fn(),
   };
 });
+
+jest.mock('../services/foxlogger', () => ({
+  init: jest.fn(),
+  waitForInit: jest.fn(() => Promise.resolve()),
+  getApi: jest.fn(),
+  getUserId: jest.fn(() => null),
+  resolveImei: jest.fn((id) => String(id)),
+  normalizeDevice: jest.fn((d) => d),
+  normalizeReportPosition: jest.fn(),
+  normalizeHistoryPosition: jest.fn(),
+  getDevices: jest.fn(() => Promise.resolve({ data: [], total: 0, next: null })),
+  searchDevices: jest.fn(() => Promise.resolve([])),
+  getPositions: jest.fn(() => Promise.resolve([])),
+  getDeviceRoute: jest.fn(() => Promise.resolve([])),
+  getDeviceParking: jest.fn(() => Promise.resolve([])),
+  getDeviceSummary: jest.fn(() => Promise.resolve({ data: [] })),
+  getGeoFences: jest.fn(() => Promise.resolve([])),
+  getAlarmReports: jest.fn(() => Promise.resolve([])),
+}));
 
 jest.mock('../services/autoSync', () => ({
   runAutoSync: jest.fn(),
@@ -54,6 +75,7 @@ jest.mock('../services/customAttributes', () => ({
 
 const traccar = require('../services/traccar');
 const mspf = require('../services/mspf');
+const foxlogger = require('../services/foxlogger');
 const db = require('../db');
 
 const app = require('../app');
@@ -984,6 +1006,212 @@ describe('Summary Reports', () => {
     expect(res.body.summaries).toEqual([]);
     expect(res.body.total.devices).toBe(0);
     expect(res.body.total.distance).toBe(0);
+  });
+});
+
+describe('Summary Time-Series (granularity)', () => {
+  let token;
+  const traccarDeviceId = 9999911;
+  const mspfDeviceId = 9999912;
+  const foxDeviceId = 9999913;
+
+  beforeAll(async () => {
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'admin', password: 'admin123' });
+    token = login.body.token;
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('GET /api/reports/summary with invalid granularity returns 400', async () => {
+    const res = await request(app)
+      .get(`/api/reports/summary?deviceId=${traccarDeviceId}&granularity=hour`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('ERR_VALIDATION');
+  });
+
+  test('GET /api/reports/summary with granularity but no deviceId/group returns 400', async () => {
+    const res = await request(app)
+      .get('/api/reports/summary?granularity=day&from=2026-06-01T00:00:00Z')
+      .set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('ERR_VALIDATION');
+  });
+
+  test('GET /api/reports/summary returns Traccar day series with filled buckets', async () => {
+    traccar.getDevices.mockResolvedValue([{ id: traccarDeviceId, name: 'Test Traccar', uniqueId: 'test', status: 'online', groupId: 5 }]);
+    traccar.getReportTrips.mockResolvedValue([
+      { startTime: '2026-06-10T08:00:00Z', distance: 10, duration: 600, maxSpeed: 40, averageSpeed: 60, spentFuel: 1 },
+      { startTime: '2026-06-10T09:00:00Z', distance: 20, duration: 1200, maxSpeed: 80, averageSpeed: 60, spentFuel: 2 },
+      { startTime: '2026-06-12T09:00:00Z', distance: 5, duration: 300, maxSpeed: 30, averageSpeed: 60, spentFuel: 0.5 },
+    ]);
+
+    const res = await request(app)
+      .get(`/api/reports/summary?deviceId=${traccarDeviceId}&granularity=day&from=2026-06-10T00:00:00Z&to=2026-06-12T00:00:00Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.type).toBe('device');
+    expect(res.body.deviceId).toBe(traccarDeviceId);
+    expect(res.body.granularity).toBe('day');
+    expect(res.body.series).toHaveLength(3);
+    const d10 = res.body.series.find(b => b.key === '2026-06-10');
+    expect(d10.distance).toBe(30);
+    expect(d10.drivingTime).toBe(1800);
+    expect(d10.maxSpeed).toBe(80);
+    expect(res.body.series[1].distance).toBe(0);
+    expect(res.body.series[1].maxSpeed).toBeNull();
+    expect(res.body.total.distance).toBe(35);
+    expect(res.body.total.drivingTime).toBe(2100);
+    expect(res.body.total.maxSpeed).toBe(80);
+  });
+
+  test('GET /api/reports/summary returns MSPF day series from native stats', async () => {
+    traccar.getDevices.mockResolvedValue([]);
+    mspf.getDevice.mockResolvedValue({ id: mspfDeviceId, status: 'WORKING' });
+    mspf.getDeviceStatsReports.mockResolvedValue([
+      { datetime: '2026-06-15', mileage: 45.2, drivingtime: 3600 },
+      { datetime: '2026-06-16', mileage: 10.0, drivingtime: 600 },
+    ]);
+
+    const res = await request(app)
+      .get(`/api/reports/summary?deviceId=${mspfDeviceId}&granularity=day&from=2026-06-15T00:00:00Z&to=2026-06-16T00:00:00Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.series).toHaveLength(2);
+    expect(res.body.series[0].distance).toBe(45.2);
+    expect(res.body.series[0].drivingTime).toBe(3600);
+    expect(res.body.series[0].maxSpeed).toBeNull();
+    expect(res.body.total.distance).toBe(55.2);
+    expect(mspf.getDeviceStatsReports).toHaveBeenCalledWith(mspfDeviceId, { startDate: '2026-06-15', endDate: '2026-06-16' });
+  });
+
+  test('GET /api/reports/summary returns FoxLogger day series from report-summary', async () => {
+    traccar.getDevices.mockResolvedValue([]);
+    mspf.getDevice.mockResolvedValue(null);
+    foxlogger.getDevices.mockResolvedValue({ data: [{ id: foxDeviceId, uniqueId: '9999913', name: 'FL Test' }], total: 1, next: null });
+    foxlogger.getDeviceSummary.mockResolvedValue({
+      data: [
+        { from_time: '2026-06-15 07:00:00', distance: '30', speed_max: '70', speed_avg: '40', fuel_usage: '2', time_hour: '0', time_minute: '30', time_second: '0' },
+      ],
+    });
+
+    const res = await request(app)
+      .get(`/api/reports/summary?deviceId=${foxDeviceId}&granularity=day&from=2026-06-15T00:00:00Z&to=2026-06-15T00:00:00Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.series).toHaveLength(1);
+    expect(res.body.series[0].key).toBe('2026-06-15');
+    expect(res.body.series[0].distance).toBe(30);
+    expect(res.body.series[0].drivingTime).toBe(1800);
+    expect(res.body.series[0].maxSpeed).toBe(70);
+    expect(res.body.series[0].spentFuel).toBe(2);
+  });
+
+  test('GET /api/reports/summary returns monthly aggregation (week/month)', async () => {
+    traccar.getDevices.mockResolvedValue([{ id: traccarDeviceId, name: 'Test', uniqueId: 'test', status: 'online', groupId: 5 }]);
+    traccar.getReportTrips.mockResolvedValue([
+      { startTime: '2026-06-10T08:00:00Z', distance: 10, duration: 600, maxSpeed: 40, spentFuel: 1 },
+      { startTime: '2026-07-05T08:00:00Z', distance: 25, duration: 1200, maxSpeed: 90, spentFuel: 2 },
+    ]);
+
+    const res = await request(app)
+      .get(`/api/reports/summary?deviceId=${traccarDeviceId}&granularity=month&from=2026-06-01T00:00:00Z&to=2026-07-31T00:00:00Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.series).toHaveLength(2);
+    expect(res.body.series[0].key).toBe('2026-06');
+    expect(res.body.series[0].distance).toBe(10);
+    expect(res.body.series[1].key).toBe('2026-07');
+    expect(res.body.series[1].distance).toBe(25);
+    expect(res.body.total.distance).toBe(35);
+  });
+});
+
+describe('Summary Time-Series Group', () => {
+  let token;
+  let groupId;
+  const traccarDeviceId = 9999921;
+  const mspfDeviceId = 9999922;
+
+  beforeAll(async () => {
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'admin', password: 'admin123' });
+    token = login.body.token;
+    await db('groups').where('name', 'summary_series_group').delete();
+    const grp = await request(app)
+      .post('/api/admin/groups')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'summary_series_group' });
+    groupId = grp.body.id;
+  });
+
+  afterAll(async () => {
+    await db('device_groups').where({ group_id: groupId }).delete();
+    await db('groups').where({ id: groupId }).delete();
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('GET /api/reports/summary with custom group returns merged series', async () => {
+    await db('device_groups').insert([
+      { device_id: traccarDeviceId, source: 'traccar', group_id: groupId },
+      { device_id: mspfDeviceId, source: 'mspf', group_id: groupId },
+    ]);
+
+    const cache = require('../services/cache');
+    cache.set('devices:merged', [
+      { id: traccarDeviceId, name: 'Traccar A', source: 'traccar', group: 'traccar_5' },
+      { id: mspfDeviceId, name: 'MSPF A', source: 'mspf', group: 'mspf_10000023' },
+    ], 120);
+
+    traccar.getReportTrips.mockResolvedValue([
+      { startTime: '2026-06-15T08:00:00Z', distance: 10, duration: 600, maxSpeed: 40, spentFuel: 1 },
+    ]);
+    mspf.getBcStatsReports.mockResolvedValue([
+      { deviceId: mspfDeviceId, datetime: '2026-06-15', mileage: 20, drivingtime: 1200 },
+    ]);
+
+    const res = await request(app)
+      .get(`/api/reports/summary?group=${groupId}&granularity=day&from=2026-06-15T00:00:00Z&to=2026-06-15T00:00:00Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.type).toBe('group');
+    expect(res.body.group.id).toBe(groupId);
+    expect(res.body.series).toHaveLength(1);
+    expect(res.body.series[0].distance).toBe(30);
+    expect(res.body.series[0].drivingTime).toBe(1800);
+    expect(mspf.getBcStatsReports).toHaveBeenCalledWith(10000023, { startDate: '2026-06-15', endDate: '2026-06-15' });
+  });
+
+  test('GET /api/reports/summary with unknown group returns 404', async () => {
+    const res = await request(app)
+      .get('/api/reports/summary?group=999999&granularity=day&from=2026-06-01T00:00:00Z')
+      .set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(404);
+  });
+
+  test('GET /api/reports/summary group with customer not assigned returns 403', async () => {
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'test_customer', password: 'pass' });
+    const customerToken = login.body.token;
+
+    const res = await request(app)
+      .get(`/api/reports/summary?group=${groupId}&granularity=day&from=2026-06-01T00:00:00Z`)
+      .set('Authorization', `Bearer ${customerToken}`);
+    expect(res.status).toBe(403);
   });
 });
 

@@ -3,6 +3,7 @@ const { body } = require('express-validator');
 const createError = require('http-errors');
 const traccar = require('../services/traccar');
 const mspf = require('../services/mspf');
+const foxlogger = require('../services/foxlogger');
 const deviceRouter = require('../services/deviceRouter');
 const db = require('../db');
 const config = require('../config');
@@ -76,6 +77,7 @@ router.get('/', async (req, res, next) => {
       const devices = [];
       const traccarIds = dgs.filter(d => d.source === 'traccar').map(d => d.device_id);
       const mspfIds = dgs.filter(d => d.source === 'mspf').map(d => d.device_id);
+      const foxIds = dgs.filter(d => d.source === 'foxlogger').map(d => d.device_id);
 
       if (traccarIds.length > 0) {
         for (const id of traccarIds) {
@@ -94,6 +96,14 @@ router.get('/', async (req, res, next) => {
         } catch {}
       }
 
+      if (foxIds.length > 0) {
+        try {
+          const data = await foxlogger.getDevices();
+          const matched = data.data.filter(d => foxIds.includes(d.id) || foxIds.includes(d.uniqueId));
+          devices.push(...matched);
+        } catch {}
+      }
+
       let filtered = devices;
       if (status) filtered = filtered.filter(d => d.status === status);
       if (q) filtered = filtered.filter(d => d.name?.toLowerCase().includes(q.toLowerCase()) || d.uniqueId?.toLowerCase().includes(q.toLowerCase()));
@@ -107,13 +117,14 @@ router.get('/', async (req, res, next) => {
     let merged = require('../services/cache').get(cacheKey);
 
     if (!merged) {
-      const [traccarResult, mspfResult] = await Promise.allSettled([
+      const [traccarResult, mspfResult, foxloggerResult] = await Promise.allSettled([
         traccar.getDevices({ all: true }),
         mspf.getDevices(),
+        foxlogger.getDevices(),
       ]);
 
       merged = [];
-      let traccarCount = 0, mspfCount = 0;
+      let traccarCount = 0, mspfCount = 0, foxCount = 0;
       if (traccarResult.status === 'fulfilled' && traccarResult.value) {
         const mapped = traccarResult.value.map(normalizeTraccarDevice);
         merged.push(...mapped);
@@ -123,12 +134,17 @@ router.get('/', async (req, res, next) => {
         merged.push(...mspfResult.value.data);
         mspfCount = mspfResult.value.data.length;
       }
+      if (foxloggerResult.status === 'fulfilled' && foxloggerResult.value?.data) {
+        merged.push(...foxloggerResult.value.data);
+        foxCount = foxloggerResult.value.data.length;
+      }
 
-      logger.info(`Device cache built: ${traccarCount} Traccar + ${mspfCount} MSPF = ${merged.length} total`);
+      logger.info(`Device cache built: ${traccarCount} Traccar + ${mspfCount} MSPF + ${foxCount} FoxLogger = ${merged.length} total`);
 
-      // Sort by ID + source for stable pagination (avoid duplicate/missed items on cache refresh)
       merged.sort((a, b) => {
-        if (a.id !== b.id) return a.id - b.id;
+        const aId = String(a.id).padStart(20, '0');
+        const bId = String(b.id).padStart(20, '0');
+        if (aId !== bId) return aId < bId ? -1 : 1;
         if (a.source < b.source) return -1;
         if (a.source > b.source) return 1;
         return 0;
@@ -140,10 +156,14 @@ router.get('/', async (req, res, next) => {
     }
 
     let filtered = merged;
-    if (!isAdmin && userGroups.length > 0) {
-      const mappings = await db('device_groups').whereIn('group_id', userGroups).select('device_id', 'source');
-      const allowed = new Set(mappings.map(m => `${m.source}:${m.device_id}`));
-      filtered = merged.filter(d => allowed.has(`${d.source}:${d.id}`));
+    if (!isAdmin) {
+      if (userGroups.length === 0) {
+        filtered = [];
+      } else {
+        const mappings = await db('device_groups').whereIn('group_id', userGroups).select('device_id', 'source');
+        const allowed = new Set(mappings.map(m => `${m.source}:${m.device_id}`));
+        filtered = merged.filter(d => allowed.has(`${d.source}:${d.id}`));
+      }
     }
     if (source) filtered = filtered.filter(d => d.source === source);
     if (status) filtered = filtered.filter(d => d.status === status);
@@ -173,7 +193,7 @@ router.get('/', async (req, res, next) => {
         .whereIn('source', sources)
         .join('groups', 'device_groups.group_id', 'groups.id')
         .select('device_groups.device_id', 'device_groups.source', 'groups.id as gid', 'groups.name as gname')
-        .modify((qb) => { if (!isAdmin && userGroups.length > 0) qb.whereIn('group_id', userGroups); });
+        .modify((qb) => { if (!isAdmin) { if (userGroups.length > 0) qb.whereIn('group_id', userGroups); else qb.where('group_id', -1); } });
       const map = {};
       for (const r of dgs) {
         const k = `${r.source}:${r.device_id}`;
@@ -204,13 +224,19 @@ router.get('/:id', async (req, res, next) => {
       const data = await traccar.getDevices({ id: deviceId });
       if (!data[0]) throw createError(404, 'Device not found', { code: 'ERR_NOT_FOUND' });
       device = normalizeTraccarDevice(data[0]);
+    } else if (devSource === 'foxlogger') {
+      const rawId = req.params.id;
+      const data = await foxlogger.getDevices();
+      const found = data.data.find(d => d.uniqueId === rawId || String(d.id) === rawId);
+      if (!found) throw createError(404, 'Device not found', { code: 'ERR_NOT_FOUND' });
+      device = found;
     } else {
       const raw = await mspf.getDevice(deviceId);
       device = await mspf.enrichDevice(raw);
     }
 
     // Apply custom attributes per-device (non-admin only)
-    if (!isAdmin && userGroups.length > 0) {
+    if (!isAdmin) {
       const rules = await getDeviceRules(device.id, device.source);
       if (rules.length > 0) {
         const cloned = { ...device, attributes: { ...device.attributes } };
@@ -224,7 +250,7 @@ router.get('/:id', async (req, res, next) => {
       .where({ device_id: device.id, source: device.source })
       .join('groups', 'device_groups.group_id', 'groups.id')
       .select('groups.id as gid', 'groups.name as gname')
-      .modify((qb) => { if (!isAdmin && userGroups.length > 0) qb.whereIn('group_id', userGroups); });
+      .modify((qb) => { if (!isAdmin) { if (userGroups.length > 0) qb.whereIn('group_id', userGroups); else qb.where('group_id', -1); } });
     device.customGroups = dgs.map(r => ({ id: r.gid, name: r.gname }));
     await enrichMetadata([device]);
 
@@ -245,7 +271,8 @@ router.put('/:id/metadata',
       const devSource = req.body.source || req.query.source || deviceRouter.getSourceByDeviceId(deviceId);
       if (!devSource) throw createError(400, 'source is required', { code: 'ERR_VALIDATION' });
 
-      if (!isAdmin && userGroups.length > 0) {
+      if (!isAdmin) {
+        if (!userGroups.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
         const dg = await db('device_groups').where({ device_id: deviceId, source: devSource }).whereIn('group_id', userGroups).first();
         if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
       }
@@ -270,7 +297,8 @@ router.delete('/:id/metadata', async (req, res, next) => {
     const devSource = req.query.source || deviceRouter.getSourceByDeviceId(deviceId);
     if (!devSource) throw createError(400, 'source query param is required', { code: 'ERR_VALIDATION' });
 
-    if (!isAdmin && userGroups.length > 0) {
+    if (!isAdmin) {
+      if (!userGroups.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
       const dg = await db('device_groups').where({ device_id: deviceId, source: devSource }).whereIn('group_id', userGroups).first();
       if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
     }

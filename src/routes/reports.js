@@ -2,8 +2,12 @@ const express = require('express');
 const createError = require('http-errors');
 const traccar = require('../services/traccar');
 const mspf = require('../services/mspf');
+const foxlogger = require('../services/foxlogger');
 const deviceRouter = require('../services/deviceRouter');
 const db = require('../db');
+const cache = require('../services/cache');
+const { toUtcIso, toUtcDateStr } = require('../utils/timestamp');
+const { buildSeries } = require('../utils/periodStats');
 const { applyRules, enrichWithRules, getDeviceRules } = require('../services/customAttributes');
 
 const router = express.Router();
@@ -38,13 +42,27 @@ router.get('/route', async (req, res, next) => {
     if (!deviceId) throw createError(400, 'deviceId is required', { code: 'ERR_VALIDATION' });
 
     const idNum = parseInt(deviceId, 10);
+    const idStr = deviceId;
     let devSource = source;
     if (group) { const p = deviceRouter.resolveGroup(group); if (p) devSource = p.source; }
-    if (!devSource) devSource = deviceRouter.getSourceByDeviceId(idNum);
+    // Try integer ID first (Traccar/MSPF), then string ID (FoxLogger IMEI)
+    if (!devSource && !isNaN(idNum)) devSource = deviceRouter.getSourceByDeviceId(idNum);
+    if (!devSource) devSource = deviceRouter.getSourceByDeviceId(idStr);
     if (!devSource) {
-      const [t, m] = await Promise.allSettled([
-        traccar.getDevices({ id: idNum }),
-        mspf.getDevice(idNum),
+      const [t, m, f] = await Promise.allSettled([
+        traccar.getDevices({ id: isNaN(idNum) ? undefined : idNum }),
+        mspf.getDevice(isNaN(idNum) ? undefined : idNum),
+        foxlogger.waitForInit(3000).then(() => foxlogger.getDevices()).then(d => {
+          const rawDeviceId = req.query.deviceId;
+          return d.data.find(x =>
+            x.uniqueId === rawDeviceId ||
+            String(x.id) === rawDeviceId ||
+            x.attributes?.vehicleUnit === rawDeviceId ||
+            x.attributes?.simcard === rawDeviceId ||
+            x.uniqueId.replace(/^0+/, '') === rawDeviceId.replace(/^0+/, '') ||
+            String(x.id).replace(/^0+/, '') === rawDeviceId.replace(/^0+/, '')
+          );
+        }),
       ]);
       if (t.status === 'fulfilled' && t.value?.[0]) {
         devSource = 'traccar';
@@ -52,13 +70,20 @@ router.get('/route', async (req, res, next) => {
       } else if (m.status === 'fulfilled' && m.value?.id) {
         devSource = 'mspf';
         deviceRouter.setSourceByDeviceId(idNum, 'mspf');
+      } else if (f.status === 'fulfilled' && f.value) {
+        devSource = 'foxlogger';
+        const foxId = String(f.value.id);
+        deviceRouter.setSourceByDeviceId(foxId, 'foxlogger');
+        deviceRouter.setSourceByDeviceId(idStr, 'foxlogger');
       } else {
         throw createError(404, 'Device not found', { code: 'ERR_NOT_FOUND' });
       }
     }
 
-    if (req.user.role !== 'admin' && req.user.groups?.length > 0) {
-      const dg = await db('device_groups').where({ device_id: idNum, source: devSource }).whereIn('group_id', req.user.groups).first();
+    if (req.user.role !== 'admin') {
+      if (!req.user.groups?.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+      const deviceLookupId = devSource === 'foxlogger' ? deviceId : idNum;
+      const dg = await db('device_groups').where({ device_id: deviceLookupId, source: devSource }).whereIn('group_id', req.user.groups).first();
       if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
     }
 
@@ -74,6 +99,10 @@ router.get('/route', async (req, res, next) => {
     if (devSource === 'traccar') {
       const data = await traccar.getPositions({ deviceId: idNum, from, to });
       positions = data.map(normalizeTraccarPosition);
+    } else if (devSource === 'foxlogger') {
+      const foxId = req.query.deviceId;
+      const data = await foxlogger.getDeviceRoute(foxId, { from, to, user_id: foxlogger.getUserId() });
+      positions = (data || []).map(p => ({ ...p, source: 'foxlogger' }));
     } else {
       positions = await mspf.getDeviceRoute(idNum, { from, to });
     }
@@ -87,8 +116,8 @@ router.get('/route', async (req, res, next) => {
 
 function normalizeTraccarStop(stop) {
   return {
-    startTime: stop.startTime,
-    endTime: stop.endTime,
+    startTime: toUtcIso(stop.startTime),
+    endTime: toUtcIso(stop.endTime),
     duration: stop.duration,
     latitude: stop.lat,
     longitude: stop.lon,
@@ -98,9 +127,10 @@ function normalizeTraccarStop(stop) {
 
 function normalizeMspfParking(deviceId, parking) {
   const durationSeconds = Math.round((parking.parkingTime || 0) * 60);
-  const endTime = new Date(new Date(parking.parkingStartTime).getTime() + durationSeconds * 1000).toISOString();
+  const startTime = toUtcIso(parking.parkingStartTime);
+  const endTime = startTime ? new Date(new Date(startTime).getTime() + durationSeconds * 1000).toISOString() : null;
   return {
-    startTime: parking.parkingStartTime,
+    startTime,
     endTime,
     duration: durationSeconds,
     latitude: parking.position?.lat ?? null,
@@ -119,9 +149,10 @@ router.get('/parking', async (req, res, next) => {
     let devSource = group ? deviceRouter.resolveGroup(group)?.source : null;
     if (!devSource) devSource = deviceRouter.getSourceByDeviceId(idNum);
     if (!devSource) {
-      const [t, m] = await Promise.allSettled([
+      const [t, m, f] = await Promise.allSettled([
         traccar.getDevices({ id: idNum }),
         mspf.getDevice(idNum),
+        foxlogger.waitForInit(3000).then(() => foxlogger.getDevices()).then(d => d.data.find(x => x.uniqueId === req.query.deviceId || String(x.id) === req.query.deviceId)),
       ]);
       if (t.status === 'fulfilled' && t.value?.[0]) {
         devSource = 'traccar';
@@ -129,12 +160,16 @@ router.get('/parking', async (req, res, next) => {
       } else if (m.status === 'fulfilled' && m.value?.id) {
         devSource = 'mspf';
         deviceRouter.setSourceByDeviceId(idNum, 'mspf');
+      } else if (f.status === 'fulfilled' && f.value) {
+        devSource = 'foxlogger';
+        deviceRouter.setSourceByDeviceId(idNum, 'foxlogger');
       } else {
         throw createError(404, 'Device not found', { code: 'ERR_NOT_FOUND' });
       }
     }
 
-    if (req.user.role !== 'admin' && req.user.groups?.length > 0) {
+    if (req.user.role !== 'admin') {
+      if (!req.user.groups?.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
       const dg = await db('device_groups').where({ device_id: idNum, source: devSource }).whereIn('group_id', req.user.groups).first();
       if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
     }
@@ -145,6 +180,17 @@ router.get('/parking', async (req, res, next) => {
       parking = (data || [])
         .filter(s => !s.engineHours || s.engineHours === 0)
         .map(normalizeTraccarStop);
+    } else if (devSource === 'foxlogger') {
+      const foxId = req.query.deviceId;
+      const data = await foxlogger.getDeviceParking(foxId, { from, to, user_id: foxlogger.getUserId() });
+      parking = (data || []).map(p => ({
+        startTime: toUtcIso(p.from_time),
+        endTime: toUtcIso(p.to_time),
+        duration: (parseInt(p.hour || 0) * 3600) + (parseInt(p.minute || 0) * 60) + (parseInt(p.second || 0)),
+        latitude: p.Loc ? parseFloat(p.Loc.split(',')[1]?.replace(/[\[\]]/g, '') || 0) : null,
+        longitude: p.Loc ? parseFloat(p.Loc.split(',')[0]?.replace(/[\[\]]/g, '') || 0) : null,
+        address: p.addrs || null,
+      }));
     } else {
       const data = await mspf.getDeviceParkingAll(idNum, { from, to });
       parking = (data || []).map(p => normalizeMspfParking(idNum, p));
@@ -215,9 +261,10 @@ router.get('/idle', async (req, res, next) => {
     let devSource = group ? deviceRouter.resolveGroup(group)?.source : null;
     if (!devSource) devSource = deviceRouter.getSourceByDeviceId(idNum);
     if (!devSource) {
-      const [t, m] = await Promise.allSettled([
+      const [t, m, f] = await Promise.allSettled([
         traccar.getDevices({ id: idNum }),
         mspf.getDevice(idNum),
+        foxlogger.waitForInit(3000).then(() => foxlogger.getDevices()).then(d => d.data.find(x => x.uniqueId === req.query.deviceId || String(x.id) === req.query.deviceId)),
       ]);
       if (t.status === 'fulfilled' && t.value?.[0]) {
         devSource = 'traccar';
@@ -225,12 +272,16 @@ router.get('/idle', async (req, res, next) => {
       } else if (m.status === 'fulfilled' && m.value?.id) {
         devSource = 'mspf';
         deviceRouter.setSourceByDeviceId(idNum, 'mspf');
+      } else if (f.status === 'fulfilled' && f.value) {
+        devSource = 'foxlogger';
+        deviceRouter.setSourceByDeviceId(idNum, 'foxlogger');
       } else {
         throw createError(404, 'Device not found', { code: 'ERR_NOT_FOUND' });
       }
     }
 
-    if (req.user.role !== 'admin' && req.user.groups?.length > 0) {
+    if (req.user.role !== 'admin') {
+      if (!req.user.groups?.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
       const dg = await db('device_groups').where({ device_id: idNum, source: devSource }).whereIn('group_id', req.user.groups).first();
       if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
     }
@@ -240,7 +291,7 @@ router.get('/idle', async (req, res, next) => {
       const data = await traccar.getReportStops({ deviceId: idNum, from, to });
       idle = (data || [])
         .filter(s => (s.engineHours || 0) > 0)
-        .map(s => ({ startTime: s.startTime, endTime: s.endTime, duration: s.duration, latitude: s.lat, longitude: s.lon, address: s.address || null }));
+        .map(s => ({ startTime: toUtcIso(s.startTime), endTime: toUtcIso(s.endTime), duration: s.duration, latitude: s.lat, longitude: s.lon, address: s.address || null }));
     } else {
       const positions = await mspf.getDeviceRoute(idNum, { from, to });
       idle = calculateIdleSegments(positions || []);
@@ -295,8 +346,8 @@ function enrichMspfTrips(trips, routePositions) {
     const avgSpeed = duration > 0 ? parseFloat(((distance / duration) * 3600).toFixed(2)) : undefined;
 
     return {
-      startTime: trip.timeStart,
-      endTime: trip.timeEnd,
+      startTime: toUtcIso(trip.timeStart),
+      endTime: toUtcIso(trip.timeEnd),
       duration,
       startLatitude: trip.positionStart?.lat ?? null,
       startLongitude: trip.positionStart?.lon ?? null,
@@ -319,9 +370,10 @@ router.get('/trips', async (req, res, next) => {
     let devSource = group ? deviceRouter.resolveGroup(group)?.source : null;
     if (!devSource) devSource = deviceRouter.getSourceByDeviceId(idNum);
     if (!devSource) {
-      const [t, m] = await Promise.allSettled([
+      const [t, m, f] = await Promise.allSettled([
         traccar.getDevices({ id: idNum }),
         mspf.getDevice(idNum),
+        foxlogger.waitForInit(3000).then(() => foxlogger.getDevices()).then(d => d.data.find(x => x.uniqueId === req.query.deviceId || String(x.id) === req.query.deviceId)),
       ]);
       if (t.status === 'fulfilled' && t.value?.[0]) {
         devSource = 'traccar';
@@ -329,12 +381,16 @@ router.get('/trips', async (req, res, next) => {
       } else if (m.status === 'fulfilled' && m.value?.id) {
         devSource = 'mspf';
         deviceRouter.setSourceByDeviceId(idNum, 'mspf');
+      } else if (f.status === 'fulfilled' && f.value) {
+        devSource = 'foxlogger';
+        deviceRouter.setSourceByDeviceId(idNum, 'foxlogger');
       } else {
         throw createError(404, 'Device not found', { code: 'ERR_NOT_FOUND' });
       }
     }
 
-    if (req.user.role !== 'admin' && req.user.groups?.length > 0) {
+    if (req.user.role !== 'admin') {
+      if (!req.user.groups?.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
       const dg = await db('device_groups').where({ device_id: idNum, source: devSource }).whereIn('group_id', req.user.groups).first();
       if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
     }
@@ -343,8 +399,8 @@ router.get('/trips', async (req, res, next) => {
     if (devSource === 'traccar') {
       const data = await traccar.getReportTrips({ deviceId: idNum, from, to });
       trips = (data || []).map(t => ({
-        startTime: t.startTime,
-        endTime: t.endTime,
+        startTime: toUtcIso(t.startTime),
+        endTime: toUtcIso(t.endTime),
         duration: t.duration,
         startLatitude: t.startLat,
         startLongitude: t.startLon,
@@ -410,17 +466,202 @@ function summaryResponse(summaries) {
   return { summaries, total: { devices: summaries.length, distance: parseFloat(totalDistance.toFixed(2)), duration: totalDuration } };
 }
 
+function mspfStatsRowToItem(r) {
+  return { time: r.datetime, distance: r.mileage ?? 0, drivingTime: r.drivingtime ?? 0, maxSpeed: null, averageSpeed: null, spentFuel: null };
+}
+
+function traccarTripToItem(t) {
+  return { time: t.startTime, distance: t.distance ?? 0, drivingTime: t.duration ?? 0, maxSpeed: t.maxSpeed ?? null, averageSpeed: t.averageSpeed ?? null, spentFuel: t.spentFuel ?? null };
+}
+
+function foxSummaryRowToItem(r) {
+  return {
+    time: r.from_time,
+    distance: parseFloat(r.distance || 0),
+    drivingTime: (parseInt(r.time_hour || 0, 10) * 3600) + (parseInt(r.time_minute || 0, 10) * 60) + parseInt(r.time_second || 0, 10),
+    maxSpeed: parseFloat(r.speed_max || 0) || null,
+    averageSpeed: parseFloat(r.speed_avg || 0) || null,
+    spentFuel: parseFloat(r.fuel_usage || 0) || null,
+  };
+}
+
+async function probeSummaryDeviceSource(idNum, idStr, group, source) {
+  let devSource = source;
+  if (group) { const p = deviceRouter.resolveGroup(group); if (p) devSource = p.source; }
+  if (!devSource) devSource = deviceRouter.getSourceByDeviceId(idNum);
+  if (!devSource) devSource = deviceRouter.getSourceByDeviceId(idStr);
+  if (devSource) return devSource;
+
+  const idNumArg = Number.isNaN(idNum) ? undefined : idNum;
+  const [t, m, f] = await Promise.allSettled([
+    idNumArg ? traccar.getDevices({ id: idNumArg }) : Promise.resolve([]),
+    idNumArg ? mspf.getDevice(idNumArg) : Promise.resolve(null),
+    foxlogger.waitForInit(3000).then(() => foxlogger.getDevices()).then(d => d.data.find(x =>
+      x.uniqueId === idStr ||
+      String(x.id) === idStr ||
+      x.attributes?.vehicleUnit === idStr ||
+      x.attributes?.simcard === idStr ||
+      x.uniqueId.replace(/^0+/, '') === String(idStr).replace(/^0+/, '') ||
+      String(x.id).replace(/^0+/, '') === String(idStr).replace(/^0+/, '')
+    )),
+  ]);
+  if (t.status === 'fulfilled' && t.value?.[0]) {
+    deviceRouter.setSourceByDeviceId(idNum, 'traccar');
+    return 'traccar';
+  }
+  if (m.status === 'fulfilled' && m.value?.id) {
+    deviceRouter.setSourceByDeviceId(idNum, 'mspf');
+    return 'mspf';
+  }
+  if (f.status === 'fulfilled' && f.value) {
+    deviceRouter.setSourceByDeviceId(String(f.value.id), 'foxlogger');
+    deviceRouter.setSourceByDeviceId(idStr, 'foxlogger');
+    return 'foxlogger';
+  }
+  return null;
+}
+
+async function collectGroupSummaryItems(dgs, fromIso, toIso) {
+  const items = [];
+  const traccarIds = dgs.filter(d => d.source === 'traccar').map(d => d.device_id);
+  const mspfIds = dgs.filter(d => d.source === 'mspf').map(d => d.device_id);
+  const foxIds = dgs.filter(d => d.source === 'foxlogger').map(d => d.device_id);
+
+  if (traccarIds.length > 0) {
+    const results = await Promise.allSettled(traccarIds.map(id => traccar.getReportTrips({ deviceId: id, from: fromIso, to: toIso })));
+    for (const r of results) {
+      if (r.status === 'fulfilled') for (const t of (r.value || [])) items.push(traccarTripToItem(t));
+    }
+  }
+
+  if (mspfIds.length > 0) {
+    const merged = cache.get('devices:merged') || [];
+    const idToBc = {};
+    for (const d of merged) {
+      if (d.source === 'mspf' && d.group) idToBc[d.id] = parseInt(d.group.replace('mspf_', ''), 10);
+    }
+    const byBc = {};
+    for (const id of mspfIds) {
+      const bc = idToBc[id];
+      if (bc) (byBc[bc] = byBc[bc] || []).push(id);
+    }
+    const startDate = toUtcDateStr(fromIso);
+    const endDate = toUtcDateStr(toIso);
+    const bcIds = Object.keys(byBc).map(Number);
+    if (bcIds.length > 0) {
+      const results = await Promise.allSettled(bcIds.map(bc => mspf.getBcStatsReports(bc, { startDate, endDate })));
+      for (let i = 0; i < results.length; i++) {
+        if (results[i].status === 'fulfilled') {
+          const ids = new Set(byBc[bcIds[i]]);
+          for (const row of (results[i].value || [])) if (ids.has(row.deviceId)) items.push(mspfStatsRowToItem(row));
+        }
+      }
+    }
+    const uncovered = mspfIds.filter(id => !idToBc[id]);
+    if (uncovered.length > 0) {
+      const results = await Promise.allSettled(uncovered.map(id => mspf.getDeviceStatsReports(id, { startDate, endDate })));
+      for (const r of results) if (r.status === 'fulfilled') for (const row of (r.value || [])) items.push(mspfStatsRowToItem(row));
+    }
+  }
+
+  if (foxIds.length > 0) {
+    const results = await Promise.allSettled(foxIds.map(id => foxlogger.getDeviceSummary(id, { from: fromIso, to: toIso, user_id: foxlogger.getUserId() })));
+    for (const r of results) {
+      if (r.status === 'fulfilled') for (const row of (r.value?.data || [])) items.push(foxSummaryRowToItem(row));
+    }
+  }
+
+  return items;
+}
+
+function resolveSummaryDeviceName(idNum, devSource) {
+  const merged = cache.get('devices:merged') || [];
+  const d = merged.find(x => x.id === idNum && x.source === devSource);
+  return d?.name || undefined;
+}
+
 router.get('/summary', async (req, res, next) => {
   try {
-    const { deviceId, group, from, to } = req.query;
+    const { deviceId, group, source, from, to, granularity } = req.query;
+    const isAdmin = req.user.role === 'admin';
+    const userGroups = req.user.groups || [];
+
+    if (granularity) {
+      const allowedGran = ['day', 'week', 'month', 'year'];
+      if (!allowedGran.includes(granularity)) {
+        throw createError(400, 'granularity must be one of: day, week, month, year', { code: 'ERR_VALIDATION' });
+      }
+      const fromIso = from || new Date(Date.now() - 30 * 86400000).toISOString();
+      const toIso = to || new Date().toISOString();
+
+      if (group && /^\d+$/.test(String(group))) {
+        const groupId = parseInt(group, 10);
+        const groupInfo = await db('groups').where({ id: groupId }).first();
+        if (!groupInfo) throw createError(404, 'Group not found', { code: 'ERR_NOT_FOUND' });
+        if (!isAdmin && !userGroups.includes(groupId)) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+        const dgs = await db('device_groups').where({ group_id: groupId }).select('device_id', 'source');
+        const items = await collectGroupSummaryItems(dgs, fromIso, toIso);
+        const seriesData = buildSeries(items, fromIso, toIso, granularity);
+        return res.json({
+          type: 'group',
+          group: { id: groupInfo.id, name: groupInfo.name },
+          granularity,
+          period: { from: fromIso, to: toIso },
+          timezone: 'UTC',
+          ...seriesData,
+        });
+      }
+
+      if (!deviceId) {
+        throw createError(400, 'deviceId or group (custom group ID) is required for summary time-series', { code: 'ERR_VALIDATION' });
+      }
+
+      const idNum = parseInt(deviceId, 10);
+      const idStr = deviceId;
+      const devSource = await probeSummaryDeviceSource(idNum, idStr, group, source);
+      if (!devSource) throw createError(404, 'Device not found', { code: 'ERR_NOT_FOUND' });
+
+      if (!isAdmin) {
+        if (!userGroups.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+        const lookupId = devSource === 'foxlogger' ? idStr : idNum;
+        const dg = await db('device_groups').where({ device_id: lookupId, source: devSource }).whereIn('group_id', userGroups).first();
+        if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+      }
+
+      let items;
+      if (devSource === 'mspf') {
+        const rows = await mspf.getDeviceStatsReports(idNum, { startDate: toUtcDateStr(fromIso), endDate: toUtcDateStr(toIso) });
+        items = (rows || []).map(mspfStatsRowToItem);
+      } else if (devSource === 'traccar') {
+        const trips = await traccar.getReportTrips({ deviceId: idNum, from: fromIso, to: toIso });
+        items = (trips || []).map(traccarTripToItem);
+      } else {
+        const data = await foxlogger.getDeviceSummary(idStr, { from: fromIso, to: toIso, user_id: foxlogger.getUserId() });
+        items = (data?.data || []).map(foxSummaryRowToItem);
+      }
+
+      const seriesData = buildSeries(items, fromIso, toIso, granularity);
+      return res.json({
+        type: 'device',
+        deviceId: idNum,
+        deviceName: resolveSummaryDeviceName(idNum, devSource),
+        granularity,
+        period: { from: fromIso, to: toIso },
+        timezone: 'UTC',
+        ...seriesData,
+      });
+    }
+
     if (!deviceId && !group) {
       const userGroups = req.user.groups || [];
       const isAdmin = req.user.role === 'admin';
 
       let deviceIds = [];
-      if (!isAdmin && userGroups.length > 0) {
-        const dgs = await db('device_groups').whereIn('group_id', userGroups).select('device_id', 'source');
-        deviceIds = dgs.map(d => ({ id: d.device_id, source: d.source }));
+      if (!isAdmin) {
+        if (userGroups.length > 0) {
+          const dgs = await db('device_groups').whereIn('group_id', userGroups).select('device_id', 'source');
+          deviceIds = dgs.map(d => ({ id: d.device_id, source: d.source }));
+        }
       }
 
       const [traccarResult, mspfResult] = await Promise.allSettled([
@@ -450,9 +691,10 @@ router.get('/summary', async (req, res, next) => {
     let devSource = group ? deviceRouter.resolveGroup(group)?.source : null;
     if (!devSource) devSource = deviceRouter.getSourceByDeviceId(idNum);
     if (!devSource) {
-      const [t, m] = await Promise.allSettled([
+      const [t, m, f] = await Promise.allSettled([
         traccar.getDevices({ id: idNum }),
         mspf.getDevice(idNum),
+        foxlogger.waitForInit(3000).then(() => foxlogger.getDevices()).then(d => d.data.find(x => x.uniqueId === req.query.deviceId || String(x.id) === req.query.deviceId)),
       ]);
       if (t.status === 'fulfilled' && t.value?.[0]) {
         devSource = 'traccar';
@@ -460,12 +702,16 @@ router.get('/summary', async (req, res, next) => {
       } else if (m.status === 'fulfilled' && m.value?.id) {
         devSource = 'mspf';
         deviceRouter.setSourceByDeviceId(idNum, 'mspf');
+      } else if (f.status === 'fulfilled' && f.value) {
+        devSource = 'foxlogger';
+        deviceRouter.setSourceByDeviceId(idNum, 'foxlogger');
       } else {
         throw createError(404, 'Device not found', { code: 'ERR_NOT_FOUND' });
       }
     }
 
-    if (req.user.role !== 'admin' && req.user.groups?.length > 0) {
+    if (req.user.role !== 'admin') {
+      if (!req.user.groups?.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
       const dg = await db('device_groups').where({ device_id: idNum, source: devSource }).whereIn('group_id', req.user.groups).first();
       if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
     }
@@ -478,6 +724,18 @@ router.get('/summary', async (req, res, next) => {
         source: 'traccar',
         period: { from, to: to || new Date().toISOString() },
         ...summaryResponse([{ deviceId: idNum, deviceName: s.deviceName || '', source: 'traccar', distance: s.distance || 0, maxSpeed: s.maxSpeed || null, averageSpeed: s.averageSpeed || null, duration: s.duration || 0, engineHours: s.engineHours || null, spentFuel: s.spentFuel || null }]),
+      });
+    }
+
+    if (devSource === 'foxlogger') {
+      const foxImei = req.query.deviceId;
+      const data = await foxlogger.getDeviceSummary(foxImei, { from, to: to || undefined, user_id: foxlogger.getUserId() });
+      const raw = (data?.data || [])[0] || {};
+      return res.json({
+        deviceId: foxImei,
+        source: 'foxlogger',
+        period: { from, to: to || new Date().toISOString() },
+        ...summaryResponse([{ deviceId: foxImei, deviceName: raw.gps_name || '', source: 'foxlogger', distance: parseFloat(raw.distance || 0), maxSpeed: parseFloat(raw.speed_max || 0), averageSpeed: parseFloat(raw.speed_avg || 0), duration: (parseInt(raw.time_hour || 0) * 3600) + (parseInt(raw.time_minute || 0) * 60) + (parseInt(raw.time_second || 0)), engineHours: null, spentFuel: parseFloat(raw.fuel_usage || 0) }]),
       });
     }
 
@@ -532,9 +790,10 @@ router.get('/events', async (req, res, next) => {
       let devSource = group ? deviceRouter.resolveGroup(group)?.source : null;
       if (!devSource) devSource = deviceRouter.getSourceByDeviceId(idNum);
       if (!devSource) {
-        const [t, m] = await Promise.allSettled([
+        const [t, m, f] = await Promise.allSettled([
           traccar.getDevices({ id: idNum }),
           mspf.getDevice(idNum),
+          foxlogger.waitForInit(3000).then(() => foxlogger.getDevices()).then(d => d.data.find(x => x.uniqueId === req.query.deviceId || String(x.id) === req.query.deviceId)),
         ]);
         if (t.status === 'fulfilled' && t.value?.[0]) {
           devSource = 'traccar';
@@ -542,10 +801,14 @@ router.get('/events', async (req, res, next) => {
         } else if (m.status === 'fulfilled' && m.value?.id) {
           devSource = 'mspf';
           deviceRouter.setSourceByDeviceId(idNum, 'mspf');
+        } else if (f.status === 'fulfilled' && f.value) {
+          devSource = 'foxlogger';
+          deviceRouter.setSourceByDeviceId(idNum, 'foxlogger');
         } else throw createError(404, 'Device not found', { code: 'ERR_NOT_FOUND' });
       }
 
-      if (!isAdmin && userGroups.length > 0) {
+      if (!isAdmin) {
+        if (!userGroups.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
         const dg = await db('device_groups').where({ device_id: idNum, source: devSource }).whereIn('group_id', userGroups).first();
         if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
       }
@@ -561,7 +824,7 @@ router.get('/events', async (req, res, next) => {
           const isGeo = (e.type === 'geofenceEnter' || e.type === 'geofenceExit');
           events.push({
             name: isGeo && e.geofenceId ? (geoMap[e.geofenceId] || null) : (TRACCAR_EVENT_NAMES[e.type] || null),
-            eventTime: e.eventTime,
+            eventTime: toUtcIso(e.eventTime),
             status: TRACCAR_EVENT_STATUS[e.type] || null,
             deviceId: e.deviceId,
             source: 'traccar',
@@ -571,7 +834,6 @@ router.get('/events', async (req, res, next) => {
           });
         }
       } else {
-        const cache = require('../services/cache');
         const merged = cache.get('devices:merged');
         let bcId = null;
         if (merged) {
@@ -591,14 +853,14 @@ router.get('/events', async (req, res, next) => {
           for (const e of [...openEvents, ...closedEvents]) {
             events.push({
               name: e.monitorName || null,
-              eventTime: e.openedAt || e.closedAt,
+              eventTime: toUtcIso(e.openedAt || e.closedAt),
               status: e.status || 'OPEN',
               deviceId: e.deviceId,
               source: 'mspf',
               monitorId: e.monitorId || null,
               monitorName: e.monitorName || null,
-              openedAt: e.openedAt || null,
-              closedAt: e.closedAt || null,
+              openedAt: toUtcIso(e.openedAt) || null,
+              closedAt: toUtcIso(e.closedAt) || null,
             });
           }
         }
@@ -629,7 +891,7 @@ router.get('/events', async (req, res, next) => {
     if (traccarResult.status === 'fulfilled') {
       for (const e of traccarResult.value) {
         events.push({
-          name: null, eventTime: e.eventTime,
+          name: null, eventTime: toUtcIso(e.eventTime),
           status: TRACCAR_EVENT_STATUS[e.type] || null,
           deviceId: e.deviceId, source: 'traccar',
           geofenceId: e.geofenceId || null,
@@ -639,18 +901,20 @@ router.get('/events', async (req, res, next) => {
     if (mspfResult.status === 'fulfilled') {
       for (const e of mspfResult.value) {
         events.push({
-          name: null, eventTime: e.openedAt || e.closedAt,
+          name: null, eventTime: toUtcIso(e.openedAt || e.closedAt),
           status: e.status || null, deviceId: e.deviceId, source: 'mspf',
           monitorId: e.monitorId || null,
         });
       }
     }
 
-    // Filter by customer groups (if not admin)
-    if (!isAdmin && userGroups.length > 0) {
-      const dgs = await db('device_groups').whereIn('group_id', userGroups).select('device_id', 'source');
-      const allowed = new Set(dgs.map(d => `${d.source}:${d.device_id}`));
-      events = events.filter(e => allowed.has(`${e.source}:${e.deviceId}`));
+    if (!isAdmin) {
+      if (userGroups.length === 0) { events = []; }
+      else {
+        const dgs = await db('device_groups').whereIn('group_id', userGroups).select('device_id', 'source');
+        const allowed = new Set(dgs.map(d => `${d.source}:${d.device_id}`));
+        events = events.filter(e => allowed.has(`${e.source}:${e.deviceId}`));
+      }
     }
 
     if (status) events = events.filter(e => e.status === status.toUpperCase());

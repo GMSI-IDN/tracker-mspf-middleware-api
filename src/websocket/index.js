@@ -3,6 +3,7 @@ const WebSocket = require('ws');
 const config = require('../config');
 const traccar = require('../services/traccar');
 const mspf = require('../services/mspf');
+const foxlogger = require('../services/foxlogger');
 const { deriveRunningStatus } = require('../utils/deviceStatus');
 const { applyRules, computeFormula, getDeviceRules } = require('../services/customAttributes');
 const { logger } = require('../middleware/logger');
@@ -11,6 +12,8 @@ const db = require('../db');
 let io = null;
 let mspfPollTimer = null;
 let lastKnownMspfIds = null;
+let foxloggerPollTimer = null;
+let lastKnownFoxloggerIds = null;
 
 let traccarWs = null;
 let traccarWsReconnectTimer = null;
@@ -57,6 +60,7 @@ function setupWebSocket(httpServer) {
   });
 
   startMspfPolling();
+  startFoxLoggerPolling();
   connectTraccarWs();
 
   logger.info(`Socket.io ready at path: ${config.websocket.path}`);
@@ -105,6 +109,18 @@ function getField(obj, path) {
   return val;
 }
 
+function isDeviceAllowed(socket, source, deviceId) {
+  if (socket.allowedDevices.has(`${source}:${deviceId}`)) return true;
+  if (source === 'foxlogger') {
+    if (socket.allowedDevices.has(`foxlogger:${String(deviceId)}`)) return true;
+    try {
+      const imei = foxlogger.resolveImei(deviceId);
+      if (imei && socket.allowedDevices.has(`foxlogger:${imei}`)) return true;
+    } catch {}
+  }
+  return false;
+}
+
 async function emitPosition(data) {
   const name = getDeviceName(data.deviceId, data.source);
   const sockets = io ? [...io.sockets.sockets.values()] : [];
@@ -114,7 +130,7 @@ async function emitPosition(data) {
   for (const socket of sockets) {
     const user = socket.user;
     if (!user) continue;
-    if (user.role !== 'admin' && !socket.allowedDevices.has(`${data.source}:${data.deviceId}`)) {
+    if (user.role !== 'admin' && !isDeviceAllowed(socket, data.source, data.deviceId)) {
       // console.log(`[WS] ${user.username}: ${data.source}:${data.deviceId} BLOCKED (${socket.allowedDevices?.size || 0} allowed)`);
       continue;
     }
@@ -155,7 +171,7 @@ function emitDeviceStatus(deviceId, source, data) {
   for (const socket of sockets) {
     const user = socket.user;
     if (!user) continue;
-    if (user.role !== 'admin' && !socket.allowedDevices.has(`${source}:${deviceId}`)) continue;
+    if (user.role !== 'admin' && !isDeviceAllowed(socket, source, deviceId)) continue;
     socket.emit('device-status', data);
   }
 }
@@ -231,6 +247,51 @@ function startMspfPolling() {
       }
     } catch (err) {
       logger.warn(`WS MSPF poll: ${err.message}`);
+    }
+  }, config.websocket.pollInterval);
+}
+
+// ── FoxLogger Polling ────────────────────────────────────
+
+function getActiveFoxloggerIds() {
+  try {
+    const cache = require('../services/cache');
+    const merged = cache.get('devices:merged');
+    if (merged) {
+      lastKnownFoxloggerIds = new Set(merged.filter(d => d.source === 'foxlogger').map(d => d.id));
+    }
+  } catch {}
+  return lastKnownFoxloggerIds;
+}
+
+function startFoxLoggerPolling() {
+  if (!config.foxlogger.email || !config.foxlogger.password) {
+    logger.info('FoxLogger credentials not configured — WS FoxLogger polling skipped');
+    return;
+  }
+  if (foxloggerPollTimer) clearInterval(foxloggerPollTimer);
+  foxloggerPollTimer = setInterval(async () => {
+    try {
+      await foxlogger.waitForInit(5000);
+      const data = await foxlogger.getPositions();
+      if (data && data.length > 0) {
+        const activeIds = getActiveFoxloggerIds();
+        const filtered = activeIds ? data.filter(p => activeIds.has(p.deviceId)) : data;
+        if (filtered.length > 0) {
+          for (const item of filtered) {
+            await emitPosition({
+              deviceId: item.deviceId, latitude: item.latitude, longitude: item.longitude,
+              speed: item.speed, course: item.course, altitude: item.altitude,
+              deviceTime: item.deviceTime || new Date().toISOString(),
+              valid: item.valid !== false, source: 'foxlogger',
+              attributes: item.attributes,
+            });
+            emitDeviceStatusFrom(item);
+          }
+        }
+      }
+    } catch (err) {
+      logger.warn(`WS FoxLogger poll: ${err.message}`);
     }
   }, config.websocket.pollInterval);
 }

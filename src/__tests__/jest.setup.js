@@ -11,3 +11,5 @@ process.env.CACHE_DEVICE_TTL = '120';
 process.env.LOG_LEVEL = 'silent';
 process.env.RATE_LIMIT_MAX = '10000';
 process.env.RATE_LIMIT_AUTH_MAX = '10000';
+process.env.FOXLOGGER_EMAIL = '';
+process.env.FOXLOGGER_PASSWORD = '';
