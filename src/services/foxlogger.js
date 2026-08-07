@@ -1,6 +1,6 @@
 const { classifyAxiosError } = require('../utils/axiosError');
 const { logger } = require('../middleware/logger');
-const { toUtcIso } = require('../utils/timestamp');
+const { toUtcIso, toSourceNaive } = require('../utils/timestamp');
 const jwt = require('jsonwebtoken');
 const axios = require('axios');
 const config = require('../config');
@@ -256,11 +256,42 @@ function normalizeHistoryPosition(imei, pos) {
   };
 }
 
+function enrichHistoryWithRollback(imei, rawHistory, rawRollback) {
+  const rollByTime = {};
+  for (const r of rawRollback || []) {
+    if (r.time) rollByTime[String(r.time).trim()] = r;
+  }
+  return (rawHistory || [])
+    .map((p) => {
+      const pos = normalizeHistoryPosition(imei, p);
+      if (!pos) return null;
+      const roll = rollByTime[String(p.time).trim()];
+      if (roll) {
+        const dir = parseFloat(roll.dir);
+        if (!Number.isNaN(dir)) pos.course = dir;
+        if (roll.nopol) pos.attributes.nopol = roll.nopol;
+      }
+      return pos;
+    })
+    .filter(Boolean);
+}
+
 // ── API Functions ──────────────────────────────────────
+
+const NAIVE_RE = /^\d{4}-\d{2}-\d{2}[ ]\d{2}:\d{2}:\d{2}$/;
 
 function fmtFoxTime(t) {
   if (!t) return undefined;
-  return String(t).replace('T', ' ').replace(/\.[0-9]+Z?$/, '').slice(0, 19);
+  const str = String(t).trim();
+  if (NAIVE_RE.test(str)) return str;
+  return toSourceNaive(str, config.foxlogger.timezone) || undefined;
+}
+
+function foxTimeRange(params = {}) {
+  return {
+    time1: fmtFoxTime(params.from) || fmtFoxTime(params.time1) || toSourceNaive(new Date(Date.now() - 86400000), config.foxlogger.timezone),
+    time2: fmtFoxTime(params.to) || fmtFoxTime(params.time2) || toSourceNaive(new Date(), config.foxlogger.timezone),
+  };
 }
 
 async function getDevices(params = {}) {
@@ -380,15 +411,31 @@ async function getDeviceRoute(deviceId, params = {}) {
   if (!uid || !deviceId) return [];
 
   const imei = resolveImei(deviceId);
-  const time1 = fmtFoxTime(params.from) || fmtFoxTime(params.time1) || new Date(Date.now() - 86400000).toISOString().replace('T', ' ').slice(0, 19);
-  const time2 = fmtFoxTime(params.to) || fmtFoxTime(params.time2) || new Date().toISOString().replace('T', ' ').slice(0, 19);
+  const { time1, time2 } = foxTimeRange(params);
 
-  const res = await getApi().get('/web-tracker-staging/report-history', {
+  const [histRes, rollRes] = await Promise.allSettled([
+    getApi().get('/web-tracker-staging/report-history', { params: { imei, user_id: uid, time1, time2 } }),
+    getApi().get('/web-tracker-staging/report-rollback', { params: { imei, user_id: uid, time1, time2 } }),
+  ]);
+
+  const rawHist = histRes.status === 'fulfilled' ? (histRes.value.data?.data || []) : [];
+  const rawRoll = rollRes.status === 'fulfilled' ? (rollRes.value.data?.data || []) : [];
+
+  return enrichHistoryWithRollback(imei, rawHist, rawRoll);
+}
+
+async function getDeviceRollback(deviceId, params = {}) {
+  const uid = cachedUserId || params.user_id;
+  if (!uid || !deviceId) return [];
+
+  const imei = resolveImei(deviceId);
+  const { time1, time2 } = foxTimeRange(params);
+
+  const res = await getApi().get('/web-tracker-staging/report-rollback', {
     params: { imei, user_id: uid, time1, time2 },
   });
 
-  const raw = res.data?.data || [];
-  return raw.map((p) => normalizeHistoryPosition(imei, p)).filter(Boolean);
+  return res.data?.data || [];
 }
 
 async function getDeviceParking(deviceId, params = {}) {
@@ -396,8 +443,7 @@ async function getDeviceParking(deviceId, params = {}) {
   if (!uid || !deviceId) return [];
 
   const imei = resolveImei(deviceId);
-  const time1 = fmtFoxTime(params.from) || fmtFoxTime(params.time1) || new Date(Date.now() - 86400000).toISOString().replace('T', ' ').slice(0, 19);
-  const time2 = fmtFoxTime(params.to) || fmtFoxTime(params.time2) || new Date().toISOString().replace('T', ' ').slice(0, 19);
+  const { time1, time2 } = foxTimeRange(params);
 
   const res = await getApi().get('/web-tracker-staging/report-park', {
     params: { imei, user_id: uid, time1, time2 },
@@ -411,8 +457,7 @@ async function getDeviceSummary(deviceId, params = {}) {
   if (!uid || !deviceId) return {};
 
   const imei = resolveImei(deviceId);
-  const time1 = fmtFoxTime(params.from) || fmtFoxTime(params.time1) || new Date(Date.now() - 86400000).toISOString().replace('T', ' ').slice(0, 19);
-  const time2 = fmtFoxTime(params.to) || fmtFoxTime(params.time2) || new Date().toISOString().replace('T', ' ').slice(0, 19);
+  const { time1, time2 } = foxTimeRange(params);
 
   const res = await getApi().get('/web-tracker/report-summary', {
     params: { imei, user_id: uid, time1, time2 },
@@ -465,10 +510,13 @@ module.exports = {
   normalizeDevice,
   normalizeReportPosition,
   normalizeHistoryPosition,
+  enrichHistoryWithRollback,
+  fmtFoxTime,
   getDevices,
   searchDevices,
   getPositions,
   getDeviceRoute,
+  getDeviceRollback,
   getDeviceParking,
   getDeviceSummary,
   getGeoFences,

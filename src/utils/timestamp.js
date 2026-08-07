@@ -67,4 +67,35 @@ function toUtcDateStr(value) {
   return iso.slice(0, 10);
 }
 
-module.exports = { toUtcIso, toUtcDateStr };
+function toSourceNaive(value, timeZone = config.foxlogger.timezone) {
+  const iso = toUtcIso(value);
+  if (!iso) return null;
+  const d = new Date(iso);
+  const offset = getTimeZoneOffsetMs(d, timeZone);
+  const local = new Date(d.getTime() + offset);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${local.getUTCFullYear()}-${pad(local.getUTCMonth() + 1)}-${pad(local.getUTCDate())} ${pad(local.getUTCHours())}:${pad(local.getUTCMinutes())}:${pad(local.getUTCSeconds())}`;
+}
+
+function isValidTimeZone(tz) {
+  if (!tz) return false;
+  try {
+    Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function startOfDayIso(value = new Date(), timeZone = config.foxlogger.timezone) {
+  try {
+    const naive = toSourceNaive(value, timeZone);
+    if (!naive) return null;
+    return toUtcIso(`${naive.slice(0, 10)} 00:00:00`, { timeZone });
+  } catch {
+    const iso = toUtcIso(value);
+    return iso ? `${iso.slice(0, 10)}T00:00:00.000Z` : null;
+  }
+}
+
+module.exports = { toUtcIso, toUtcDateStr, toSourceNaive, isValidTimeZone, startOfDayIso };

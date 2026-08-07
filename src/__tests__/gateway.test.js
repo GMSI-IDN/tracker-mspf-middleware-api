@@ -4,6 +4,8 @@ jest.mock('../services/traccar', () => ({
   getDevices: jest.fn(),
   getGroups: jest.fn(),
   getPositions: jest.fn(),
+  getReportRoute: jest.fn(),
+  toKmh: jest.fn((s) => (s ? parseFloat((s * 1.852).toFixed(2)) : 0)),
   getCommands: jest.fn(),
   getCommandTypes: jest.fn(),
   sendCommand: jest.fn(),
@@ -77,6 +79,7 @@ const traccar = require('../services/traccar');
 const mspf = require('../services/mspf');
 const foxlogger = require('../services/foxlogger');
 const db = require('../db');
+const { startOfDayIso } = require('../utils/timestamp');
 
 const app = require('../app');
 
@@ -181,16 +184,17 @@ describe('User Management', () => {
     const customerToken = login.body.token;
 
     // Admin can create a customer user for testing
+    await db('users').where({ username: 'test_customer' }).delete();
     const create = await request(app)
       .post('/api/users')
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ username: 'test_customer', password: 'pass', role: 'customer', groups: [] });
+      .send({ username: 'test_customer', password: 'pass123', role: 'customer', groups: [], timezone: 'Asia/Jakarta' });
     expect([201, 409]).toContain(create.status);
 
     // Login as customer
     const cl = await request(app)
       .post('/api/auth/login')
-      .send({ username: 'test_customer', password: 'pass' });
+      .send({ username: 'test_customer', password: 'pass123' });
     const ct = cl.body.token;
 
     const res = await request(app)
@@ -225,6 +229,78 @@ describe('User Management', () => {
       .send({ role: 'customer' });
     expect(res.status).toBe(200);
     expect(res.body.role).toBe('customer');
+  });
+
+  test('POST /api/users without timezone returns 400', async () => {
+    const res = await request(app)
+      .post('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ username: 'tz_missing', password: 'pass123', role: 'customer', groups: [] });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('ERR_VALIDATION');
+    expect(res.body.error).toContain('Timezone is required');
+  });
+
+  test('POST /api/users with invalid timezone returns 400', async () => {
+    const res = await request(app)
+      .post('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ username: 'tz_invalid', password: 'pass123', role: 'customer', groups: [], timezone: 'Not/AZone' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('ERR_VALIDATION');
+  });
+
+  test('POST /api/users creates user with timezone', async () => {
+    await db('users').where({ username: 'tz_ok' }).delete();
+    const res = await request(app)
+      .post('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ username: 'tz_ok', password: 'pass123', role: 'customer', groups: [], timezone: 'Asia/Jakarta' });
+    expect(res.status).toBe(201);
+    expect(res.body.timezone).toBe('Asia/Jakarta');
+  });
+
+  test('PUT /api/users/:id updates timezone', async () => {
+    const users = await request(app)
+      .get('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`);
+    const tzUser = users.body.find(u => u.username === 'tz_ok');
+    expect(tzUser).toBeDefined();
+
+    const res = await request(app)
+      .put(`/api/users/${tzUser.id}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ timezone: 'Asia/Tokyo' });
+    expect(res.status).toBe(200);
+    expect(res.body.timezone).toBe('Asia/Tokyo');
+  });
+
+  test('PUT /api/users/:id with invalid timezone returns 400', async () => {
+    const users = await request(app)
+      .get('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`);
+    const tzUser = users.body.find(u => u.username === 'tz_ok');
+    expect(tzUser).toBeDefined();
+
+    const res = await request(app)
+      .put(`/api/users/${tzUser.id}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ timezone: 'Mars/Olympus' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('ERR_VALIDATION');
+  });
+
+  test('GET /api/auth/me includes timezone fallback for legacy users', async () => {
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'admin', password: 'admin123' });
+    expect(login.body.user.timezone).toBe('Asia/Jakarta');
+
+    const res = await request(app)
+      .get('/api/auth/me')
+      .set('Authorization', `Bearer ${login.body.token}`);
+    expect(res.status).toBe(200);
+    expect(res.body.timezone).toBe('Asia/Jakarta');
   });
 });
 
@@ -432,13 +508,14 @@ describe('Admin Custom Groups', () => {
 
   test('GET /api/admin/groups with customer token returns 403', async () => {
     // First create a customer user if not exists
+    await db('users').where({ username: 'cust_test' }).delete();
     await request(app)
       .post('/api/users')
       .set('Authorization', `Bearer ${token}`)
-      .send({ username: 'cust_test', password: 'pass', role: 'customer', groups: [] });
+      .send({ username: 'cust_test', password: 'pass123', role: 'customer', groups: [], timezone: 'Asia/Jakarta' });
     const login = await request(app)
       .post('/api/auth/login')
-      .send({ username: 'cust_test', password: 'pass' });
+      .send({ username: 'cust_test', password: 'pass123' });
     const custToken = login.body.token;
     const res = await request(app)
       .get('/api/admin/groups')
@@ -547,7 +624,7 @@ describe('Custom Attributes', () => {
   test('GET /api/groups/:id/preview with customer returns 403 if not assigned', async () => {
     const login = await request(app)
       .post('/api/auth/login')
-      .send({ username: 'test_customer', password: 'pass' });
+      .send({ username: 'test_customer', password: 'pass123' });
     const customerToken = login.body.token;
 
     const res = await request(app)
@@ -1205,7 +1282,7 @@ describe('Summary Time-Series Group', () => {
   test('GET /api/reports/summary group with customer not assigned returns 403', async () => {
     const login = await request(app)
       .post('/api/auth/login')
-      .send({ username: 'test_customer', password: 'pass' });
+      .send({ username: 'test_customer', password: 'pass123' });
     const customerToken = login.body.token;
 
     const res = await request(app)
@@ -1293,6 +1370,127 @@ describe('Event Reports', () => {
     expect(res.body.events.length).toBe(1);
     expect(res.body.events[0].status).toBe('OPEN');
     expect(res.body.summary.total).toBe(1);
+  });
+});
+
+describe('Route Reports (playback)', () => {
+  let token;
+  const traccarDeviceId = 900901;
+  const mspfDeviceId = 900902;
+  const foxDeviceId = '0780901703170270';
+
+  beforeAll(async () => {
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'admin', password: 'admin123' });
+    token = login.body.token;
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('GET /api/reports/route without deviceId returns 400', async () => {
+    const res = await request(app)
+      .get('/api/reports/route')
+      .set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('ERR_VALIDATION');
+  });
+
+  test('GET /api/reports/route without token returns 401', async () => {
+    const res = await request(app).get(`/api/reports/route?deviceId=${traccarDeviceId}`);
+    expect(res.status).toBe(401);
+  });
+
+  test('GET /api/reports/route returns Traccar route via /reports/route sorted ASC', async () => {
+    traccar.getDevices.mockResolvedValue([{ id: traccarDeviceId, name: 'Test Traccar', uniqueId: 'test', status: 'online', groupId: 5 }]);
+    traccar.getReportRoute.mockResolvedValue([
+      { id: 3, deviceId: traccarDeviceId, latitude: -6.1, longitude: 106.8, speed: 30, deviceTime: '2026-06-15T12:00:00Z' },
+      { id: 1, deviceId: traccarDeviceId, latitude: -6.0, longitude: 106.7, speed: 10, deviceTime: '2026-06-15T10:00:00Z' },
+      { id: 2, deviceId: traccarDeviceId, latitude: -6.05, longitude: 106.75, speed: 20, deviceTime: '2026-06-15T11:00:00Z' },
+    ]);
+
+    const res = await request(app)
+      .get(`/api/reports/route?deviceId=${traccarDeviceId}&from=2026-06-15T00:00:00Z&to=2026-06-15T23:59:59Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body.length).toBe(3);
+    expect(res.body.every(p => p.source === 'traccar')).toBe(true);
+    const times = res.body.map(p => new Date(p.deviceTime).getTime());
+    expect([...times].sort((a, b) => a - b)).toEqual(times);
+    expect(traccar.getReportRoute).toHaveBeenCalledWith({
+      deviceId: traccarDeviceId,
+      from: '2026-06-15T00:00:00Z',
+      to: '2026-06-15T23:59:59Z',
+    });
+    expect(traccar.getPositions).not.toHaveBeenCalled();
+  });
+
+  test('GET /api/reports/route supplies default range (start of user day -> now)', async () => {
+    traccar.getDevices.mockResolvedValue([{ id: traccarDeviceId, name: 'Test Traccar', uniqueId: 'test', status: 'online', groupId: 5 }]);
+    traccar.getReportRoute.mockResolvedValue([]);
+
+    const before = Date.now();
+    const res = await request(app)
+      .get(`/api/reports/route?deviceId=${traccarDeviceId}`)
+      .set('Authorization', `Bearer ${token}`);
+    const after = Date.now();
+
+    expect(res.status).toBe(200);
+    const { from, to } = traccar.getReportRoute.mock.calls[0][0];
+    const fromMs = new Date(from).getTime();
+    const toMs = new Date(to).getTime();
+    const expectedFromMs = new Date(startOfDayIso(new Date(), 'Asia/Jakarta')).getTime();
+    expect(Math.abs(fromMs - expectedFromMs)).toBeLessThan(60000);
+    expect(fromMs).toBeLessThanOrEqual(toMs);
+    expect(toMs).toBeGreaterThanOrEqual(before - 5000);
+    expect(toMs).toBeLessThanOrEqual(after + 5000);
+  });
+
+  test('GET /api/reports/route returns MSPF route sorted ASC', async () => {
+    traccar.getDevices.mockResolvedValue([]);
+    mspf.getDevice.mockResolvedValue({ id: mspfDeviceId, status: 'WORKING' });
+    mspf.getDeviceRoute.mockResolvedValue([
+      { deviceId: mspfDeviceId, latitude: -7.32, longitude: 112.74, speed: 40, deviceTime: '2026-06-15T12:00:00Z' },
+      { deviceId: mspfDeviceId, latitude: -7.31, longitude: 112.73, speed: 20, deviceTime: '2026-06-15T10:00:00Z' },
+    ]);
+
+    const res = await request(app)
+      .get(`/api/reports/route?deviceId=${mspfDeviceId}&from=2026-06-15T00:00:00Z&to=2026-06-15T23:59:59Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.length).toBe(2);
+    const times = res.body.map(p => new Date(p.deviceTime).getTime());
+    expect([...times].sort((a, b) => a - b)).toEqual(times);
+    expect(res.body[0].deviceTime).toBe('2026-06-15T10:00:00Z');
+  });
+
+  test('GET /api/reports/route returns FoxLogger route sorted ASC', async () => {
+    traccar.getDevices.mockResolvedValue([]);
+    mspf.getDevice.mockResolvedValue(null);
+    foxlogger.getDevices.mockResolvedValue({
+      data: [{ id: parseInt(foxDeviceId, 10), uniqueId: foxDeviceId, name: 'FL Device', status: 'online' }],
+      total: 1,
+      next: null,
+    });
+    foxlogger.getDeviceRoute.mockResolvedValue([
+      { deviceId: parseInt(foxDeviceId, 10), latitude: -6.31, longitude: 106.94, speed: 0, deviceTime: '2026-07-28T08:00:00Z' },
+      { deviceId: parseInt(foxDeviceId, 10), latitude: -6.32, longitude: 106.95, speed: 0, deviceTime: '2026-07-28T07:00:00Z' },
+    ]);
+
+    const res = await request(app)
+      .get(`/api/reports/route?deviceId=${foxDeviceId}&from=2026-07-28T00:00:00Z&to=2026-07-28T23:59:59Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.length).toBe(2);
+    const times = res.body.map(p => new Date(p.deviceTime).getTime());
+    expect([...times].sort((a, b) => a - b)).toEqual(times);
+    expect(res.body[0].deviceTime).toBe('2026-07-28T07:00:00Z');
   });
 });
 

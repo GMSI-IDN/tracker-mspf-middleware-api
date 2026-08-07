@@ -6,7 +6,8 @@ const foxlogger = require('../services/foxlogger');
 const deviceRouter = require('../services/deviceRouter');
 const db = require('../db');
 const cache = require('../services/cache');
-const { toUtcIso, toUtcDateStr } = require('../utils/timestamp');
+const config = require('../config');
+const { toUtcIso, toUtcDateStr, startOfDayIso } = require('../utils/timestamp');
 const { buildSeries } = require('../utils/periodStats');
 const { applyRules, enrichWithRules, getDeviceRules } = require('../services/customAttributes');
 
@@ -40,6 +41,10 @@ router.get('/route', async (req, res, next) => {
   try {
     const { deviceId, group, source, from, to } = req.query;
     if (!deviceId) throw createError(400, 'deviceId is required', { code: 'ERR_VALIDATION' });
+
+    const userTimezone = req.user.timezone || config.timezone.default;
+    const effectiveFrom = from || startOfDayIso(new Date(), userTimezone);
+    const effectiveTo = to || new Date().toISOString();
 
     const idNum = parseInt(deviceId, 10);
     const idStr = deviceId;
@@ -87,9 +92,9 @@ router.get('/route', async (req, res, next) => {
       if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
     }
 
-    if (devSource === 'mspf' && from && to) {
-      const fromMs = new Date(from).getTime();
-      const toMs = new Date(to).getTime();
+    if (devSource === 'mspf' && effectiveFrom && effectiveTo) {
+      const fromMs = new Date(effectiveFrom).getTime();
+      const toMs = new Date(effectiveTo).getTime();
       if (toMs - fromMs > 7 * 24 * 3600 * 1000) {
         throw createError(400, 'Date range max 7 days for MSPF devices', { code: 'ERR_VALIDATION' });
       }
@@ -97,15 +102,17 @@ router.get('/route', async (req, res, next) => {
 
     let positions;
     if (devSource === 'traccar') {
-      const data = await traccar.getPositions({ deviceId: idNum, from, to });
+      const data = await traccar.getReportRoute({ deviceId: idNum, from: effectiveFrom, to: effectiveTo });
       positions = data.map(normalizeTraccarPosition);
     } else if (devSource === 'foxlogger') {
       const foxId = req.query.deviceId;
-      const data = await foxlogger.getDeviceRoute(foxId, { from, to, user_id: foxlogger.getUserId() });
+      const data = await foxlogger.getDeviceRoute(foxId, { from: effectiveFrom, to: effectiveTo, user_id: foxlogger.getUserId() });
       positions = (data || []).map(p => ({ ...p, source: 'foxlogger' }));
     } else {
-      positions = await mspf.getDeviceRoute(idNum, { from, to });
+      positions = await mspf.getDeviceRoute(idNum, { from: effectiveFrom, to: effectiveTo });
     }
+
+    positions = (positions || []).sort((a, b) => (new Date(a.deviceTime).getTime() || 0) - (new Date(b.deviceTime).getTime() || 0));
 
     await applyCustomAttributes(positions, req.user);
     res.json(positions);

@@ -9,6 +9,8 @@ Base URL: `http://localhost:3000`
 > - **MSPF:** `timestamp` (unix seconds) / `insDtm` / `createdAt` / `lastCommunicatedAt` → UTC ISO.
 > - **FoxLogger:** timestamp naif `"YYYY-MM-DD HH:mm:ss"` (waktu lokal Jakarta) → dikonversi ke UTC. Zona default `Asia/Jakarta` (bisa diubah via env `FOXLOGGER_TIMEZONE`).
 >
+> **Request ke FoxLogger (`time1`/`time2`):** FE mengirim range dalam **UTC**; Gateway **mengonversi ke zona `FOXLOGGER_TIMEZONE` (default WIB)** sebelum dikirim ke FoxLogger sebagai `"YYYY-MM-DD HH:mm:ss"` (karena FoxLogger menginterpretasikan parameter waktu sebagai zona lokalnya). Berlaku untuk semua endpoint FoxLogger yang menerima range: `/api/reports/route`, `/parking`, `/summary`, dan enrich rollback. Jadi: `from=2026-08-05T17:00:00Z` → `time1=2026-08-06 00:00:00` (WIB).
+>
 > Frontend bebas melakukan konversi ke zona lokalnya sendiri (mis. `Intl.DateTimeFormat`).
 
 Semua endpoint (kecuali `/health` dan `/api/auth/login`) memerlukan **JWT token** di header:
@@ -327,6 +329,10 @@ Mengembalikan riwayat posisi device dalam range waktu tertentu. Format mengikuti
 >
 > **⚠️ Limitasi MSPF:** Range `from` dan `to` maksimal **7 hari**. Jika lebih, return `ERR_VALIDATION`.
 >
+> **Default range:** Jika `from`/`to` kosong, Gateway memakai **"hari ini"** → `from = 00:00 zona waktu user`, `to = waktu request`. Zona user diambil dari `users.timezone` (ditetapkan saat user dibuat, wajib IANA); fallback ke `DEFAULT_USER_TIMEZONE` (.env, default `Asia/Jakarta`) untuk user lama.
+>
+> **Urutan response:** Posisi diurutkan **ascending by `deviceTime`** (konsisten lintas source). Traccar diambil dari endpoint resmi `/reports/route` (bukan `/positions`), kecepatan dikonversi knots → km/h.
+>
 > **Query Parameters:**
 
 | Parameter | Tipe | Wajib | Deskripsi |
@@ -334,8 +340,8 @@ Mengembalikan riwayat posisi device dalam range waktu tertentu. Format mengikuti
 | `deviceId` | integer | ✅ | Device ID |
 | `source` | string | - | `traccar`, `mspf`, atau `foxlogger` |
 | `group` | string | - | Group/BC ID |
-| `from` | string | - | ISO 8601 — awal range |
-| `to` | string | - | ISO 8601 — akhir range |
+| `from` | string | - | ISO 8601 — awal range (default: 00:00 hari ini, zona user) |
+| `to` | string | - | ISO 8601 — akhir range (default: waktu request) |
 
 **Response 200 (admin — MSPF device enriched + custom attributes):**
 ```json
@@ -371,18 +377,21 @@ Mengembalikan riwayat posisi device dalam range waktu tertentu. Format mengikuti
     "latitude": -6.319752,
     "longitude": 106.948769,
     "speed": 0,
-    "course": 0,
+    "course": 89,
     "deviceTime": "2026-07-28T07:47:11Z",
     "source": "foxlogger",
     "attributes": {
       "address": "Jalan Wibawa Mukti II...",
       "movementStatus": "OFF",
       "mileage": 211.78,
-      "ignition": false
+      "ignition": false,
+      "nopol": "B 2412 PFQ"
     }
   }
 ]
 ```
+
+> **Enrichment FoxLogger:** `course` diisi dari `/report-rollback` (`dir`) dan `attributes.nopol` (plat nomor) dari endpoint yang sama, dicocokkan per waktu dengan `/report-history`. Jika tidak ada kecocokan rollback, `course` tetap 0 dan `nopol` tidak ada.
 
 **Response 200 (customer — hanya custom attributes):**
 ```json
@@ -1040,7 +1049,7 @@ Mengembalikan detail user.
 
 ### POST /api/users
 
-Membuat user baru.
+Membuat user baru. **`timezone` wajib** dan harus timezone IANA yang valid (contoh: `Asia/Jakarta`, `Asia/Tokyo`, `UTC`).
 
 **Request:**
 ```json
@@ -1048,7 +1057,8 @@ Membuat user baru.
   "username": "customer@company.com",
   "password": "pass123",
   "role": "customer",
-  "groups": [1, 5]
+  "groups": [1, 5],
+  "timezone": "Asia/Jakarta"
 }
 ```
 
@@ -1058,13 +1068,14 @@ Membuat user baru.
   "id": 2,
   "username": "customer@company.com",
   "role": "customer",
-  "groups": [1, 5]
+  "groups": [1, 5],
+  "timezone": "Asia/Jakarta"
 }
 ```
 
 ### PUT /api/users/:id
 
-Update data user. Semua field opsional — kirim hanya field yang ingin diubah.
+Update data user. Semua field opsional — kirim hanya field yang ingin diubah. `timezone` opsional, namun bila dikirim harus IANA yang valid.
 
 **Request:**
 ```json
@@ -1072,7 +1083,8 @@ Update data user. Semua field opsional — kirim hanya field yang ingin diubah.
   "username": "customer@company.com",
   "password": "newpass123",
   "role": "customer",
-  "groups": [1, 5, 3]
+  "groups": [1, 5, 3],
+  "timezone": "Asia/Tokyo"
 }
 ```
 
@@ -1082,9 +1094,12 @@ Update data user. Semua field opsional — kirim hanya field yang ingin diubah.
   "id": 2,
   "username": "customer@company.com",
   "role": "customer",
-  "groups": [1, 5, 3]
+  "groups": [1, 5, 3],
+  "timezone": "Asia/Tokyo"
 }
 ```
+
+> **Catatan timezone:** `GET /api/users`, `GET /api/users/:id`, `POST /api/auth/login`, dan `GET /api/auth/me` mengembalikan `timezone`. User lama (kolom `timezone` kosong) otomatis dilaporkan dengan nilai `DEFAULT_USER_TIMEZONE` dari `.env` (default `Asia/Jakarta`). Zona ini dipakai untuk default range "hari ini" di endpoint report (mis. `/api/reports/route`).
 
 ---
 
@@ -1415,8 +1430,9 @@ const socket = io('wss://hostname/api/ws', {
 
 #### `position`
 
-Dikirim setiap ada update posisi dari **Traccar** (via WebSocket real-time atau REST polling fallback), **MSPF** (via polling setiap 10 detik), dan **FoxLogger** (via polling `report-position` setiap 10 detik, hanya jika kredensial FoxLogger dikonfigurasi).
+Dikirim saat ada **perubahan** data posisi device dari **Traccar** (via WebSocket real-time atau REST polling fallback), **MSPF** & **FoxLogger** (via background worker `positionSync` setiap 10 detik).
 
+> **Emit change-only:** `position` hanya dikirim saat data device berubah (dibandingkan key `lat/lon/speed/course/deviceTime/ignition`). Device diam tanpa data baru **tidak** menerima `position` berulang. Saat dikirim, `speed` & `course` tetap disertakan (MSPF course dari `mobilityData.dir`).
 > **Filter:** Hanya device **WORKING** (MSPF) yang dikirim. Device SUSPENDED tidak masuk. Traccar: semua device dikirim. FoxLogger: hanya device yang tercatat di cache `devices:merged` (source `foxlogger`) yang dikirim.
 > **Access control:** Payload disaring berdasarkan role user yang terhubung.
 > - **Admin:** Mendapatkan semua enriched data + hasil custom attributes (rename/compute/passthrough).
@@ -1484,29 +1500,58 @@ Dikirim setiap ada update posisi dari **Traccar** (via WebSocket real-time atau 
 
 #### `device-status`
 
-Dikirim bersamaan dengan event `position`, berisi data status device yang sering berubah.
+Berisi **status koneksi device** + **status device (running)**. Field `status` dan 5 field sensor **wajib selalu ada** (nilai atau `null`). Dikirim dalam 3 kondisi:
+1. **Saat status berubah** (online → offline, offline → online) — edge-triggered.
+2. **Heartbeat** setiap `DEVICE_STATUS_HEARTBEAT_MS` (default 90 detik) untuk semua device aktif — menjaga `lastUpdate` tetap segar.
+3. **Snapshot saat koneksi WS connect/reconnect** — FE langsung mendapat status terkini (termasuk device offline) tanpa perlu refetch.
+
+> **`status` = status KONEKSI** (hanya `online` | `offline`):
+>
+> | Nilai | Kondisi |
+> |-------|---------|
+> | `online` | data terakhir diterima **< 10 menit** (`OFFLINE_THRESHOLD_MS`) |
+> | `offline` | tidak ada data baru **> 10 menit** |
+>
+> - **Tidak ada nilai `unknown`** — penanda "device mati/basi" memakai `running: UNKNOWN` (24 jam).
+> - Device **sleep (1 jam) / deep sleep (24 jam)** akan tampil `offline` di sela laporannya — ini sesuai definisi koneksi, bukan bug.
+> - `lastUpdate` saat offline = **waktu data terakhir diterima device** (BUKAN waktu deteksi offline).
+>
+> **Semantik field sensor (`ignition`, `voltage`, `internalBattery`, `batteryLevel`):**
+> - **Selalu ada** di payload (nilai atau `null`). `null` = data tidak tersedia (source tak sediakan / belum tahu).
+> - Saat **offline** → kelima field sensor **`null`** dan `running: "UNKNOWN"` (data basi).
+> - Saat **online** → nilai dari data terbaru (cache/enrich), `null` bila tak tersedia.
+>
+> **`running` = status DEVICE** (kondisi mesin/gerak), terpisah dari `status`. Parkir diam + komunikasi normal = `status: online` + `running: STOP/IDLE`.
+>
+> **Hysteresis:** offline setelah stale > `OFFLINE_THRESHOLD_MS` (10 menit); online kembali saat data fresh < `ONLINE_THRESHOLD_MS` (10 menit) + cooldown flip (`STATUS_COOLDOWN_MS`, 60 detik) — mencegah status berkedip.
+>
+> **Threshold offline configurable (hierarki, yang lebih spesifik menang):**
+> `device_metadata.offlineThresholdMs` / `reportIntervalMinutes` (>2× interval) **→ per-custom-group → per-device-type → per-source** (`TRACCAR_/MSPF_/FOXLOGGER_OFFLINE_THRESHOLD_MS`) **→ global** (`OFFLINE_THRESHOLD_MS`, default 10 menit). Level per-group/per-type siap diisi di masa depan (extension point resolver).
 
 ```json
 {
   "deviceId": 10258579,
   "source": "mspf",
+  "status": "offline",
   "lastUpdate": "2026-06-18T04:05:12Z",
-  "running": "IDLING",
-  "ignition": true,
-  "voltage": 13.59,
-  "internalBattery": 3.98,
-  "batteryLevel": 75
+  "running": "UNKNOWN",
+  "ignition": null,
+  "voltage": null,
+  "internalBattery": null,
+  "batteryLevel": null
 }
 ```
 
-**Running status:**
+**Running status (status device):**
 | Status | Ignition | Speed | Last Update | Keterangan |
 |--------|----------|-------|-------------|------------|
 | `RUN` | ON | > 0 | < 24 jam | Mesin nyala, berjalan |
-| `IDLING` | ON | = 0 | < 24 jam | Mesin nyala, berhenti |
+| `IDLING` (IDLE) | ON | = 0 | < 24 jam | Mesin nyala, berhenti |
 | `STOP` | OFF | = 0 | < 24 jam | Mesin mati |
 | `TOWING` | OFF | > 0 | < 24 jam | Mesin mati, kendaraan bergerak (diderek) |
-| `UNKNOWN` | - | - | **> 24 jam** | Data basi / tidak ada data terbaru |
+| `UNKNOWN` | - | - | **> 24 jam** | Device tidak terhubung / data basi (> 24 jam, boundary deep sleep) |
+
+> **`IDLING`** = nama field di API (konsisten dengan kode); **`IDLE`** = istilah definisi.
 
 > **MSPF:** `running` dari DeviceStatus asli (jika ada), fallback ke kalkulasi. `voltage` dari attributes.
 > **Traccar:** `running` dari kalkulasi `ignition` + `speed`. `voltage` dari `attributes.power`.

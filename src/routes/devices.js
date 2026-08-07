@@ -11,8 +11,17 @@ const validate = require('../middleware/validate');
 const { logger } = require('../middleware/logger');
 const { runAutoSync } = require('../services/autoSync');
 const { applyRules, getDeviceRules } = require('../services/customAttributes');
+const { statusTracker } = require('../utils/liveStatus');
 
 const router = express.Router();
+
+function overlayLiveStatus(devices) {
+  if (!devices || devices.length === 0) return;
+  for (const d of devices) {
+    const s = statusTracker.getStatus(d.id, d.source);
+    if (s) d.status = s;
+  }
+}
 
 function normalizeTraccarDevice(d) {
   return {
@@ -110,6 +119,7 @@ router.get('/', async (req, res, next) => {
 
       const paged = filtered.slice(offsetNum, offsetNum + limitNum);
       await enrichMetadata(paged);
+      overlayLiveStatus(paged);
       return res.json({ devices: paged, total: filtered.length, offset: offsetNum, limit: limitNum });
     }
 
@@ -204,6 +214,7 @@ router.get('/', async (req, res, next) => {
     }
 
     await enrichMetadata(paged);
+    overlayLiveStatus(paged);
     res.json({ devices: paged, total, offset: offsetNum, limit: limitNum });
   } catch (err) {
     next(err);
@@ -253,6 +264,7 @@ router.get('/:id', async (req, res, next) => {
       .modify((qb) => { if (!isAdmin) { if (userGroups.length > 0) qb.whereIn('group_id', userGroups); else qb.where('group_id', -1); } });
     device.customGroups = dgs.map(r => ({ id: r.gid, name: r.gname }));
     await enrichMetadata([device]);
+    overlayLiveStatus([device]);
 
     res.json(device);
   } catch (err) {

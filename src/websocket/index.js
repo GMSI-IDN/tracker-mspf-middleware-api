@@ -2,18 +2,15 @@ const jwt = require('jsonwebtoken');
 const WebSocket = require('ws');
 const config = require('../config');
 const traccar = require('../services/traccar');
-const mspf = require('../services/mspf');
 const foxlogger = require('../services/foxlogger');
 const { deriveRunningStatus } = require('../utils/deviceStatus');
 const { applyRules, computeFormula, getDeviceRules } = require('../services/customAttributes');
+const { statusTracker } = require('../utils/liveStatus');
+const { toUtcIso } = require('../utils/timestamp');
 const { logger } = require('../middleware/logger');
 const db = require('../db');
 
 let io = null;
-let mspfPollTimer = null;
-let lastKnownMspfIds = null;
-let foxloggerPollTimer = null;
-let lastKnownFoxloggerIds = null;
 
 let traccarWs = null;
 let traccarWsReconnectTimer = null;
@@ -56,15 +53,34 @@ function setupWebSocket(httpServer) {
       } else {
         console.log(`[WS] ${user.username} (${user.role}) connect, groups:[] → allowedDevices:0`);
       }
+    } else {
+      socket.allowedDevices = null;
     }
+
+    emitStatusSnapshot(socket, user);
   });
 
-  startMspfPolling();
-  startFoxLoggerPolling();
   connectTraccarWs();
 
   logger.info(`Socket.io ready at path: ${config.websocket.path}`);
   return io;
+}
+
+function emitStatusSnapshot(socket, user) {
+  try {
+    const filter = (key) => user.role === 'admin' || (socket.allowedDevices && socket.allowedDevices.has(key));
+    const snapshot = statusTracker.snapshot(filter);
+    for (const s of snapshot) {
+      socket.emit('device-status', buildStatusPayload({
+        deviceId: s.deviceId,
+        source: s.source,
+        status: s.status,
+        lastUpdate: s.lastKnownTime > 0 ? new Date(s.lastKnownTime).toISOString() : undefined,
+      }));
+    }
+  } catch (err) {
+    logger.warn(`WS: status snapshot failed: ${err.message}`);
+  }
 }
 
 function setupRedisAdapter(io) {
@@ -187,113 +203,44 @@ function emitDeviceStatusFrom(item) {
   emitDeviceStatus(item.deviceId, item.source, {
     deviceId: item.deviceId,
     source: item.source,
-    lastUpdate: lastUpdate || new Date().toISOString(),
-    running,
-    ignition: ignition !== undefined ? ignition : undefined,
-    voltage: item.attributes?.voltage || item.attributes?.power || undefined,
-    internalBattery: item.attributes?.addr_IB || undefined,
-    batteryLevel: item.attributes?.batteryLevel || undefined,
+    status: 'online',
+    lastUpdate: toUtcIso(lastUpdate) || new Date().toISOString(),
+    running: running || null,
+    ignition: ignition !== undefined ? ignition : null,
+    voltage: item.attributes?.voltage || item.attributes?.power || null,
+    internalBattery: item.attributes?.addr_IB || null,
+    batteryLevel: item.attributes?.batteryLevel || null,
   });
 }
 
-// ── MSPF Polling ─────────────────────────────────────────
-
-function getActiveMspfDeviceIds() {
+function getDeviceFromCache(deviceId, source) {
   try {
     const cache = require('../services/cache');
     const merged = cache.get('devices:merged');
-    if (merged) {
-      lastKnownMspfIds = new Set(merged.filter(d => d.source === 'mspf').map(d => d.id));
-    }
+    if (merged) return merged.find(x => x.id === deviceId && x.source === source);
   } catch {}
-  return lastKnownMspfIds;
+  return null;
 }
 
-function getMspfBcIds() {
-  try {
-    const cache = require('../services/cache');
-    const merged = cache.get('devices:merged');
-    if (!merged) return [];
-    return [...new Set(merged
-      .filter(d => d.source === 'mspf' && d.group)
-      .map(d => parseInt(d.group.replace('mspf_', ''), 10))
-    )];
-  } catch { return []; }
+function buildStatusPayload({ deviceId, source, status, lastUpdate }) {
+  const dev = getDeviceFromCache(deviceId, source);
+  const attrs = dev?.attributes || {};
+  const isOffline = status === 'offline';
+  return {
+    deviceId,
+    source,
+    status,
+    lastUpdate: toUtcIso(lastUpdate) || dev?.lastUpdate || new Date().toISOString(),
+    running: isOffline ? 'UNKNOWN' : (dev?.running || attrs.running || null),
+    ignition: isOffline ? null : (attrs.ignition ?? dev?.ignition ?? null),
+    voltage: isOffline ? null : (attrs.voltage ?? attrs.power ?? attrs.volt ?? dev?.voltage ?? null),
+    internalBattery: isOffline ? null : (attrs.addr_IB ?? dev?.internalBattery ?? null),
+    batteryLevel: isOffline ? null : (attrs.batteryLevel ?? dev?.batteryLevel ?? null),
+  };
 }
 
-function startMspfPolling() {
-  if (mspfPollTimer) clearInterval(mspfPollTimer);
-  mspfPollTimer = setInterval(async () => {
-    try {
-      const data = await mspf.getPositions({ limit: 1000, bc: getMspfBcIds() });
-      if (data && data.length > 0) {
-        const activeIds = getActiveMspfDeviceIds();
-        const filtered = activeIds ? data.filter(p => activeIds.has(p.deviceId)) : data;
-        if (filtered.length > 0) {
-          for (const item of filtered) {
-            await emitPosition({
-              deviceId: item.deviceId, latitude: item.latitude, longitude: item.longitude,
-              speed: item.speed, course: item.course, altitude: item.altitude,
-              deviceTime: item.deviceTime || new Date().toISOString(),
-              valid: item.valid !== false, source: 'mspf',
-              attributes: item.attributes,
-            });
-            emitDeviceStatusFrom(item);
-          }
-        }
-        // const rawCount = data.length;
-        // const allowed = activeIds ? activeIds.size : 0;
-        // logger.info(`[WS] MSPF: emit ${filtered.length} device (${rawCount} raw, ${allowed} allowed)`);
-      }
-    } catch (err) {
-      logger.warn(`WS MSPF poll: ${err.message}`);
-    }
-  }, config.websocket.pollInterval);
-}
-
-// ── FoxLogger Polling ────────────────────────────────────
-
-function getActiveFoxloggerIds() {
-  try {
-    const cache = require('../services/cache');
-    const merged = cache.get('devices:merged');
-    if (merged) {
-      lastKnownFoxloggerIds = new Set(merged.filter(d => d.source === 'foxlogger').map(d => d.id));
-    }
-  } catch {}
-  return lastKnownFoxloggerIds;
-}
-
-function startFoxLoggerPolling() {
-  if (!config.foxlogger.email || !config.foxlogger.password) {
-    logger.info('FoxLogger credentials not configured — WS FoxLogger polling skipped');
-    return;
-  }
-  if (foxloggerPollTimer) clearInterval(foxloggerPollTimer);
-  foxloggerPollTimer = setInterval(async () => {
-    try {
-      await foxlogger.waitForInit(5000);
-      const data = await foxlogger.getPositions();
-      if (data && data.length > 0) {
-        const activeIds = getActiveFoxloggerIds();
-        const filtered = activeIds ? data.filter(p => activeIds.has(p.deviceId)) : data;
-        if (filtered.length > 0) {
-          for (const item of filtered) {
-            await emitPosition({
-              deviceId: item.deviceId, latitude: item.latitude, longitude: item.longitude,
-              speed: item.speed, course: item.course, altitude: item.altitude,
-              deviceTime: item.deviceTime || new Date().toISOString(),
-              valid: item.valid !== false, source: 'foxlogger',
-              attributes: item.attributes,
-            });
-            emitDeviceStatusFrom(item);
-          }
-        }
-      }
-    } catch (err) {
-      logger.warn(`WS FoxLogger poll: ${err.message}`);
-    }
-  }, config.websocket.pollInterval);
+function emitStatusFor({ deviceId, source, status, lastUpdate }) {
+  emitDeviceStatus(deviceId, source, buildStatusPayload({ deviceId, source, status, lastUpdate }));
 }
 
 // ── Traccar WebSocket ─────────────────────────────────────
@@ -323,7 +270,18 @@ function connectTraccarWs() {
     traccarWs.on('message', async (raw) => {
       try {
         const msg = JSON.parse(raw.toString());
-        const positions = msg.positions || (Array.isArray(msg) ? msg : [msg]);
+        const events = msg.events || [];
+        const positions = msg.positions || (Array.isArray(msg) ? msg : (msg && msg.deviceId ? [msg] : []));
+
+        for (const ev of events) {
+          if (ev.type !== 'deviceOnline' && ev.type !== 'deviceOffline') continue;
+          const status = ev.type === 'deviceOnline' ? 'online' : 'offline';
+          const ts = ev.eventTime || new Date().toISOString();
+          const t = new Date(ts).getTime() || Date.now();
+          statusTracker.setStatus(ev.deviceId, 'traccar', status, t);
+          emitStatusFor({ deviceId: ev.deviceId, source: 'traccar', status, lastUpdate: ts });
+        }
+
         for (const pos of positions) {
           if (!pos.deviceId) continue;
           const speed = pos.speed ? parseFloat((pos.speed * 1.852).toFixed(2)) : 0;
@@ -390,4 +348,4 @@ function startTraccarFallback() {
   }, config.websocket.pollInterval);
 }
 
-module.exports = { setupWebSocket, emitPosition, emitDeviceStatus, emitCommandResult, getIO };
+module.exports = { setupWebSocket, emitPosition, emitDeviceStatus, emitDeviceStatusFrom, emitStatusFor, buildStatusPayload, emitCommandResult, getIO };

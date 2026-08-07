@@ -54,6 +54,10 @@ const config = {
     timezone: process.env.FOXLOGGER_TIMEZONE || 'Asia/Jakarta',
   },
 
+  timezone: {
+    default: process.env.DEFAULT_USER_TIMEZONE || 'Asia/Jakarta',
+  },
+
   cache: {
     ttl: parseInt(process.env.CACHE_DEVICE_TTL, 10) || 120,
     provider: process.env.CACHE_PROVIDER || 'node-cache',
@@ -63,6 +67,19 @@ const config = {
     path: process.env.WEBSOCKET_PATH || '/api/ws',
     pollInterval: parseInt(process.env.POLL_INTERVAL, 10) || 10000,
     redisUrl: process.env.REDIS_URL || '',
+  },
+
+  live: {
+    offlineThresholdMs: parseInt(process.env.OFFLINE_THRESHOLD_MS, 10) || 600000,
+    onlineThresholdMs: parseInt(process.env.ONLINE_THRESHOLD_MS, 10) || 600000,
+    statusCooldownMs: parseInt(process.env.STATUS_COOLDOWN_MS, 10) || 60000,
+    heartbeatMs: parseInt(process.env.DEVICE_STATUS_HEARTBEAT_MS, 10) || 90000,
+    emitChangeOnly: process.env.POSITION_EMIT_CHANGE_ONLY !== 'false',
+    sourceThresholds: {
+      traccar: parseInt(process.env.TRACCAR_OFFLINE_THRESHOLD_MS, 10) || 0,
+      mspf: parseInt(process.env.MSPF_OFFLINE_THRESHOLD_MS, 10) || 0,
+      foxlogger: parseInt(process.env.FOXLOGGER_OFFLINE_THRESHOLD_MS, 10) || 0,
+    },
   },
 
   cors: {

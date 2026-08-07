@@ -145,17 +145,62 @@
 | **Summary time-series** — `GET /api/reports/summary?granularity=day\|week\|month\|year` per device & per custom group (agregasi Traccar + MSPF + FoxLogger), bucket kosong diisi 0, backward compatible | ✅ |
 | **MSPF stats reports** — service `getDeviceStatsReports` + `getBcStatsReports` (DAILY/UTC, pagination, cache 1 jam) | ✅ |
 | **Unit + integration test** — `timestamp.test.js`, `periodStats.test.js`, summary time-series (total 108 test pass) | ✅ |
+| **Live Tracking Redesign** — StatusTracker (`liveStatus.js`) + single worker `positionSync` + WS change-only + online/offline + heartbeat + snapshot reconnect (detail di CHANGELOG 2026-08-06) | ✅ |
+| **Unit + integration test v2** — `liveStatus.test.js` (12) + `positionSync.test.js` (3) — total 123 test pass | ✅ |
+| **Kontrak `device-status` final** — 5 field sensor selalu ada (nilai/`null`); offline → sensor `null` + `running: "UNKNOWN"`; `lastUpdate` = waktu data terakhir; `status` connection = `online`/`offline` saja (tanpa `unknown`) | ✅ |
+| **Threshold hierarki extensible** — `resolveThresholds`: per-device → per-group (future) → per-type (future) → per-source → global (default **10 menit**) | ✅ |
+| **Unit + integration test v3** — `statusPayload.test.js` (4) + update liveStatus/positionSync (threshold 10m) — total **130 test pass** | ✅ |
+| **Playback FoxLogger enrich `course`+`nopol`** — `getDeviceRollback()` + `enrichHistoryWithRollback()` (merge `report-rollback` per waktu: `dir`→course, `nopol`→attributes), `getDeviceRoute` fetch paralel — **135 test pass** | ✅ |
+| **Bugfix timezone request FoxLogger** — `fmtFoxTime` tanpa konversi zona → `time1/time2` meleset -7 jam. Fix: `toSourceNaive()` + `foxTimeRange()`, semua endpoint ber-range (history/rollback/park/summary) — **141 test pass** | ✅ |
+| **Playback Traccar → `/reports/route`** — `traccar.getReportRoute()` (wrapper `GET /reports/route`, speed knots→km/h via `toKmh`), default range "hari ini" (00:00 zona user → now) saat `from`/`to` kosong, berlaku semua source | ✅ |
+| **Urutan playback konsisten ASC** — sort by `deviceTime` naik di gateway (safety net; MSPF sudah ASC via `reverse()`) | ✅ |
+| **Timezone per user** — kolom `users.timezone`, `timezone` **required** saat add user & optional saat edit (validasi IANA), fallback `DEFAULT_USER_TIMEZONE` (.env), login/`/me` + GET users mengembalikan `timezone`, default range report memakai zona user — **159 test pass** | ✅ |
 
-## Phase 3 — Analisis Live Tracking, Playback & Events `type` (2026-08-05)
+## Catatan Waktu FoxLogger (jangan diulang)
 
-> Catatan temuan & backlog — belum diimplementasikan. Prioritas saat ini: **live tracking & playback lancar & benar**, events menyusul.
+- **Response FoxLogger** = naif WIB → gateway konversi ke UTC (`toUtcIso`, pakai `FOXLOGGER_TIMEZONE`).
+- **Request `time1`/`time2` ke FoxLogger** = harus dikirim sebagai **naif zona `FOXLOGGER_TIMEZONE`** (default Asia/Jakarta), BUKAN UTC. FE kirim UTC → gateway konversi via `toSourceNaive`.
+- Zona dikendalikan env `FOXLOGGER_TIMEZONE` (config dibaca saat startup → restart bila diubah).
+
+## Definisi Status (catatan — jangan diubah tanpa persetujuan)
+
+**`running` — status DEVICE (kondisi mesin/gerak):**
+
+| Nilai | Kondisi |
+|-------|---------|
+| `RUN` | engine on, speed > 0 |
+| `IDLE` | engine on, speed 0 |
+| `STOP` | engine off, speed 0 |
+| `TOWING` | engine off, speed > 0 |
+| `UNKNOWN` | device tidak terhubung / update data **> 24 jam** (boundary deep sleep) |
+
+**`status` — status KONEKSI device:**
+
+| Nilai | Kondisi |
+|-------|---------|
+| `online` | masih komunikasi, data terakhir **< 10 menit** (`OFFLINE_THRESHOLD_MS` = 600000) |
+| `offline` | tidak ada data baru **> 10 menit** |
+| ~~`unknown`~~ | **tidak dipakai** — penanda "device mati/basi" diwakili `running: UNKNOWN` (> 24 jam) |
+
+**Catatan penting:**
+- Dua konsep ini **dipisah** — parkir diam + komunikasi normal = `status: online` + `running: STOP/IDLE`.
+- Device **sleep (1 jam)** / **deep sleep (24 jam)** tampil `offline` di sela laporan — wajar sesuai definisi koneksi; `running` tetap dari data terakhir (< 24 jam).
+- `null` pada field sensor (`ignition`, `voltage`, `internalBattery`, `batteryLevel`) = **data tidak tersedia**; saat offline → sensor `null`.
+- `lastUpdate` saat offline = **waktu data terakhir diterima device** (BUKAN waktu deteksi offline).
+
+## Phase 3 — Backlog Live Tracking, Playback & Events `type`
+
+> Prioritas saat ini: **live tracking & playback lancar & benar**, events menyusul.
 
 | Task | Status |
 |------|--------|
-| **Analisis live tracking** — Traccar: WS real-time (`/api/socket`) + fallback REST polling 10s; MSPF & FoxLogger: polling 10s (`report-position`). Semua posisi ter-normalisasi UTC. | ✅ analisis |
-| **Playback Traccar memakai `/positions`** — spec Traccar: `deviceId` **wajib disertai `from`+`to`** (tanpa → 400). Gateway `/api/reports/route` belum default range → Traccar bisa 400. **Harus ganti ke `/reports/route`** (endpoint resmi untuk route history) + default range (mis. 24 jam terakhir) bila kosong | ⬜ TODO |
-| **Service `traccar.getReportRoute()`** — tambah wrapper `GET /reports/route` (dipakai `/api/reports/route`) | ⬜ TODO |
-| **Urutan posisi playback konsisten ASC** — MSPF `getDeviceRoute` sudah `reverse()` (MSPF balas DESC); Traccar & FoxLogger perlu dipastikan urut naik. Tambah sort by `deviceTime` di gateway sebagai pengaman | ⬜ TODO |
+| **Analisis live tracking** — Traccar: WS real-time (`/api/socket`) + fallback REST polling 10s; MSPF & FoxLogger: polling 10s (`report-position`). Semua posisi ter-normalisasi UTC. | ✅ |
+| **Duplikasi polling MSPF** — WS poller ganda + positionSync → **fixed**: single worker `positionSync` emit via hook | ✅ |
+| **Offline detection** — hysteresis (`OFFLINE`/`ONLINE`/`COOLDOWN`), debounce device baru, threshold per-device/per-source/global, field `status` di `device-status`, snapshot saat reconnect, Traccar WS `events` (deviceOnline/Offline) | ✅ |
+| **Playback Traccar memakai `/positions`** — spec Traccar: `deviceId` **wajib disertai `from`+`to`** (tanpa → 400). Gateway `/api/reports/route` belum default range → Traccar bisa 400. **Harus ganti ke `/reports/route`** (endpoint resmi untuk route history) + default range (mis. 24 jam terakhir) bila kosong | ✅ **SELESAI 2026-08-06** — pakai `traccar.getReportRoute()`, default = **hari ini (00:00 zona user → now)** |
+| **Service `traccar.getReportRoute()`** — tambah wrapper `GET /reports/route` (dipakai `/api/reports/route`) | ✅ **SELESAI 2026-08-06** |
+| **Urutan posisi playback konsisten ASC** — MSPF `getDeviceRoute` sudah `reverse()` (MSPF balas DESC); Traccar & FoxLogger perlu dipastikan urut naik. Tambah sort by `deviceTime` di gateway sebagai pengaman | ✅ **SELESAI 2026-08-06** |
 | **Deteksi gap / offline di playback** — FE butuh info segmen tanpa data (device off) biar playback tidak "loncat"; potensi tambah field `gap`/`status` per titik | ⬜ Backlog |
 | **Events `type` (request FE)** — `/api/reports/events` **tidak punya field `type`**; data mentah ada (`e.type` Traccar, `e.monitorName` MSPF) tapi dibuang saat mapping. Rencana: tambah `type` di SEMUA response (single & multi-device) — Traccar raw type, MSPF `monitorName`; `name` tetap label enrich (null multi-device); envelope seragam (`geofenceId`/`monitorId`/`openedAt`/`closedAt` = null bila tak relevan). **Backlog — bukan prioritas sekarang** | ⬜ Backlog |
 | **Filter `?type=` server-side** — simetris dengan `?status=`/`?name=` (opsional, ikut saat implementasi events) | ⬜ Backlog |
+| **FoxLogger live speed/course 0** — limitasi source (`report-position` tidak sediakan kecepatan/arah); marker statis untuk **live** — sudah dikomunikasikan ke FE. (Playback kini punya `course`+`nopol` via `report-rollback`.) | ✅/partial |

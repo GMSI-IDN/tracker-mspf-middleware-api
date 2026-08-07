@@ -2,6 +2,74 @@
 
 > Semua perubahan signifikan dicatat di file ini.
 
+## 2026-08-06
+
+### Playback `/api/reports/route` — Traccar `/reports/route` + default range per-user timezone + urutan ASC
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **`traccar.getReportRoute()`** — wrapper `GET /reports/route` (endpoint resmi route history; `/positions` tidak dipakai lagi untuk playback agar tidak 400 saat `from`/`to` kosong). Konversi `speed` knots→km/h sama seperti `getPositions`. Helper murni **`toKmh()`** diextract & di-export | `src/services/traccar.js` |
+| ~now | **Default range "hari ini" per-user** — saat `from`/`to` kosong di `/api/reports/route`: `from = startOfDayIso(now, req.user.timezone)` (jam 00:00 zona user), `to = now`. Berlaku untuk **semua source** (Traccar/MSPF/FoxLogger) | `src/routes/reports.js`, `src/utils/timestamp.js` |
+| ~now | **Urutan playback konsisten ASC** — sort by `deviceTime` naik di gateway sebagai pengaman (MSPF sudah ASC via `reverse()`, Traccar/FoxLogger dipastikan naik) | `src/routes/reports.js` |
+| ~now | **Timezone per user** — kolom `users.timezone` (nullable, migrasi `20260806_add_user_timezone`); config `DEFAULT_USER_TIMEZONE` (default `Asia/Jakarta`) sebagai fallback user lama; **`timezone` required** saat add user, optional saat edit, divalidasi IANA (`isValidTimeZone`); login & `/me` mengembalikan `timezone` | `migrations/`, `src/config/index.js`, `src/routes/auth.js`, `src/routes/users.js`, `.env.example` |
+| ~now | **Validasi add/edit user diselaraskan** — POST kini validasi `password` min 6, `role` `isIn(['admin','customer'])`, `groups` `isArray` (konsisten dengan PUT) | `src/routes/users.js` |
+| ~now | **Test** — `traccar.test.js` (toKmh), `timestamp.test.js` (isValidTimeZone + startOfDayIso), gateway Route Reports + user timezone — total **159 test pass** | `src/__tests__/` |
+
+## 2026-08-06
+
+### Live Tracking Redesign (single worker + online/offline detection)
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **StatusTracker** — `src/utils/liveStatus.js`: change-detection posisi (key lat/lon/speed/course/deviceTime/ignition), status online/offline dengan **hysteresis** (`OFFLINE_THRESHOLD_MS` + `ONLINE_THRESHOLD_MS` + `STATUS_COOLDOWN_MS`), debounce device baru, threshold per-device (`reportIntervalMinutes` → 2× interval) / per-source / global, snapshot & heartbeat | `src/utils/liveStatus.js` |
+| ~now | **Single worker `positionSync`** — hapus duplikasi polling MSPF/FoxLogger di WS. Worker kini: fetch+enrich → cache → feed tracker → emit `position` change-only (MSPF/FoxLogger) via `setEmitHooks` → deteksi offline (edge-triggered) → heartbeat `device-status` | `src/services/positionSync.js` |
+| ~now | **WebSocket** — hapus `startMspfPolling`/`startFoxLoggerPolling` (dobel kerja), tambah field **`status`** di `device-status`, **snapshot status saat connect/reconnect**, proses Traccar WS `events` (deviceOnline/deviceOffline), `emitStatusFor`/`buildStatusPayload` | `src/websocket/index.js` |
+| ~now | **Wiring** — `positionSync.setEmitHooks({ onPosition, onStatus })` dihubungkan ke WS | `src/server.js` |
+| ~now | **`GET /api/devices` akurat** — overlay `status` dari StatusTracker (konsisten REST ↔ WS), `running` tidak disentuh | `src/routes/devices.js` |
+| ~now | **Config** — `OFFLINE_THRESHOLD_MS` (10m), `ONLINE_THRESHOLD_MS` (10m), `STATUS_COOLDOWN_MS` (60s), `TRACCAR_/MSPF_/FOXLOGGER_OFFLINE_THRESHOLD_MS`, `DEVICE_STATUS_HEARTBEAT_MS` (90s), `POSITION_EMIT_CHANGE_ONLY` (true) | `src/config/index.js`, `.env.example` |
+| ~now | **Test** — `liveStatus.test.js` (12) + `positionSync.test.js` (3) — total 123 test pass | `src/__tests__/` |
+
+### Kontrak `device-status` & Threshold (final, dengan FE)
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **`buildStatusPayload` dinormalisasi** — 5 field sensor (`ignition`, `voltage`, `internalBattery`, `batteryLevel`, `running`) **selalu ada** (nilai/`null`); `null` = data tidak tersedia. **Offline** → sensor `null` + `running: "UNKNOWN"`; `lastUpdate` = waktu data terakhir diterima device. `emitDeviceStatusFrom` juga diseragamkan. `buildStatusPayload` di-export untuk test | `src/websocket/index.js` |
+| ~now | **Connection `status` = `online`/`offline` saja** (tanpa `unknown`); sinyal "device mati/basi" diwakili `running: UNKNOWN` (>24 jam) | `src/websocket/index.js`, `src/utils/deviceStatus.js` (semantik) |
+| ~now | **Threshold hierarki extensible** — `resolveThresholds(source, meta, overrides)`: per-device (`device_metadata.offlineThresholdMs`/`reportIntervalMinutes`) → per-group (`overrides.perGroup`, future) → per-type (`overrides.perType`, future) → per-source → global | `src/utils/liveStatus.js` |
+| ~now | **Default threshold 10 menit** — `OFFLINE_THRESHOLD_MS` & `ONLINE_THRESHOLD_MS` = 600000 (definisi: online = data < 10m, offline = tidak ada data > 10m) | `src/config/index.js`, `.env.example` |
+| ~now | **Test** — `statusPayload.test.js` (4) + update liveStatus/positionSync utk threshold 10m — total **130 test pass** | `src/__tests__/` |
+
+### Bugfix — Timezone Request FoxLogger (`time1`/`time2` shift +7 jam)
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **Root cause** — `fmtFoxTime` hanya mereformat ISO `"…T17:00:00.000Z"` → `"… 17:00:00"` **tanpa konversi zona**. FE kirim UTC, tapi FoxLogger menginterpretasikan `time1/time2` sebagai zona lokal (WIB) → jendela request meleset **-7 jam** | `src/services/foxlogger.js` |
+| ~now | **`toSourceNaive(value, timeZone)`** — util baru di `timestamp.js` (kebalikan `toUtcIso`): konversi UTC ISO → string naif `"YYYY-MM-DD HH:mm:ss"` di zona `config.foxlogger.timezone` (default `FOXLOGGER_TIMEZONE`/`Asia/Jakarta`) | `src/utils/timestamp.js` |
+| ~now | **`fmtFoxTime` diperbaiki** — input ISO ber-zona → konversi ke naif zona source; input sudah naif → passthrough (fallback `time1/time2`). Default range (`24h` lalu → sekarang) juga ikut dikonversi via `foxTimeRange(params)` | `src/services/foxlogger.js` |
+| ~now | **Diterapkan ke semua endpoint FoxLogger ber-range** — `getDeviceRoute` (report-history+rollback), `getDeviceParking`, `getDeviceSummary` | `src/services/foxlogger.js` |
+| ~now | **Test** — `toSourceNaive` (timestamp.test.js) + `fmtFoxTime` (foxlogger.test.js) — total **141 test pass** | `src/__tests__/` |
+
+**Konfirmasi:** `from=2026-08-05T17:00:00Z` → `time1=2026-08-06 00:00:00` (WIB). Sisi response sudah benar sebelumnya (naif→UTC via `toUtcIso`).
+
+### Playback FoxLogger — enrich `course` + `nopol` via `report-rollback`
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **`getDeviceRollback()`** — service baru untuk `GET /web-tracker-staging/report-rollback` (param imei, user_id, time1, time2) | `src/services/foxlogger.js` |
+| ~now | **`enrichHistoryWithRollback()`** — normalisasi `report-history` + merge `report-rollback` per waktu: `dir` → root `course` (fallback 0), `nopol` → `attributes.nopol`. Murni & di-export untuk test | `src/services/foxlogger.js` |
+| ~now | **`getDeviceRoute` fetch paralel** — `report-history` + `report-rollback` via `Promise.allSettled` (salah satu gagal tidak memutus playback) | `src/services/foxlogger.js` |
+| ~now | **Test** — `foxlogger.test.js` (5) — total **135 test pass** | `src/__tests__/` |
+
+### Catatan Keputusan (dengan FE)
+- `status` = komunikasi; `running` = mesin/gerak — dipisah. Parkir diam + komunikasi normal = `online` + `running: STOP/IDLING`.
+- `device-status` field `status` wajib; dikirim on-change + heartbeat (~90s) + snapshot saat reconnect.
+- `position` change-only; tetap bawa `speed`/`course`; urutan untuk device baru: `position` dulu, baru `device-status: online`.
+- **`null` = data tidak tersedia**; 5 field sensor selalu ada (FE toleran terhadap payload lama yang absent).
+- **Offline → sensor `null` + `running: "UNKNOWN"`** (bukan nilai basi cache).
+- **Connection `unknown` tidak dipakai** — `running: UNKNOWN` (>24 jam) cukup sebagai penanda device mati/basi.
+- **Threshold offline default 10 menit**; hierarki override: device > group > type > source > global (level group/type = future extension point).
+- Device sleep (1 jam) / deep sleep (24 jam) tampil `offline` di sela laporan — sesuai definisi koneksi; `running` tetap dari data terakhir (<24 jam).
+
 ## 2026-08-05
 
 ### Fitur Baru — Summary Time-Series (Driving Report per Hari/Minggu/Bulan/Tahun)

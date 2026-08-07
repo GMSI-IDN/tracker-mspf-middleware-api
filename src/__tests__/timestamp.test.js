@@ -1,4 +1,4 @@
-const { toUtcIso, toUtcDateStr } = require('../utils/timestamp');
+const { toUtcIso, toUtcDateStr, toSourceNaive, isValidTimeZone, startOfDayIso } = require('../utils/timestamp');
 
 describe('timestamp util — toUtcIso', () => {
   test('returns null for empty / invalid values', () => {
@@ -49,5 +49,50 @@ describe('timestamp util — toUtcDateStr', () => {
   test('returns null for invalid input', () => {
     expect(toUtcDateStr(null)).toBeNull();
     expect(toUtcDateStr('garbage')).toBeNull();
+  });
+});
+
+describe('timestamp util — toSourceNaive (UTC ISO → source local naive)', () => {
+  test('converts UTC ISO to Asia/Jakarta (WIB) naive', () => {
+    expect(toSourceNaive('2026-08-05T17:00:00.000Z')).toBe('2026-08-06 00:00:00');
+    expect(toSourceNaive('2026-08-06T04:54:00.000Z')).toBe('2026-08-06 11:54:00');
+    expect(toSourceNaive('2026-08-06T00:00:00.000Z')).toBe('2026-08-06 07:00:00');
+  });
+
+  test('handles Date and naive input', () => {
+    expect(toSourceNaive(new Date('2026-08-05T17:00:00Z'))).toBe('2026-08-06 00:00:00');
+  });
+
+  test('returns null for invalid input', () => {
+    expect(toSourceNaive(null)).toBeNull();
+    expect(toSourceNaive('garbage')).toBeNull();
+  });
+});
+
+describe('timestamp util — isValidTimeZone', () => {
+  test('accepts valid IANA timezones', () => {
+    expect(isValidTimeZone('Asia/Jakarta')).toBe(true);
+    expect(isValidTimeZone('Asia/Tokyo')).toBe(true);
+    expect(isValidTimeZone('UTC')).toBe(true);
+  });
+
+  test('rejects invalid timezones', () => {
+    expect(isValidTimeZone('Not/AZone')).toBe(false);
+    expect(isValidTimeZone('Mars/Olympus')).toBe(false);
+    expect(isValidTimeZone('')).toBe(false);
+    expect(isValidTimeZone(null)).toBe(false);
+    expect(isValidTimeZone(undefined)).toBe(false);
+  });
+});
+
+describe('timestamp util — startOfDayIso', () => {
+  test('returns start of day (00:00) in the given timezone, converted to UTC', () => {
+    expect(startOfDayIso(new Date('2026-08-06T04:54:00.000Z'), 'Asia/Jakarta'))
+      .toBe('2026-08-05T17:00:00.000Z');
+  });
+
+  test('handles UTC timezone', () => {
+    expect(startOfDayIso(new Date('2026-08-06T04:54:00.000Z'), 'UTC'))
+      .toBe('2026-08-06T00:00:00.000Z');
   });
 });

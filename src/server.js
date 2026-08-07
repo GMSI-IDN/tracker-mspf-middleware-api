@@ -1,8 +1,8 @@
 const http = require('http');
 const app = require('./app');
 const config = require('./config');
-const { setupWebSocket } = require('./websocket');
-const { startPositionSync } = require('./services/positionSync');
+const { setupWebSocket, emitPosition, emitStatusFor } = require('./websocket');
+const { startPositionSync, setEmitHooks } = require('./services/positionSync');
 const traccar = require('./services/traccar');
 const mspf = require('./services/mspf');
 const foxlogger = require('./services/foxlogger');
@@ -52,6 +52,12 @@ async function buildDeviceCache() {
 const server = http.createServer(app);
 
 setupWebSocket(server);
+
+setEmitHooks({
+  onPosition: (item) => emitPosition(item),
+  onStatus: (payload) => emitStatusFor(payload),
+});
+
 buildDeviceCache().then(() => startPositionSync());
 
 server.listen(config.port, () => {
