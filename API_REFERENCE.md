@@ -135,7 +135,8 @@ Untuk admin, semua device. Untuk customer, hanya device di Group/BC yang di-assi
       ],
       "lastUpdate": "2026-05-15T10:00:30Z",
       "attributes": {},
-      "metadata": {}
+      "metadata": {},
+      "metadataOwners": {}
     },
     {
       "id": 10258579,
@@ -160,7 +161,8 @@ Untuk admin, semua device. Untuk customer, hanya device di Group/BC yang di-assi
         "activationReservation": "OFF",
         "firmwareVersion": "IIIA1.06"
       },
-      "metadata": {}
+      "metadata": {},
+      "metadataOwners": {}
     },
     {
       "id": 780901703170270,
@@ -180,7 +182,8 @@ Untuk admin, semua device. Untuk customer, hanya device di Group/BC yang di-assi
         "registrationDate": "2026-07-07",
         "mileage": 259.66
       },
-      "metadata": {}
+      "metadata": {},
+      "metadataOwners": {}
     }
   ],
   "total": 140,
@@ -226,6 +229,12 @@ Mengembalikan detail device. Untuk MSPF device, data diperkaya dengan DeviceStat
     "merek": "Mitsubishi",
     "tahun": "2024",
     "warna": "Putih"
+  },
+  "metadataOwners": {
+    "jenis": "admin",
+    "merek": "admin",
+    "tahun": "admin",
+    "warna": "admin"
   },
   "attributes": {
     "VIN": "BACKUP",
@@ -983,9 +992,20 @@ Unified activation endpoint — berfungsi untuk Traccar dan MSPF.
 
 Menyimpan metadata device (jenis kendaraan, merek, tahun, warna, dll). Data disimpan di middleware database, bukan dikirim via WebSocket.
 
-Bisa diakses oleh **admin** dan **customer** (customer hanya bisa edit device yang ada di group-nya).
+Metadata dibagi **2 kepemilikan (owner)**: `admin` dan `customer`.
 
-**Request:**
+| Owner | Siapa yang bisa tulis | Siapa yang bisa hapus |
+|-------|----------------------|----------------------|
+| `admin` | Admin saja (customer → **403**) | Admin saja (customer → **403**) |
+| `customer` | Customer & Admin | Customer & Admin |
+
+Aturan:
+- **Admin** default menulis ke `owner: 'admin'`; bisa menulis/hapus metadata customer via `owner: 'customer'`.
+- **Customer** selalu menulis ke `owner: 'customer'`; jika mencoba `owner: 'admin'` → **403 ERR_FORBIDDEN**.
+- Customer hanya bisa edit device yang ada di group-nya.
+- `updated_by` (user id) otomatis dicatat saat menulis.
+
+**Request (admin):**
 ```json
 {
   "source": "traccar",
@@ -998,11 +1018,22 @@ Bisa diakses oleh **admin** dan **customer** (customer hanya bisa edit device ya
 }
 ```
 
+**Request (customer):**
+```json
+{
+  "source": "traccar",
+  "metadata": {
+    "catatan": "tolong cek AC sebelum dipakai"
+  }
+}
+```
+
 **Response 200:**
 ```json
 {
   "deviceId": 10258579,
   "source": "mspf",
+  "owner": "admin",
   "metadata": {
     "jenis": "Box Cooler",
     "merek": "Mitsubishi",
@@ -1012,17 +1043,39 @@ Bisa diakses oleh **admin** dan **customer** (customer hanya bisa edit device ya
 }
 ```
 
-Metadata muncul di response `GET /api/devices` dan `GET /api/devices/:id` sebagai field `metadata`.
+Metadata muncul di response `GET /api/devices` dan `GET /api/devices/:id` sebagai field `metadata` (flat, gabungan admin + customer) + `metadataOwners` (peta pemilik per-key):
+
+```json
+{
+  "id": 10258579,
+  "name": "Box 1",
+  "metadata": {
+    "jenis": "Box Cooler",
+    "catatan": "tolong cek AC sebelum dipakai"
+  },
+  "metadataOwners": {
+    "jenis": "admin",
+    "catatan": "customer"
+  }
+}
+```
+
+> `metadataOwners` memberi tahu FE key mana yang di-lock (milik `admin`, tidak bisa diedit customer) vs milik `customer`. Jika key sama di kedua blob, nilai milik **admin** yang tampil.
 
 ### DELETE /api/devices/:id/metadata
 
 Menghapus metadata device. Query param `source` wajib.
 
-Akses: admin bebas, customer hanya bisa hapus device di group-nya.
+| Param | Deskripsi |
+|-------|-----------|
+| `source` | Wajib. `traccar` / `mspf` / `foxlogger` |
+| `owner` | Opsional. `admin` (default utk admin) / `customer`. Customer diabaikan → selalu `customer`; jika customer kirim `owner=admin` → **403** |
+
+Akses: admin bebas (hapus admin maupun customer via `owner`), customer hanya bisa hapus metadata **miliknya sendiri** (`owner=customer`) di device group-nya.
 
 **Request:**
 ```http
-DELETE /api/devices/10258579/metadata?source=mspf
+DELETE /api/devices/10258579/metadata?source=mspf&owner=customer
 Authorization: Bearer <token>
 ```
 
@@ -1031,6 +1084,7 @@ Authorization: Bearer <token>
 {
   "deviceId": 10258579,
   "source": "mspf",
+  "owner": "customer",
   "deleted": true
 }
 ```

@@ -155,6 +155,7 @@
 | **Playback Traccar → `/reports/route`** — `traccar.getReportRoute()` (wrapper `GET /reports/route`, speed knots→km/h via `toKmh`), default range "hari ini" (00:00 zona user → now) saat `from`/`to` kosong, berlaku semua source | ✅ |
 | **Urutan playback konsisten ASC** — sort by `deviceTime` naik di gateway (safety net; MSPF sudah ASC via `reverse()`) | ✅ |
 | **Timezone per user** — kolom `users.timezone`, `timezone` **required** saat add user & optional saat edit (validasi IANA), fallback `DEFAULT_USER_TIMEZONE` (.env), login/`/me` + GET users mengembalikan `timezone`, default range report memakai zona user — **159 test pass** | ✅ |
+| **Device metadata 2 owner** — tabel `device_metadata` direcreate + kolom `owner` (`admin`/`customer`) + `updated_by` (audit user id); response `GET devices`/detail jadi `metadata` flat gabungan + `metadataOwners` map per-key; rule: metadata admin **tidak bisa di-update/hapus customer** (403), customer hanya bisa tulis/hapus `owner=customer`, admin bisa edit kedua owner; data lama → `owner=admin`; helper murni `mergeMetadataBlobs` (admin menang saat key bentrok) | ✅ |
 
 ## Catatan Waktu FoxLogger (jangan diulang)
 

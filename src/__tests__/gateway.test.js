@@ -368,7 +368,9 @@ describe('Devices', () => {
 
 describe('Device Metadata', () => {
   let token;
+  let customerToken;
   let deviceId;
+  let groupId;
 
   beforeAll(async () => {
     const login = await request(app)
@@ -376,18 +378,53 @@ describe('Device Metadata', () => {
       .send({ username: 'admin', password: 'admin123' });
     token = login.body.token;
     deviceId = 999999;
+
+    await db('users').where({ username: 'meta_customer' }).delete();
+    await db('device_groups').where({ device_id: deviceId, source: 'traccar' }).delete();
+    await db('groups').where('name', 'meta_test_group').delete();
+    await db('device_metadata').where({ device_id: deviceId, source: 'traccar' }).delete();
+
+    const grp = await request(app)
+      .post('/api/admin/groups')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'meta_test_group' });
+    groupId = grp.body.id;
+    await db('device_groups').insert({ device_id: deviceId, source: 'traccar', group_id: groupId });
+
+    await request(app)
+      .post('/api/users')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ username: 'meta_customer', password: 'pass123', role: 'customer', groups: [groupId], timezone: 'Asia/Jakarta' });
+    const custLogin = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'meta_customer', password: 'pass123' });
+    customerToken = custLogin.body.token;
   });
 
-  test('PUT /api/devices/:id/metadata saves and returns metadata', async () => {
+  afterAll(async () => {
+    await db('users').where({ username: 'meta_customer' }).delete();
+    await db('device_groups').where({ device_id: deviceId, source: 'traccar' }).delete();
+    await db('groups').where('name', 'meta_test_group').delete();
+    await db('device_metadata').where({ device_id: deviceId, source: 'traccar' }).delete();
+  });
+
+  const mockDeviceDetail = () => {
+    traccar.getDevices.mockResolvedValue([
+      { id: deviceId, name: 'Test Device', uniqueId: 'TEST001', status: 'online', groupId: 1, attributes: {} },
+    ]);
+  };
+
+  test('PUT admin writes admin metadata', async () => {
     const res = await request(app)
       .put(`/api/devices/${deviceId}/metadata`)
       .set('Authorization', `Bearer ${token}`)
-      .send({ source: 'traccar', metadata: { jenis: 'Box', merek: 'Mitsubishi', tahun: '2024', warna: 'Putih' } });
+      .send({ source: 'traccar', metadata: { jenis: 'Box', merek: 'Mitsubishi' } });
     expect(res.status).toBe(200);
+    expect(res.body.owner).toBe('admin');
     expect(res.body.metadata.jenis).toBe('Box');
   });
 
-  test('PUT /api/devices/:id/metadata without body returns 400', async () => {
+  test('PUT without metadata body returns 400', async () => {
     const res = await request(app)
       .put(`/api/devices/${deviceId}/metadata`)
       .set('Authorization', `Bearer ${token}`)
@@ -395,29 +432,106 @@ describe('Device Metadata', () => {
     expect(res.status).toBe(400);
   });
 
-  test('Metadata appears in device detail', async () => {
-    traccar.getDevices.mockResolvedValue([
-      { id: deviceId, name: 'Test Device', uniqueId: 'TEST001', status: 'online', groupId: 1, attributes: {} },
-    ]);
+  test('Metadata appears in device detail with owners map', async () => {
+    mockDeviceDetail();
     const res = await request(app)
       .get(`/api/devices/${deviceId}?source=traccar`)
       .set('Authorization', `Bearer ${token}`);
     expect(res.status).toBe(200);
     expect(res.body.metadata).toBeDefined();
     expect(res.body.metadata.jenis).toBe('Box');
+    expect(res.body.metadataOwners).toBeDefined();
+    expect(res.body.metadataOwners.jenis).toBe('admin');
   });
 
-  test('DELETE /api/devices/:id/metadata removes metadata', async () => {
+  test('Customer writes own metadata, admin metadata untouched', async () => {
+    const res = await request(app)
+      .put(`/api/devices/${deviceId}/metadata`)
+      .set('Authorization', `Bearer ${customerToken}`)
+      .send({ source: 'traccar', metadata: { catatan: 'cek AC' } });
+    expect(res.status).toBe(200);
+    expect(res.body.owner).toBe('customer');
+
+    mockDeviceDetail();
+    const detail = await request(app)
+      .get(`/api/devices/${deviceId}?source=traccar`)
+      .set('Authorization', `Bearer ${customerToken}`);
+    expect(detail.body.metadata.jenis).toBe('Box');
+    expect(detail.body.metadata.catatan).toBe('cek AC');
+    expect(detail.body.metadataOwners.jenis).toBe('admin');
+    expect(detail.body.metadataOwners.catatan).toBe('customer');
+  });
+
+  test('Customer cannot write to admin metadata (owner=admin) → 403', async () => {
+    const res = await request(app)
+      .put(`/api/devices/${deviceId}/metadata`)
+      .set('Authorization', `Bearer ${customerToken}`)
+      .send({ source: 'traccar', owner: 'admin', metadata: { jenis: 'Hacked' } });
+    expect(res.status).toBe(403);
+  });
+
+  test('Customer cannot delete admin metadata → 403', async () => {
+    const res = await request(app)
+      .delete(`/api/devices/${deviceId}/metadata?source=traccar&owner=admin`)
+      .set('Authorization', `Bearer ${customerToken}`);
+    expect(res.status).toBe(403);
+  });
+
+  test('Customer can delete own metadata', async () => {
+    const res = await request(app)
+      .delete(`/api/devices/${deviceId}/metadata?source=traccar`)
+      .set('Authorization', `Bearer ${customerToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.owner).toBe('customer');
+
+    mockDeviceDetail();
+    const detail = await request(app)
+      .get(`/api/devices/${deviceId}?source=traccar`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(detail.body.metadata.jenis).toBe('Box');
+    expect(detail.body.metadata.catatan).toBeUndefined();
+  });
+
+  test('Admin can edit customer metadata (owner=customer)', async () => {
+    const res = await request(app)
+      .put(`/api/devices/${deviceId}/metadata`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ source: 'traccar', owner: 'customer', metadata: { catatan: 'diedit admin' } });
+    expect(res.status).toBe(200);
+    expect(res.body.owner).toBe('customer');
+    expect(res.body.metadata.catatan).toBe('diedit admin');
+  });
+
+  test('DELETE admin metadata as admin works (customer blob untouched)', async () => {
     const res = await request(app)
       .delete(`/api/devices/${deviceId}/metadata?source=traccar`)
       .set('Authorization', `Bearer ${token}`);
     expect(res.status).toBe(200);
+    expect(res.body.owner).toBe('admin');
     expect(res.body.deleted).toBe(true);
 
+    mockDeviceDetail();
+    const detail = await request(app)
+      .get(`/api/devices/${deviceId}?source=traccar`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(detail.body.metadata).toEqual({ catatan: 'diedit admin' });
+    expect(detail.body.metadataOwners).toEqual({ catatan: 'customer' });
+  });
+
+  test('DELETE customer metadata as admin works', async () => {
+    const res = await request(app)
+      .delete(`/api/devices/${deviceId}/metadata?source=traccar&owner=customer`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(200);
+    expect(res.body.owner).toBe('customer');
+    expect(res.body.deleted).toBe(true);
+
+    mockDeviceDetail();
     const detail = await request(app)
       .get(`/api/devices/${deviceId}?source=traccar`)
       .set('Authorization', `Bearer ${token}`);
     expect(detail.body.metadata).toEqual({});
+    expect(detail.body.metadataOwners).toEqual({});
   });
 
   test('DELETE /api/devices/9999/metadata without source returns 400', async () => {

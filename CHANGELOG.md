@@ -2,6 +2,20 @@
 
 > Semua perubahan signifikan dicatat di file ini.
 
+## 2026-08-07
+
+### Device Metadata — 2 Kepemilikan (Admin vs Customer) + Rule Akses
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **Schema split** — `device_metadata` direcreate: tambah kolom `owner` (`admin`/`customer`) + `updated_by` (user id, audit); PK baru `(device_id, source, owner)` → 2 baris per device; data lama dimigrasikan ke `owner='admin'` | `migrations/20260807_split_device_metadata_owner.js` |
+| ~now | **Helper `mergeMetadataBlobs`** — gabungkan blob admin + customer jadi `metadata` flat + `metadataOwners` map per-key; admin menang saat key bentrok | `src/utils/deviceMetadata.js` |
+| ~now | **`enrichMetadata`** — output `metadata` flat + `metadataOwners` di `GET /api/devices` & `/api/devices/:id` | `src/routes/devices.js` |
+| ~now | **Rule akses PUT** — admin default `owner=admin` (bisa pilih `owner=customer`); customer selalu `owner=customer`, jika kirim `owner=admin` → **403**; `updated_by` dicatat | `src/routes/devices.js` |
+| ~now | **Rule akses DELETE** — admin hapus admin (default) / customer via `?owner=`; customer hanya `owner=customer`, jika `owner=admin` → **403** | `src/routes/devices.js` |
+| ~now | **Test** — unit `deviceMetadata.test.js` (4) + integration Device Metadata di `gateway.test.js` (rule 403, blob admin tak tersentuh, admin edit customer) | `src/__tests__/` |
+| ~now | **Dokumentasi** — `API_REFERENCE.md` PUT/DELETE + contoh response `metadata`/`metadataOwners` | `API_REFERENCE.md` |
+
 ## 2026-08-06
 
 ### Playback `/api/reports/route` — Traccar `/reports/route` + default range per-user timezone + urutan ASC
