@@ -10,6 +10,8 @@ const validate = require('../middleware/validate');
 const { logger } = require('../middleware/logger');
 const { runAutoSync } = require('../services/autoSync');
 const { applyRules, getDeviceRules } = require('../services/customAttributes');
+const { statusTracker } = require('../utils/liveStatus');
+const { mergeMetadataBlobs } = require('../utils/deviceMetadata');
 
 const router = express.Router();
 
@@ -42,15 +44,19 @@ async function enrichMetadata(devices) {
   }
   const metaMap = {};
   for (const r of rows) {
-    metaMap[`${r.source}:${r.device_id}`] = r.data;
+    const k = `${r.source}:${r.device_id}`;
+    if (!metaMap[k]) metaMap[k] = { admin: {}, customer: {} };
+    try {
+      metaMap[k][r.owner] = JSON.parse(r.data);
+    } catch {
+      metaMap[k][r.owner] = {};
+    }
   }
   for (const d of devices) {
-    const raw = metaMap[`${d.source}:${d.id}`];
-    if (raw) {
-      try { d.metadata = JSON.parse(raw); } catch { d.metadata = {}; }
-    } else {
-      d.metadata = {};
-    }
+    const blobs = metaMap[`${d.source}:${d.id}`] || { admin: {}, customer: {} };
+    const { merged, owners } = mergeMetadataBlobs(blobs.admin, blobs.customer);
+    d.metadata = merged;
+    d.metadataOwners = owners;
   }
 }
 
@@ -236,6 +242,7 @@ router.get('/:id', async (req, res, next) => {
 
 router.put('/:id/metadata',
   body('metadata').isObject().withMessage('metadata must be an object'),
+  body('owner').optional().isIn(['admin', 'customer']).withMessage('owner must be admin or customer'),
   validate,
   async (req, res, next) => {
     try {
@@ -245,17 +252,35 @@ router.put('/:id/metadata',
       const devSource = req.body.source || req.query.source || deviceRouter.getSourceByDeviceId(deviceId);
       if (!devSource) throw createError(400, 'source is required', { code: 'ERR_VALIDATION' });
 
-      if (!isAdmin && userGroups.length > 0) {
+      let owner = 'admin';
+      if (isAdmin) {
+        owner = req.body.owner || 'admin';
+      } else {
+        if (req.body.owner && req.body.owner !== 'customer') {
+          throw createError(403, 'Forbidden: customer can only write own metadata', { code: 'ERR_FORBIDDEN' });
+        }
+        owner = 'customer';
+      }
+
+      if (!isAdmin) {
+        if (!userGroups.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
         const dg = await db('device_groups').where({ device_id: deviceId, source: devSource }).whereIn('group_id', userGroups).first();
         if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
       }
 
       await db('device_metadata')
-        .insert({ device_id: deviceId, source: devSource, data: JSON.stringify(req.body.metadata), updated_at: new Date().toISOString() })
-        .onConflict(['device_id', 'source'])
+        .insert({
+          device_id: deviceId,
+          source: devSource,
+          owner,
+          data: JSON.stringify(req.body.metadata),
+          updated_at: new Date().toISOString(),
+          updated_by: req.user.id ?? null,
+        })
+        .onConflict(['device_id', 'source', 'owner'])
         .merge();
 
-      res.json({ deviceId, source: devSource, metadata: req.body.metadata });
+      res.json({ deviceId, source: devSource, owner, metadata: req.body.metadata });
     } catch (err) {
       next(err);
     }
@@ -270,15 +295,26 @@ router.delete('/:id/metadata', async (req, res, next) => {
     const devSource = req.query.source || deviceRouter.getSourceByDeviceId(deviceId);
     if (!devSource) throw createError(400, 'source query param is required', { code: 'ERR_VALIDATION' });
 
-    if (!isAdmin && userGroups.length > 0) {
+    let owner = 'admin';
+    if (isAdmin) {
+      owner = req.query.owner || 'admin';
+    } else {
+      if (req.query.owner && req.query.owner !== 'customer') {
+        throw createError(403, 'Forbidden: customer can only delete own metadata', { code: 'ERR_FORBIDDEN' });
+      }
+      owner = 'customer';
+    }
+
+    if (!isAdmin) {
+      if (!userGroups.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
       const dg = await db('device_groups').where({ device_id: deviceId, source: devSource }).whereIn('group_id', userGroups).first();
       if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
     }
 
-    const deleted = await db('device_metadata').where({ device_id: deviceId, source: devSource }).delete();
+    const deleted = await db('device_metadata').where({ device_id: deviceId, source: devSource, owner }).delete();
     if (!deleted) throw createError(404, 'Metadata not found', { code: 'ERR_NOT_FOUND' });
 
-    res.json({ deviceId, source: devSource, deleted: true });
+    res.json({ deviceId, source: devSource, owner, deleted: true });
   } catch (err) {
     next(err);
   }
