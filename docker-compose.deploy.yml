@@ -35,6 +35,9 @@ services:
       - CORS_ORIGIN=${CORS_ORIGIN}
       - LOG_LEVEL=${LOG_LEVEL}
       - REQUEST_TIMEOUT=${REQUEST_TIMEOUT}
+      - FOXLOGGER_EMAIL=${FOXLOGGER_EMAIL}
+      - FOXLOGGER_PASSWORD=${FOXLOGGER_PASSWORD}
+      - CACHE_TTL=${CACHE_TTL}
     expose:
       - "${PORT}"
     volumes:
