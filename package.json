@@ -17,13 +17,15 @@
     "setupFiles": [
       "./src/__tests__/jest.setup.js"
     ],
+    "globalSetup": "./src/__tests__/globalSetup.js",
     "testEnvironment": "node",
     "roots": [
       "src/__tests__"
     ],
     "testPathIgnorePatterns": [
       "/node_modules/",
-      "jest.setup.js"
+      "jest.setup.js",
+      "globalSetup.js"
     ],
     "transform": {}
   },
