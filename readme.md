@@ -51,12 +51,13 @@ Field tambahan khusus Gateway (ada di semua device):
 
 ### 1.1 Purpose
 
-This API Gateway serves as a unified middleware layer that aggregates two separate GPS tracking systems into a single, cohesive API endpoint for a custom Frontend (FE) application:
+This API Gateway serves as a unified middleware layer that aggregates three separate GPS tracking systems into a single, cohesive API endpoint for a custom Frontend (FE) application:
 
 | System | Purpose | Device Types |
 |--------|---------|--------------|
 | Traccar Server | Open-source GPS tracking platform | Standard GPS trackers |
 | MSPF Server | Multi-Sensor Processing Framework | Devices with MCCS model data |
+| FoxLogger | Third-party GPS tracking | FL series trackers |
 | API Gateway (BFF) | Centralized proxy and aggregator | Frontend UI facing |
 
 The gateway acts as a Backend for Frontend (BFF) that abstracts away the complexity of multiple data sources from client applications.

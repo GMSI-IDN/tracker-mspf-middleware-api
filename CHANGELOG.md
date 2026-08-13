@@ -130,6 +130,7 @@
 
 | Waktu | Perubahan | File |
 |-------|-----------|------|
+| ~now | **Source group list** — `GET /api/admin/groups/sources` untuk dropdown assign device di FE admin | `src/routes/groupsAdmin.js` |
 | ~08:00 | **Parking endpoint** — `GET /api/reports/parking` unified Traccar + MSPF | `src/routes/reports.js` |
 | ~08:30 | **Idle endpoint** — `GET /api/reports/idle` per-device | `src/routes/reports.js` |
 | ~09:00 | **Trip reports** — `GET /api/reports/trips` per-device | `src/routes/reports.js` |
@@ -142,6 +143,8 @@
 
 | Waktu | Perubahan | File |
 |-------|-----------|------|
+| ~now | **Security: ganti `new Function()` → `mathjs.evaluate()`** di compute formula untuk cegah RCE via formula injection | `src/services/customAttributes.js`, `API_REFERENCE.md` |
+| ~now | **Duplicate group name validation** — `PUT /api/admin/groups/:id` cek nama duplikat sebelum update, return `409 ERR_CONFLICT` ke FE | `src/routes/groupsAdmin.js` |
 | ~07:00 | **WS per-user filter** — filter position & device-status per customer group | `src/websocket/index.js` |
 | ~07:30 | **Positions + Reports route filter** — filter `device_groups` untuk non-admin | `src/routes/positions.js`, `src/routes/reports.js` |
 | ~08:00 | **MSPF positions pagination + BC filter** — `getPositions` pagination loop + filter `bc[]` dari cache | `src/services/mspf.js`, `src/routes/positions.js`, `src/websocket/index.js` |
@@ -163,3 +166,17 @@
 | ~07:15 | Race condition WS allowedDevices — inisialisasi Set sinkron sebelum await DB | `src/websocket/index.js` |
 | ~08:10 | `traccarResult.value` guard — cegah `.map()` pada undefined | `src/routes/devices.js` |
 | ~11:30 | `if (activeIds)` guard — cegah TypeError `null.has()` | `src/services/positionSync.js` |
+
+## 2026-07-29
+
+### Perbaikan FoxLogger Integration
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **Simulated numeric ID** — FoxLogger device ID pakai `parseInt(IMEI)` (integer, 15-16 digit). Bukan IMEI string. `imeiMap` cache mapping simulatedId ↔ IMEI asli. `resolveImei()` helper untuk API calls | `src/services/foxlogger.js` |
+| ~now | **Positions live API** — `/api/positions` dan `/api/positions/latest` untuk FoxLogger panggil langsung `foxlogger.getPositions()`, bukan filter dari cache stale | `src/routes/positions.js` |
+| ~now | **Positions backward compat** — filter device_groups untuk FoxLogger handle old (IMEI string) dan new (simulated ID) entries | `src/routes/positions.js` |
+| ~now | **Summary report fix** — hapus `foxlogger.getDeviceSummary('all')` yang selalu gagal (IMEI='all' invalid). Tambah single-device FoxLogger summary handler | `src/routes/reports.js` |
+| ~now | **Health check aktif** — `/health/detailed` untuk FoxLogger panggil `/geo-fences/0`, bukan cuma cek `getApi()` exists | `src/routes/health.js` |
+| ~now | **Test-friendly init** — skip auto-init + `waitForInit` jika credentials kosong | `src/services/foxlogger.js`, `src/__tests__/jest.setup.js` |
+| ~now | **Auth bypass fix P0** — `if (!isAdmin && userGroups.length > 0)` → `if (!isAdmin)`. Customer tanpa group assignment sekarang lihat 0 device (sebelumnya lihat semua). Fix di semua routes: devices, positions, reports, dashboard | `src/routes/devices.js`, `src/routes/positions.js`, `src/routes/reports.js`, `src/routes/dashboard.js` |

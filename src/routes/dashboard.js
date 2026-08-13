@@ -3,6 +3,7 @@ const traccar = require('../services/traccar');
 const mspf = require('../services/mspf');
 const cache = require('../services/cache');
 const db = require('../db');
+const { toUtcIso } = require('../utils/timestamp');
 
 const router = express.Router();
 
@@ -48,9 +49,13 @@ router.get('/', async (req, res, next) => {
     const devices = getDevicesFromCache();
 
     let allowedDevices = null;
-    if (!isAdmin && userGroups.length > 0) {
-      const dgs = await db('device_groups').whereIn('group_id', userGroups).select('device_id', 'source');
-      allowedDevices = new Set(dgs.map(d => `${d.source}:${d.device_id}`));
+    if (!isAdmin) {
+      if (userGroups.length === 0) {
+        allowedDevices = new Set();
+      } else {
+        const dgs = await db('device_groups').whereIn('group_id', userGroups).select('device_id', 'source');
+        allowedDevices = new Set(dgs.map(d => `${d.source}:${d.device_id}`));
+      }
     }
 
     const deviceStats = summariseDevices(devices, allowedDevices);
@@ -100,7 +105,7 @@ router.get('/', async (req, res, next) => {
         if (allowedDevices && !allowedDevices.has(`traccar:${e.deviceId}`)) continue;
         recentEvents.push({
           name: e.type === 'geofenceEnter' || e.type === 'geofenceExit' ? null : e.type.replace(/([A-Z])/g, ' $1').trim().replace(/^./, s => s.toUpperCase()),
-          eventTime: e.eventTime,
+          eventTime: toUtcIso(e.eventTime),
           status: null,
           deviceId: e.deviceId,
           source: 'traccar',

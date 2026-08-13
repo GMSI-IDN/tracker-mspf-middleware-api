@@ -34,11 +34,23 @@ async function getGroups(params = {}) {
   return res.data;
 }
 
+function toKmh(speed) {
+  return speed ? parseFloat((speed * 1.852).toFixed(2)) : 0;
+}
+
 async function getPositions(params = {}) {
   const res = await traccarApi.get('/positions', { params });
   return (res.data || []).map(p => ({
     ...p,
-    speed: p.speed ? parseFloat((p.speed * 1.852).toFixed(2)) : 0,
+    speed: toKmh(p.speed),
+  }));
+}
+
+async function getReportRoute(params = {}) {
+  const res = await traccarApi.get('/reports/route', { params });
+  return (res.data || []).map(p => ({
+    ...p,
+    speed: toKmh(p.speed),
   }));
 }
 
@@ -104,6 +116,8 @@ module.exports = {
   getDevices,
   getGroups,
   getPositions,
+  getReportRoute,
+  toKmh,
   getCommands,
   getCommandTypes,
   sendCommand,

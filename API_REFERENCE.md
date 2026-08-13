@@ -3,6 +3,15 @@
 Base URL: `http://localhost:3000`
 
 > **Response Convention:** Semua response Gateway menggunakan **camelCase** (kecuali field dari Traccar/MSPF yang langsung dipass-through tanpa transformasi).
+>
+> **Timestamp Convention:** Semua field timestamp yang dikeluarkan Gateway adalah **UTC ISO 8601** (format `YYYY-MM-DDTHH:mm:ss.sssZ`). Data sumber dinormalisasi:
+> - **Traccar:** sudah UTC (ISO `Z`), diteruskan apa adanya.
+> - **MSPF:** `timestamp` (unix seconds) / `insDtm` / `createdAt` / `lastCommunicatedAt` → UTC ISO.
+> - **FoxLogger:** timestamp naif `"YYYY-MM-DD HH:mm:ss"` (waktu lokal Jakarta) → dikonversi ke UTC. Zona default `Asia/Jakarta` (bisa diubah via env `FOXLOGGER_TIMEZONE`).
+>
+> **Request ke FoxLogger (`time1`/`time2`):** FE mengirim range dalam **UTC**; Gateway **mengonversi ke zona `FOXLOGGER_TIMEZONE` (default WIB)** sebelum dikirim ke FoxLogger sebagai `"YYYY-MM-DD HH:mm:ss"` (karena FoxLogger menginterpretasikan parameter waktu sebagai zona lokalnya). Berlaku untuk semua endpoint FoxLogger yang menerima range: `/api/reports/route`, `/parking`, `/summary`, dan enrich rollback. Jadi: `from=2026-08-05T17:00:00Z` → `time1=2026-08-06 00:00:00` (WIB).
+>
+> Frontend bebas melakukan konversi ke zona lokalnya sendiri (mis. `Intl.DateTimeFormat`).
 
 Semua endpoint (kecuali `/health` dan `/api/auth/login`) memerlukan **JWT token** di header:
 
@@ -90,9 +99,9 @@ Mengembalikan daftar **custom groups** dari database middleware. Tidak ada group
 
 ### GET /api/devices
 
-Mengembalikan daftar device dari Traccar dan MSPF yang sudah digabung (merged). 
+Mengembalikan daftar device dari Traccar, MSPF, dan FoxLogger yang sudah digabung (merged). 
 
-> **Filter:** Hanya device dengan status **WORKING** (MSPF) atau **online/offline** (Traccar) yang dikembalikan. Device SUSPENDED tidak masuk.
+> **Filter:** Hanya device dengan status **WORKING** (MSPF), **online/offline** (Traccar/FoxLogger) yang dikembalikan. Device SUSPENDED tidak masuk.
 
 Untuk admin, semua device. Untuk customer, hanya device di Group/BC yang di-assign.
 
@@ -101,7 +110,7 @@ Untuk admin, semua device. Untuk customer, hanya device di Group/BC yang di-assi
 | Parameter | Tipe | Default | Deskripsi |
 |-----------|------|---------|-----------|
 | `group` | integer | - | Filter by custom group ID (contoh: `5`) |
-| `source` | string | - | Filter by source: `traccar` atau `mspf` |
+| `source` | string | - | Filter by source: `traccar`, `mspf`, atau `foxlogger` |
 | `status` | string | - | Filter by status: `online` atau `offline` |
 | `keyword` | string | - | Cari berdasarkan name atau uniqueId |
 | `search` | string | - | Alias untuk `keyword` |
@@ -177,7 +186,7 @@ Untuk admin, semua device. Untuk customer, hanya device di Group/BC yang di-assi
       "metadataOwners": {}
     }
   ],
-  "total": 139,
+  "total": 140,
   "offset": 0,
   "limit": 50
 }
@@ -193,7 +202,7 @@ Mengembalikan detail device. Untuk MSPF device, data diperkaya dengan DeviceStat
 
 | Parameter | Tipe | Deskripsi |
 |-----------|------|-----------|
-| `source` | string | `traccar` atau `mspf` (membantu routing) |
+| `source` | string | `traccar`, `mspf`, atau `foxlogger` (membantu routing) |
 | `group` | string | Group/BC ID (membantu routing) |
 
 **Response 200 (MSPF device):**
@@ -240,7 +249,9 @@ Mengembalikan detail device. Untuk MSPF device, data diperkaya dengan DeviceStat
       "kph": 0,
       "odom": 17.388,
       "gpio": 1,
-      "addr": {}
+      "addr": {},
+      "createdAt": "2026-06-18T04:05:12Z",
+      "insDtm": "2026-06-18T04:05:29Z"
     }
   }
 }
@@ -263,7 +274,7 @@ Tanpa filter, mengembalikan posisi terbaru dari semua device yang aktif.
 | Parameter | Tipe | Deskripsi |
 |-----------|------|-----------|
 | `deviceId` | integer | Filter by device ID |
-| `source` | string | `traccar` atau `mspf` (membantu routing) |
+| `source` | string | `traccar`, `mspf`, atau `foxlogger` (membantu routing) |
 | `group` | string | Group/BC ID |
 | `from` | string | ISO 8601 — awal waktu (untuk history) |
 | `to` | string | ISO 8601 — akhir waktu (untuk history) |
@@ -296,11 +307,19 @@ Tanpa filter, mengembalikan posisi terbaru dari semua device yang aktif.
       "running": "IDLING",
       "kph": 0,
       "odom": 17.388,
-      "gpio": 1
+      "gpio": 1,
+      "createdAt": "2026-06-18T04:05:12Z",
+      "insDtm": "2026-06-18T04:05:29Z"
     }
   }
 ]
 ```
+
+> **Semantik timestamp per source:**
+> - `deviceTime` = waktu device membuat data lokasi (dari `Position.timestamp`/`createdAt` MSPF, `last_upd` FoxLogger, atau Traccar asli).
+> - `serverTime` = waktu **server** menerima data. Traccar: dari Traccar server. **MSPF: dari `insDtm`** (waktu MSPF menerima, fallback ke jam gateway jika kosong — berlaku untuk posisi terbaru per device). FoxLogger: jam gateway saat fetch (FoxLogger tidak menyediakan server timestamp).
+> - `fixTime` = waktu GPS fix (≈ `deviceTime`).
+> - Atribut `createdAt`/`insDtm` hanya muncul untuk device MSPF (data MCCS). Root fields tetap identik di semua source.
 
 ---
 
@@ -314,20 +333,24 @@ Mengembalikan posisi terbaru. Sama dengan `/api/positions` tanpa filter deviceId
 
 Mengembalikan riwayat posisi device dalam range waktu tertentu. Format mengikuti Traccar API.
 
-> Gateway otomatis mendeteksi sumber device (Traccar/MSPF) melalui cache. Jika belum ada di cache, Gateway akan probing langsung ke kedua backend untuk menemukan device-nya.
+> Gateway otomatis mendeteksi sumber device (Traccar/MSPF/FoxLogger) melalui cache. Jika belum ada di cache, Gateway akan probing langsung ke semua backend untuk menemukan device-nya.
 > **Access control:** Admin mendapat enriched data + custom attributes (rename/compute). Customer hanya mendapat custom attributes sesuai aturan grup device-nya.
 >
 > **⚠️ Limitasi MSPF:** Range `from` dan `to` maksimal **7 hari**. Jika lebih, return `ERR_VALIDATION`.
+>
+> **Default range:** Jika `from`/`to` kosong, Gateway memakai **"hari ini"** → `from = 00:00 zona waktu user`, `to = waktu request`. Zona user diambil dari `users.timezone` (ditetapkan saat user dibuat, wajib IANA); fallback ke `DEFAULT_USER_TIMEZONE` (.env, default `Asia/Jakarta`) untuk user lama.
+>
+> **Urutan response:** Posisi diurutkan **ascending by `deviceTime`** (konsisten lintas source). Traccar diambil dari endpoint resmi `/reports/route` (bukan `/positions`), kecepatan dikonversi knots → km/h.
 >
 > **Query Parameters:**
 
 | Parameter | Tipe | Wajib | Deskripsi |
 |-----------|------|-------|-----------|
 | `deviceId` | integer | ✅ | Device ID |
-| `source` | string | - | `traccar` atau `mspf` |
+| `source` | string | - | `traccar`, `mspf`, atau `foxlogger` |
 | `group` | string | - | Group/BC ID |
-| `from` | string | - | ISO 8601 — awal range |
-| `to` | string | - | ISO 8601 — akhir range |
+| `from` | string | - | ISO 8601 — awal range (default: 00:00 hari ini, zona user) |
+| `to` | string | - | ISO 8601 — akhir range (default: waktu request) |
 
 **Response 200 (admin — MSPF device enriched + custom attributes):**
 ```json
@@ -355,6 +378,30 @@ Mengembalikan riwayat posisi device dalam range waktu tertentu. Format mengikuti
 ]
 ```
 
+**Response 200 (FoxLogger device):**
+```json
+[
+  {
+    "deviceId": 780901703170270,
+    "latitude": -6.319752,
+    "longitude": 106.948769,
+    "speed": 0,
+    "course": 89,
+    "deviceTime": "2026-07-28T07:47:11Z",
+    "source": "foxlogger",
+    "attributes": {
+      "address": "Jalan Wibawa Mukti II...",
+      "movementStatus": "OFF",
+      "mileage": 211.78,
+      "ignition": false,
+      "nopol": "B 2412 PFQ"
+    }
+  }
+]
+```
+
+> **Enrichment FoxLogger:** `course` diisi dari `/report-rollback` (`dir`) dan `attributes.nopol` (plat nomor) dari endpoint yang sama, dicocokkan per waktu dengan `/report-history`. Jika tidak ada kecocokan rollback, `course` tetap 0 dan `nopol` tidak ada.
+
 **Response 200 (customer — hanya custom attributes):**
 ```json
 [
@@ -379,7 +426,7 @@ Mengembalikan riwayat posisi device dalam range waktu tertentu. Format mengikuti
 
 Mengembalikan riwayat parking device dalam range waktu tertentu. Data dari Traccar difilter hanya `engineHours == 0` (parkir, mesin mati). Idle (mesin hidup tapi diam) tidak termasuk.
 
-> Gateway otomatis mendeteksi sumber device (Traccar/MSPF) melalui cache atau probing.
+> Gateway otomatis mendeteksi sumber device (Traccar/MSPF/FoxLogger) melalui cache atau probing.
 > **Access control:** Admin melihat semua data. Customer hanya bisa akses device yang ada di group assign-nya (403 jika tidak punya akses).
 
 **Query Parameters:**
@@ -433,6 +480,29 @@ Mengembalikan riwayat parking device dalam range waktu tertentu. Data dari Tracc
   "summary": {
     "total": 1,
     "totalDuration": 5400
+  }
+}
+```
+
+**Response 200 — FoxLogger device:**
+```json
+{
+  "deviceId": 780901703170270,
+  "source": "foxlogger",
+  "period": { "from": "2026-07-28T00:00:00Z", "to": "2026-07-30T00:00:00Z" },
+  "parking": [
+    {
+      "startTime": "2026-07-28 08:00:00",
+      "endTime": "2026-07-28 17:30:00",
+      "duration": 34200,
+      "latitude": -6.24403,
+      "longitude": 107.05133,
+      "address": "Setiamekar, Kabupaten Bekasi..."
+    }
+  ],
+  "summary": {
+    "total": 1,
+    "totalDuration": 34200
   }
 }
 ```
@@ -593,8 +663,9 @@ Mengembalikan ringkasan device dalam range waktu tertentu. Bisa per-device, per-
 
 > **Traccar:** Data lengkap dari `/api/reports/summary` — distance, maxSpeed, averageSpeed, spentFuel, engineHours.
 > **MSPF:** Single device — enriched dari route (distance, maxSpeed, averageSpeed, duration). Multi-device — dari `stats/summary` (totalMileage, totalDrivingTime). `maxSpeed`/`averageSpeed` = null untuk multi-device.
+> **FoxLogger:** Dari `/web-tracker/report-summary` per-device. Multi-device tidak support (per-device API, no aggregate endpoint).
 >
-> Gateway otomatis mendeteksi sumber device (Traccar/MSPF) melalui cache atau probing.
+> Gateway otomatis mendeteksi sumber device (Traccar/MSPF/FoxLogger) melalui cache atau probing.
 > **Access control:** Admin melihat semua data. Customer hanya melihat device yang ada di group assign-nya.
 
 **Query Parameters:**
@@ -605,8 +676,68 @@ Mengembalikan ringkasan device dalam range waktu tertentu. Bisa per-device, per-
 | `group` | integer | - | Filter by custom group ID |
 | `from` | string | ✅ | ISO 8601 — awal range |
 | `to` | string | - | ISO 8601 — akhir range |
+| `granularity` | string | - | `day` \| `week` \| `month` \| `year` — kembalikan time-series (lihat di bawah) |
 
 > Jika `deviceId` dan `group` tidak diberikan, mengembalikan semua device (difilter sesuai role).
+
+---
+
+### GET /api/reports/summary — Time-Series (Daily/Weekly/Monthly/Yearly Driving Report)
+
+Dengan param `granularity`, endpoint mengembalikan **breakdown summary per periode waktu** untuk **1 device** (`deviceId`) atau **1 custom group** (`group` = ID integer, agregasi semua device lintas source). Bucket kosong diisi 0/null supaya grafik kontinu dari `from` s.d. `to`.
+
+| Parameter | Tipe | Wajib | Deskripsi |
+|-----------|------|-------|-----------|
+| `deviceId` | integer | - | Series per device |
+| `group` | integer | - | Series per custom group (agregasi Traccar + MSPF + FoxLogger) |
+| `granularity` | string | ✅ | `day` \| `week` \| `month` \| `year` |
+| `from` | string | - | ISO 8601 — awal range (default: 30 hari lalu) |
+| `to` | string | - | ISO 8601 — akhir range (default: sekarang) |
+
+> ⚠️ `granularity` **wajib disertai** `deviceId` atau `group` (custom group ID integer). Jika tidak → `400 ERR_VALIDATION`.
+>
+> **Sumber data per source:**
+> - **MSPF:** native `/v3/stats/devices/{id}/reports` (device) & `/v3/stats/devices/reports?bcId=` (group) — `mileage`/`drivingtime` per hari, `dimensions=DAILY&timezone=UTC`, di-cache 1 jam. `maxSpeed`/`averageSpeed`/`spentFuel` = `null` (tidak tersedia native).
+> - **Traccar:** agregasi `/reports/trips` per bucket.
+> - **FoxLogger:** agregasi `/web-tracker/report-summary` (per trip) per bucket.
+>
+> **Key bucket:** `day`→`YYYY-MM-DD`, `week`→`YYYY-Www` (ISO week, mulai Senin), `month`→`YYYY-MM`, `year`→`YYYY`. `averageSpeed` = `distance / drivingTime * 3600` (weighted).
+
+**Response 200 — device (granularity=day):**
+```json
+{
+  "type": "device",
+  "deviceId": 10258579,
+  "deviceName": "Box Cooler 5",
+  "granularity": "day",
+  "period": { "from": "2026-06-10T00:00:00Z", "to": "2026-06-12T00:00:00Z" },
+  "timezone": "UTC",
+  "series": [
+    { "key": "2026-06-10", "date": "2026-06-10", "distance": 45.2, "drivingTime": 3600, "maxSpeed": 80.5, "averageSpeed": 45.2, "spentFuel": 2.5, "count": 3 },
+    { "key": "2026-06-11", "date": "2026-06-11", "distance": 0, "drivingTime": 0, "maxSpeed": null, "averageSpeed": null, "spentFuel": 0, "count": 0 },
+    { "key": "2026-06-12", "date": "2026-06-12", "distance": 12.1, "drivingTime": 600, "maxSpeed": 50, "averageSpeed": 72.6, "spentFuel": 0.8, "count": 1 }
+  ],
+  "total": { "distance": 57.3, "drivingTime": 4200, "maxSpeed": 80.5, "averageSpeed": 49.1, "spentFuel": 3.3, "count": 4 }
+}
+```
+
+**Response 200 — custom group (granularity=week):**
+```json
+{
+  "type": "group",
+  "group": { "id": 1, "name": "tim_logistik" },
+  "granularity": "week",
+  "period": { "from": "2026-06-01T00:00:00Z", "to": "2026-06-30T00:00:00Z" },
+  "timezone": "UTC",
+  "series": [
+    { "key": "2026-W23", "date": "2026-06-01", "distance": 320.5, "drivingTime": 18000, "maxSpeed": 90, "averageSpeed": 64.1, "spentFuel": 12.4, "count": 14 },
+    { "key": "2026-W24", "date": "2026-06-08", "distance": 0, "drivingTime": 0, "maxSpeed": null, "averageSpeed": null, "spentFuel": 0, "count": 0 }
+  ],
+  "total": { "distance": 320.5, "drivingTime": 18000, "maxSpeed": 90, "averageSpeed": 64.1, "spentFuel": 12.4, "count": 14 }
+}
+```
+
+> **Access control:** Customer hanya bisa akses `deviceId`/`group` yang ada di group assign-nya (403 jika tidak). Tanpa `granularity`, response tetap mengikuti format lama (`summaries` + `total`) — backward compatible.
 
 **Response 200 — Traccar single device:**
 ```json
@@ -651,6 +782,29 @@ Mengembalikan ringkasan device dalam range waktu tertentu. Bisa per-device, per-
     }
   ],
   "total": { "devices": 1, "distance": 890.2, "duration": 36000 }
+}
+```
+
+**Response 200 — FoxLogger single device:**
+```json
+{
+  "deviceId": 780901703170270,
+  "source": "foxlogger",
+  "period": { "from": "2026-07-28T00:00:00Z", "to": "2026-07-30T00:00:00Z" },
+  "summaries": [
+    {
+      "deviceId": 780901703170270,
+      "deviceName": "",
+      "source": "foxlogger",
+      "distance": 0,
+      "maxSpeed": 0,
+      "averageSpeed": 0,
+      "duration": 0,
+      "engineHours": null,
+      "spentFuel": 0
+    }
+  ],
+  "total": { "devices": 1, "distance": 0, "duration": 0 }
 }
 ```
 
@@ -949,7 +1103,7 @@ Mengembalikan detail user.
 
 ### POST /api/users
 
-Membuat user baru.
+Membuat user baru. **`timezone` wajib** dan harus timezone IANA yang valid (contoh: `Asia/Jakarta`, `Asia/Tokyo`, `UTC`).
 
 **Request:**
 ```json
@@ -957,7 +1111,8 @@ Membuat user baru.
   "username": "customer@company.com",
   "password": "pass123",
   "role": "customer",
-  "groups": [1, 5]
+  "groups": [1, 5],
+  "timezone": "Asia/Jakarta"
 }
 ```
 
@@ -967,13 +1122,14 @@ Membuat user baru.
   "id": 2,
   "username": "customer@company.com",
   "role": "customer",
-  "groups": [1, 5]
+  "groups": [1, 5],
+  "timezone": "Asia/Jakarta"
 }
 ```
 
 ### PUT /api/users/:id
 
-Update data user. Semua field opsional — kirim hanya field yang ingin diubah.
+Update data user. Semua field opsional — kirim hanya field yang ingin diubah. `timezone` opsional, namun bila dikirim harus IANA yang valid.
 
 **Request:**
 ```json
@@ -981,7 +1137,8 @@ Update data user. Semua field opsional — kirim hanya field yang ingin diubah.
   "username": "customer@company.com",
   "password": "newpass123",
   "role": "customer",
-  "groups": [1, 5, 3]
+  "groups": [1, 5, 3],
+  "timezone": "Asia/Tokyo"
 }
 ```
 
@@ -991,9 +1148,12 @@ Update data user. Semua field opsional — kirim hanya field yang ingin diubah.
   "id": 2,
   "username": "customer@company.com",
   "role": "customer",
-  "groups": [1, 5, 3]
+  "groups": [1, 5, 3],
+  "timezone": "Asia/Tokyo"
 }
 ```
+
+> **Catatan timezone:** `GET /api/users`, `GET /api/users/:id`, `POST /api/auth/login`, dan `GET /api/auth/me` mengembalikan `timezone`. User lama (kolom `timezone` kosong) otomatis dilaporkan dengan nilai `DEFAULT_USER_TIMEZONE` dari `.env` (default `Asia/Jakarta`). Zona ini dipakai untuk default range "hari ini" di endpoint report (mis. `/api/reports/route`).
 
 ---
 
@@ -1033,6 +1193,26 @@ Mengupdate nama/deskripsi grup.
 ### DELETE /api/admin/groups/:id
 
 Menghapus grup. Semua mapping device ke grup ini otomatis terhapus.
+
+### GET /api/admin/groups/sources
+
+Mengembalikan daftar source groups dari backend (Traccar groups + MSPF BCs) untuk dropdown filter/assign device di halaman admin.
+
+**Response 200:**
+```json
+{
+  "sources": [
+    { "id": "traccar_5", "name": "Warehouse Jakarta", "source": "traccar" },
+    { "id": "traccar_8", "name": "Depot Bandung", "source": "traccar" },
+    { "id": "mspf_3", "name": "BC Surabaya", "source": "mspf" },
+    { "id": "mspf_7", "name": "BC Medan", "source": "mspf" }
+  ]
+}
+```
+
+> **Cache:** Response di-cache 5 menit di server. Data diambil dari Traccar (`/groups`) dan MSPF (`/v2/bc`).
+>
+> **Usage:** Gunakan `id` dari response ini untuk filter device via `?group=traccar_5` atau assign ke custom group.
 
 ### GET /api/admin/device-groups
 
@@ -1139,7 +1319,7 @@ Ada 3 mode:
 |------|--------|---------------|-----------|
 | `passthrough` | Field asli muncul di FE | ✅ Wajib | ❌ |
 | `rename` | Field asli diganti nama | ✅ Wajib | ❌ |
-| `compute` | Hasil kalkulasi dari formula | ✅ Opsional | ✅ Bisa JS |
+| `compute` | Hasil kalkulasi dari formula (ekspresi mathjs — aman, tanpa akses global) | ✅ Opsional | ✅ Ekspresi mathjs |
 
 **Request:**
 ```json
@@ -1162,7 +1342,9 @@ Ada 3 mode:
 }
 ```
 
-Example formula untuk `compute`: `value != null ? (53.869 * value - 250.292).toFixed(1) : null`
+Example formula untuk `compute`: `value != null ? round(53.869 * value - 250.292, 1) : null`
+
+Variable yang tersedia di ekspresi: `value`, `attrs`, dan semua key dari attributes (misal `kph`, `volt`). Fungsi mathjs seperti `round()`, `floor()`, `ceil()`, `abs()`, `min()`, `max()` tersedia.
 
 ### GET /api/admin/custom-attributes
 
@@ -1243,20 +1425,8 @@ Mengembalikan ringkasan dashboard untuk tampilan awal aplikasi. Menggabungkan de
     "total": 139,
     "online": 85,
     "offline": 54,
-    "bySource": { "traccar": 45, "mspf": 94 }
-  },
-  "runningStatus": {
-    "RUN": 32, "IDLING": 12, "STOP": 85, "TOWING": 3, "UNKNOWN": 7
-  },
-  "summary": {
-    "totalDistance": 1250.5,
-    "totalDrivingHours": 15.0,
-    "totalFuel": 85.5,
-    "totalEngineHours": 42
-  },
-  "recentEvents": [
-    { "name": "Ignition ON", "eventTime": "2026-06-15T10:00:00Z", "deviceId": 2, "source": "traccar" }
-  ]
+    "bySource": { "traccar": 45, "mspf": 94, "foxlogger": 1 }
+  }
 }
 ```
 
@@ -1264,8 +1434,8 @@ Mengembalikan ringkasan dashboard untuk tampilan awal aplikasi. Menggabungkan de
 ```json
 {
   "period": { "from": null, "to": "..." },
-  "devices": { "total": 139, "online": 85, "offline": 54, "bySource": { "traccar": 45, "mspf": 94 } },
-  "runningStatus": { "RUN": 32, "IDLING": 12, "STOP": 85, "TOWING": 3, "UNKNOWN": 7 },
+  "devices": { "total": 140, "online": 85, "offline": 55, "bySource": { "traccar": 45, "mspf": 94, "foxlogger": 1 } },
+  "runningStatus": { "RUN": 32, "IDLING": 12, "STOP": 86, "TOWING": 3, "UNKNOWN": 7 },
   "summary": null,
   "recentEvents": []
 }
@@ -1314,12 +1484,14 @@ const socket = io('wss://hostname/api/ws', {
 
 #### `position`
 
-Dikirim setiap ada update posisi dari Traccar (via WebSocket real-time atau REST polling fallback) dan MSPF (via polling setiap 10 detik).
+Dikirim saat ada **perubahan** data posisi device dari **Traccar** (via WebSocket real-time atau REST polling fallback), **MSPF** & **FoxLogger** (via background worker `positionSync` setiap 10 detik).
 
-> **Filter:** Hanya device **WORKING** (MSPF) yang dikirim. Device SUSPENDED tidak masuk. Traccar: semua device dikirim.
+> **Emit change-only:** `position` hanya dikirim saat data device berubah (dibandingkan key `lat/lon/speed/course/deviceTime/ignition`). Device diam tanpa data baru **tidak** menerima `position` berulang. Saat dikirim, `speed` & `course` tetap disertakan (MSPF course dari `mobilityData.dir`).
+> **Filter:** Hanya device **WORKING** (MSPF) yang dikirim. Device SUSPENDED tidak masuk. Traccar: semua device dikirim. FoxLogger: hanya device yang tercatat di cache `devices:merged` (source `foxlogger`) yang dikirim.
 > **Access control:** Payload disaring berdasarkan role user yang terhubung.
 > - **Admin:** Mendapatkan semua enriched data + hasil custom attributes (rename/compute/passthrough).
 > - **Customer:** Hanya mendapat custom attributes sesuai aturan group device-nya. Jika tidak ada aturan, `attributes: {}`.
+> - FoxLogger: kecocokan device customer didasarkan pada `device_groups` (mendukung `device_id` berupa IMEI string atau numeric simulated ID).
 
 **Root fields (selalu ada untuk semua role):** `deviceId`, `latitude`, `longitude`, `speed`, `course`*, `altitude`, `deviceTime`, `valid`, `source`, **`voltage`**, **`internalBattery`**, **`batteryLevel`**, **`ignition`**.
 
@@ -1382,29 +1554,58 @@ Dikirim setiap ada update posisi dari Traccar (via WebSocket real-time atau REST
 
 #### `device-status`
 
-Dikirim bersamaan dengan event `position`, berisi data status device yang sering berubah.
+Berisi **status koneksi device** + **status device (running)**. Field `status` dan 5 field sensor **wajib selalu ada** (nilai atau `null`). Dikirim dalam 3 kondisi:
+1. **Saat status berubah** (online → offline, offline → online) — edge-triggered.
+2. **Heartbeat** setiap `DEVICE_STATUS_HEARTBEAT_MS` (default 90 detik) untuk semua device aktif — menjaga `lastUpdate` tetap segar.
+3. **Snapshot saat koneksi WS connect/reconnect** — FE langsung mendapat status terkini (termasuk device offline) tanpa perlu refetch.
+
+> **`status` = status KONEKSI** (hanya `online` | `offline`):
+>
+> | Nilai | Kondisi |
+> |-------|---------|
+> | `online` | data terakhir diterima **< 10 menit** (`OFFLINE_THRESHOLD_MS`) |
+> | `offline` | tidak ada data baru **> 10 menit** |
+>
+> - **Tidak ada nilai `unknown`** — penanda "device mati/basi" memakai `running: UNKNOWN` (24 jam).
+> - Device **sleep (1 jam) / deep sleep (24 jam)** akan tampil `offline` di sela laporannya — ini sesuai definisi koneksi, bukan bug.
+> - `lastUpdate` saat offline = **waktu data terakhir diterima device** (BUKAN waktu deteksi offline).
+>
+> **Semantik field sensor (`ignition`, `voltage`, `internalBattery`, `batteryLevel`):**
+> - **Selalu ada** di payload (nilai atau `null`). `null` = data tidak tersedia (source tak sediakan / belum tahu).
+> - Saat **offline** → kelima field sensor **`null`** dan `running: "UNKNOWN"` (data basi).
+> - Saat **online** → nilai dari data terbaru (cache/enrich), `null` bila tak tersedia.
+>
+> **`running` = status DEVICE** (kondisi mesin/gerak), terpisah dari `status`. Parkir diam + komunikasi normal = `status: online` + `running: STOP/IDLE`.
+>
+> **Hysteresis:** offline setelah stale > `OFFLINE_THRESHOLD_MS` (10 menit); online kembali saat data fresh < `ONLINE_THRESHOLD_MS` (10 menit) + cooldown flip (`STATUS_COOLDOWN_MS`, 60 detik) — mencegah status berkedip.
+>
+> **Threshold offline configurable (hierarki, yang lebih spesifik menang):**
+> `device_metadata.offlineThresholdMs` / `reportIntervalMinutes` (>2× interval) **→ per-custom-group → per-device-type → per-source** (`TRACCAR_/MSPF_/FOXLOGGER_OFFLINE_THRESHOLD_MS`) **→ global** (`OFFLINE_THRESHOLD_MS`, default 10 menit). Level per-group/per-type siap diisi di masa depan (extension point resolver).
 
 ```json
 {
   "deviceId": 10258579,
   "source": "mspf",
+  "status": "offline",
   "lastUpdate": "2026-06-18T04:05:12Z",
-  "running": "IDLING",
-  "ignition": true,
-  "voltage": 13.59,
-  "internalBattery": 3.98,
-  "batteryLevel": 75
+  "running": "UNKNOWN",
+  "ignition": null,
+  "voltage": null,
+  "internalBattery": null,
+  "batteryLevel": null
 }
 ```
 
-**Running status:**
+**Running status (status device):**
 | Status | Ignition | Speed | Last Update | Keterangan |
 |--------|----------|-------|-------------|------------|
 | `RUN` | ON | > 0 | < 24 jam | Mesin nyala, berjalan |
-| `IDLING` | ON | = 0 | < 24 jam | Mesin nyala, berhenti |
+| `IDLING` (IDLE) | ON | = 0 | < 24 jam | Mesin nyala, berhenti |
 | `STOP` | OFF | = 0 | < 24 jam | Mesin mati |
 | `TOWING` | OFF | > 0 | < 24 jam | Mesin mati, kendaraan bergerak (diderek) |
-| `UNKNOWN` | - | - | **> 24 jam** | Data basi / tidak ada data terbaru |
+| `UNKNOWN` | - | - | **> 24 jam** | Device tidak terhubung / data basi (> 24 jam, boundary deep sleep) |
+
+> **`IDLING`** = nama field di API (konsisten dengan kode); **`IDLE`** = istilah definisi.
 
 > **MSPF:** `running` dari DeviceStatus asli (jika ada), fallback ke kalkulasi. `voltage` dari attributes.
 > **Traccar:** `running` dari kalkulasi `ignition` + `speed`. `voltage` dari `attributes.power`.

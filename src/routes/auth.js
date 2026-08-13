@@ -24,7 +24,8 @@ router.post('/login',
       }
 
       const groups = JSON.parse(user.groups || '[]');
-      const payload = { id: user.id, username: user.username, role: user.role, groups };
+      const timezone = user.timezone || config.timezone.default;
+      const payload = { id: user.id, username: user.username, role: user.role, groups, timezone };
       const token = jwt.sign(payload, config.jwt.secret, { expiresIn: config.jwt.expiry });
       res.json({ token, user: payload, expiresIn: config.jwt.expiry });
     } catch (err) {
@@ -34,8 +35,8 @@ router.post('/login',
 );
 
 router.get('/me', authMiddleware, (req, res) => {
-  const { id, username, role, groups } = req.user;
-  res.json({ id, username, role, groups });
+  const { id, username, role, groups, timezone } = req.user;
+  res.json({ id, username, role, groups, timezone: timezone || config.timezone.default });
 });
 
 module.exports = router;

@@ -4,6 +4,8 @@ jest.mock('../services/traccar', () => ({
   getDevices: jest.fn(),
   getGroups: jest.fn(),
   getPositions: jest.fn(),
+  getReportRoute: jest.fn(),
+  toKmh: jest.fn((s) => (s ? parseFloat((s * 1.852).toFixed(2)) : 0)),
   getCommands: jest.fn(),
   getCommandTypes: jest.fn(),
   sendCommand: jest.fn(),
@@ -36,10 +38,31 @@ jest.mock('../services/mspf', () => {
     getDeviceParkingAll: jest.fn(),
     getDeviceTrip: jest.fn(),
     getStatsSummary: jest.fn(),
+    getDeviceStatsReports: jest.fn(),
+    getBcStatsReports: jest.fn(),
     getMspfEvents: jest.fn(),
     getMspfClosedEvents: jest.fn(),
   };
 });
+
+jest.mock('../services/foxlogger', () => ({
+  init: jest.fn(),
+  waitForInit: jest.fn(() => Promise.resolve()),
+  getApi: jest.fn(),
+  getUserId: jest.fn(() => null),
+  resolveImei: jest.fn((id) => String(id)),
+  normalizeDevice: jest.fn((d) => d),
+  normalizeReportPosition: jest.fn(),
+  normalizeHistoryPosition: jest.fn(),
+  getDevices: jest.fn(() => Promise.resolve({ data: [], total: 0, next: null })),
+  searchDevices: jest.fn(() => Promise.resolve([])),
+  getPositions: jest.fn(() => Promise.resolve([])),
+  getDeviceRoute: jest.fn(() => Promise.resolve([])),
+  getDeviceParking: jest.fn(() => Promise.resolve([])),
+  getDeviceSummary: jest.fn(() => Promise.resolve({ data: [] })),
+  getGeoFences: jest.fn(() => Promise.resolve([])),
+  getAlarmReports: jest.fn(() => Promise.resolve([])),
+}));
 
 jest.mock('../services/autoSync', () => ({
   runAutoSync: jest.fn(),
@@ -54,7 +77,9 @@ jest.mock('../services/customAttributes', () => ({
 
 const traccar = require('../services/traccar');
 const mspf = require('../services/mspf');
+const foxlogger = require('../services/foxlogger');
 const db = require('../db');
+const { startOfDayIso } = require('../utils/timestamp');
 
 const app = require('../app');
 
@@ -159,16 +184,17 @@ describe('User Management', () => {
     const customerToken = login.body.token;
 
     // Admin can create a customer user for testing
+    await db('users').where({ username: 'test_customer' }).delete();
     const create = await request(app)
       .post('/api/users')
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ username: 'test_customer', password: 'pass', role: 'customer', groups: [] });
+      .send({ username: 'test_customer', password: 'pass123', role: 'customer', groups: [], timezone: 'Asia/Jakarta' });
     expect([201, 409]).toContain(create.status);
 
     // Login as customer
     const cl = await request(app)
       .post('/api/auth/login')
-      .send({ username: 'test_customer', password: 'pass' });
+      .send({ username: 'test_customer', password: 'pass123' });
     const ct = cl.body.token;
 
     const res = await request(app)
@@ -203,6 +229,78 @@ describe('User Management', () => {
       .send({ role: 'customer' });
     expect(res.status).toBe(200);
     expect(res.body.role).toBe('customer');
+  });
+
+  test('POST /api/users without timezone returns 400', async () => {
+    const res = await request(app)
+      .post('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ username: 'tz_missing', password: 'pass123', role: 'customer', groups: [] });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('ERR_VALIDATION');
+    expect(res.body.error).toContain('Timezone is required');
+  });
+
+  test('POST /api/users with invalid timezone returns 400', async () => {
+    const res = await request(app)
+      .post('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ username: 'tz_invalid', password: 'pass123', role: 'customer', groups: [], timezone: 'Not/AZone' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('ERR_VALIDATION');
+  });
+
+  test('POST /api/users creates user with timezone', async () => {
+    await db('users').where({ username: 'tz_ok' }).delete();
+    const res = await request(app)
+      .post('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ username: 'tz_ok', password: 'pass123', role: 'customer', groups: [], timezone: 'Asia/Jakarta' });
+    expect(res.status).toBe(201);
+    expect(res.body.timezone).toBe('Asia/Jakarta');
+  });
+
+  test('PUT /api/users/:id updates timezone', async () => {
+    const users = await request(app)
+      .get('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`);
+    const tzUser = users.body.find(u => u.username === 'tz_ok');
+    expect(tzUser).toBeDefined();
+
+    const res = await request(app)
+      .put(`/api/users/${tzUser.id}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ timezone: 'Asia/Tokyo' });
+    expect(res.status).toBe(200);
+    expect(res.body.timezone).toBe('Asia/Tokyo');
+  });
+
+  test('PUT /api/users/:id with invalid timezone returns 400', async () => {
+    const users = await request(app)
+      .get('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`);
+    const tzUser = users.body.find(u => u.username === 'tz_ok');
+    expect(tzUser).toBeDefined();
+
+    const res = await request(app)
+      .put(`/api/users/${tzUser.id}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ timezone: 'Mars/Olympus' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('ERR_VALIDATION');
+  });
+
+  test('GET /api/auth/me includes timezone fallback for legacy users', async () => {
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'admin', password: 'admin123' });
+    expect(login.body.user.timezone).toBe('Asia/Jakarta');
+
+    const res = await request(app)
+      .get('/api/auth/me')
+      .set('Authorization', `Bearer ${login.body.token}`);
+    expect(res.status).toBe(200);
+    expect(res.body.timezone).toBe('Asia/Jakarta');
   });
 });
 
@@ -524,13 +622,14 @@ describe('Admin Custom Groups', () => {
 
   test('GET /api/admin/groups with customer token returns 403', async () => {
     // First create a customer user if not exists
+    await db('users').where({ username: 'cust_test' }).delete();
     await request(app)
       .post('/api/users')
       .set('Authorization', `Bearer ${token}`)
-      .send({ username: 'cust_test', password: 'pass', role: 'customer', groups: [] });
+      .send({ username: 'cust_test', password: 'pass123', role: 'customer', groups: [], timezone: 'Asia/Jakarta' });
     const login = await request(app)
       .post('/api/auth/login')
-      .send({ username: 'cust_test', password: 'pass' });
+      .send({ username: 'cust_test', password: 'pass123' });
     const custToken = login.body.token;
     const res = await request(app)
       .get('/api/admin/groups')
@@ -639,7 +738,7 @@ describe('Custom Attributes', () => {
   test('GET /api/groups/:id/preview with customer returns 403 if not assigned', async () => {
     const login = await request(app)
       .post('/api/auth/login')
-      .send({ username: 'test_customer', password: 'pass' });
+      .send({ username: 'test_customer', password: 'pass123' });
     const customerToken = login.body.token;
 
     const res = await request(app)
@@ -1101,6 +1200,212 @@ describe('Summary Reports', () => {
   });
 });
 
+describe('Summary Time-Series (granularity)', () => {
+  let token;
+  const traccarDeviceId = 9999911;
+  const mspfDeviceId = 9999912;
+  const foxDeviceId = 9999913;
+
+  beforeAll(async () => {
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'admin', password: 'admin123' });
+    token = login.body.token;
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('GET /api/reports/summary with invalid granularity returns 400', async () => {
+    const res = await request(app)
+      .get(`/api/reports/summary?deviceId=${traccarDeviceId}&granularity=hour`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('ERR_VALIDATION');
+  });
+
+  test('GET /api/reports/summary with granularity but no deviceId/group returns 400', async () => {
+    const res = await request(app)
+      .get('/api/reports/summary?granularity=day&from=2026-06-01T00:00:00Z')
+      .set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('ERR_VALIDATION');
+  });
+
+  test('GET /api/reports/summary returns Traccar day series with filled buckets', async () => {
+    traccar.getDevices.mockResolvedValue([{ id: traccarDeviceId, name: 'Test Traccar', uniqueId: 'test', status: 'online', groupId: 5 }]);
+    traccar.getReportTrips.mockResolvedValue([
+      { startTime: '2026-06-10T08:00:00Z', distance: 10, duration: 600, maxSpeed: 40, averageSpeed: 60, spentFuel: 1 },
+      { startTime: '2026-06-10T09:00:00Z', distance: 20, duration: 1200, maxSpeed: 80, averageSpeed: 60, spentFuel: 2 },
+      { startTime: '2026-06-12T09:00:00Z', distance: 5, duration: 300, maxSpeed: 30, averageSpeed: 60, spentFuel: 0.5 },
+    ]);
+
+    const res = await request(app)
+      .get(`/api/reports/summary?deviceId=${traccarDeviceId}&granularity=day&from=2026-06-10T00:00:00Z&to=2026-06-12T00:00:00Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.type).toBe('device');
+    expect(res.body.deviceId).toBe(traccarDeviceId);
+    expect(res.body.granularity).toBe('day');
+    expect(res.body.series).toHaveLength(3);
+    const d10 = res.body.series.find(b => b.key === '2026-06-10');
+    expect(d10.distance).toBe(30);
+    expect(d10.drivingTime).toBe(1800);
+    expect(d10.maxSpeed).toBe(80);
+    expect(res.body.series[1].distance).toBe(0);
+    expect(res.body.series[1].maxSpeed).toBeNull();
+    expect(res.body.total.distance).toBe(35);
+    expect(res.body.total.drivingTime).toBe(2100);
+    expect(res.body.total.maxSpeed).toBe(80);
+  });
+
+  test('GET /api/reports/summary returns MSPF day series from native stats', async () => {
+    traccar.getDevices.mockResolvedValue([]);
+    mspf.getDevice.mockResolvedValue({ id: mspfDeviceId, status: 'WORKING' });
+    mspf.getDeviceStatsReports.mockResolvedValue([
+      { datetime: '2026-06-15', mileage: 45.2, drivingtime: 3600 },
+      { datetime: '2026-06-16', mileage: 10.0, drivingtime: 600 },
+    ]);
+
+    const res = await request(app)
+      .get(`/api/reports/summary?deviceId=${mspfDeviceId}&granularity=day&from=2026-06-15T00:00:00Z&to=2026-06-16T00:00:00Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.series).toHaveLength(2);
+    expect(res.body.series[0].distance).toBe(45.2);
+    expect(res.body.series[0].drivingTime).toBe(3600);
+    expect(res.body.series[0].maxSpeed).toBeNull();
+    expect(res.body.total.distance).toBe(55.2);
+    expect(mspf.getDeviceStatsReports).toHaveBeenCalledWith(mspfDeviceId, { startDate: '2026-06-15', endDate: '2026-06-16' });
+  });
+
+  test('GET /api/reports/summary returns FoxLogger day series from report-summary', async () => {
+    traccar.getDevices.mockResolvedValue([]);
+    mspf.getDevice.mockResolvedValue(null);
+    foxlogger.getDevices.mockResolvedValue({ data: [{ id: foxDeviceId, uniqueId: '9999913', name: 'FL Test' }], total: 1, next: null });
+    foxlogger.getDeviceSummary.mockResolvedValue({
+      data: [
+        { from_time: '2026-06-15 07:00:00', distance: '30', speed_max: '70', speed_avg: '40', fuel_usage: '2', time_hour: '0', time_minute: '30', time_second: '0' },
+      ],
+    });
+
+    const res = await request(app)
+      .get(`/api/reports/summary?deviceId=${foxDeviceId}&granularity=day&from=2026-06-15T00:00:00Z&to=2026-06-15T00:00:00Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.series).toHaveLength(1);
+    expect(res.body.series[0].key).toBe('2026-06-15');
+    expect(res.body.series[0].distance).toBe(30);
+    expect(res.body.series[0].drivingTime).toBe(1800);
+    expect(res.body.series[0].maxSpeed).toBe(70);
+    expect(res.body.series[0].spentFuel).toBe(2);
+  });
+
+  test('GET /api/reports/summary returns monthly aggregation (week/month)', async () => {
+    traccar.getDevices.mockResolvedValue([{ id: traccarDeviceId, name: 'Test', uniqueId: 'test', status: 'online', groupId: 5 }]);
+    traccar.getReportTrips.mockResolvedValue([
+      { startTime: '2026-06-10T08:00:00Z', distance: 10, duration: 600, maxSpeed: 40, spentFuel: 1 },
+      { startTime: '2026-07-05T08:00:00Z', distance: 25, duration: 1200, maxSpeed: 90, spentFuel: 2 },
+    ]);
+
+    const res = await request(app)
+      .get(`/api/reports/summary?deviceId=${traccarDeviceId}&granularity=month&from=2026-06-01T00:00:00Z&to=2026-07-31T00:00:00Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.series).toHaveLength(2);
+    expect(res.body.series[0].key).toBe('2026-06');
+    expect(res.body.series[0].distance).toBe(10);
+    expect(res.body.series[1].key).toBe('2026-07');
+    expect(res.body.series[1].distance).toBe(25);
+    expect(res.body.total.distance).toBe(35);
+  });
+});
+
+describe('Summary Time-Series Group', () => {
+  let token;
+  let groupId;
+  const traccarDeviceId = 9999921;
+  const mspfDeviceId = 9999922;
+
+  beforeAll(async () => {
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'admin', password: 'admin123' });
+    token = login.body.token;
+    await db('groups').where('name', 'summary_series_group').delete();
+    const grp = await request(app)
+      .post('/api/admin/groups')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'summary_series_group' });
+    groupId = grp.body.id;
+  });
+
+  afterAll(async () => {
+    await db('device_groups').where({ group_id: groupId }).delete();
+    await db('groups').where({ id: groupId }).delete();
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('GET /api/reports/summary with custom group returns merged series', async () => {
+    await db('device_groups').insert([
+      { device_id: traccarDeviceId, source: 'traccar', group_id: groupId },
+      { device_id: mspfDeviceId, source: 'mspf', group_id: groupId },
+    ]);
+
+    const cache = require('../services/cache');
+    cache.set('devices:merged', [
+      { id: traccarDeviceId, name: 'Traccar A', source: 'traccar', group: 'traccar_5' },
+      { id: mspfDeviceId, name: 'MSPF A', source: 'mspf', group: 'mspf_10000023' },
+    ], 120);
+
+    traccar.getReportTrips.mockResolvedValue([
+      { startTime: '2026-06-15T08:00:00Z', distance: 10, duration: 600, maxSpeed: 40, spentFuel: 1 },
+    ]);
+    mspf.getBcStatsReports.mockResolvedValue([
+      { deviceId: mspfDeviceId, datetime: '2026-06-15', mileage: 20, drivingtime: 1200 },
+    ]);
+
+    const res = await request(app)
+      .get(`/api/reports/summary?group=${groupId}&granularity=day&from=2026-06-15T00:00:00Z&to=2026-06-15T00:00:00Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.type).toBe('group');
+    expect(res.body.group.id).toBe(groupId);
+    expect(res.body.series).toHaveLength(1);
+    expect(res.body.series[0].distance).toBe(30);
+    expect(res.body.series[0].drivingTime).toBe(1800);
+    expect(mspf.getBcStatsReports).toHaveBeenCalledWith(10000023, { startDate: '2026-06-15', endDate: '2026-06-15' });
+  });
+
+  test('GET /api/reports/summary with unknown group returns 404', async () => {
+    const res = await request(app)
+      .get('/api/reports/summary?group=999999&granularity=day&from=2026-06-01T00:00:00Z')
+      .set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(404);
+  });
+
+  test('GET /api/reports/summary group with customer not assigned returns 403', async () => {
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'test_customer', password: 'pass123' });
+    const customerToken = login.body.token;
+
+    const res = await request(app)
+      .get(`/api/reports/summary?group=${groupId}&granularity=day&from=2026-06-01T00:00:00Z`)
+      .set('Authorization', `Bearer ${customerToken}`);
+    expect(res.status).toBe(403);
+  });
+});
+
 describe('Event Reports', () => {
   let token;
   const traccarDeviceId = 999999;
@@ -1179,6 +1484,127 @@ describe('Event Reports', () => {
     expect(res.body.events.length).toBe(1);
     expect(res.body.events[0].status).toBe('OPEN');
     expect(res.body.summary.total).toBe(1);
+  });
+});
+
+describe('Route Reports (playback)', () => {
+  let token;
+  const traccarDeviceId = 900901;
+  const mspfDeviceId = 900902;
+  const foxDeviceId = '0780901703170270';
+
+  beforeAll(async () => {
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'admin', password: 'admin123' });
+    token = login.body.token;
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('GET /api/reports/route without deviceId returns 400', async () => {
+    const res = await request(app)
+      .get('/api/reports/route')
+      .set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('ERR_VALIDATION');
+  });
+
+  test('GET /api/reports/route without token returns 401', async () => {
+    const res = await request(app).get(`/api/reports/route?deviceId=${traccarDeviceId}`);
+    expect(res.status).toBe(401);
+  });
+
+  test('GET /api/reports/route returns Traccar route via /reports/route sorted ASC', async () => {
+    traccar.getDevices.mockResolvedValue([{ id: traccarDeviceId, name: 'Test Traccar', uniqueId: 'test', status: 'online', groupId: 5 }]);
+    traccar.getReportRoute.mockResolvedValue([
+      { id: 3, deviceId: traccarDeviceId, latitude: -6.1, longitude: 106.8, speed: 30, deviceTime: '2026-06-15T12:00:00Z' },
+      { id: 1, deviceId: traccarDeviceId, latitude: -6.0, longitude: 106.7, speed: 10, deviceTime: '2026-06-15T10:00:00Z' },
+      { id: 2, deviceId: traccarDeviceId, latitude: -6.05, longitude: 106.75, speed: 20, deviceTime: '2026-06-15T11:00:00Z' },
+    ]);
+
+    const res = await request(app)
+      .get(`/api/reports/route?deviceId=${traccarDeviceId}&from=2026-06-15T00:00:00Z&to=2026-06-15T23:59:59Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body.length).toBe(3);
+    expect(res.body.every(p => p.source === 'traccar')).toBe(true);
+    const times = res.body.map(p => new Date(p.deviceTime).getTime());
+    expect([...times].sort((a, b) => a - b)).toEqual(times);
+    expect(traccar.getReportRoute).toHaveBeenCalledWith({
+      deviceId: traccarDeviceId,
+      from: '2026-06-15T00:00:00Z',
+      to: '2026-06-15T23:59:59Z',
+    });
+    expect(traccar.getPositions).not.toHaveBeenCalled();
+  });
+
+  test('GET /api/reports/route supplies default range (start of user day -> now)', async () => {
+    traccar.getDevices.mockResolvedValue([{ id: traccarDeviceId, name: 'Test Traccar', uniqueId: 'test', status: 'online', groupId: 5 }]);
+    traccar.getReportRoute.mockResolvedValue([]);
+
+    const before = Date.now();
+    const res = await request(app)
+      .get(`/api/reports/route?deviceId=${traccarDeviceId}`)
+      .set('Authorization', `Bearer ${token}`);
+    const after = Date.now();
+
+    expect(res.status).toBe(200);
+    const { from, to } = traccar.getReportRoute.mock.calls[0][0];
+    const fromMs = new Date(from).getTime();
+    const toMs = new Date(to).getTime();
+    const expectedFromMs = new Date(startOfDayIso(new Date(), 'Asia/Jakarta')).getTime();
+    expect(Math.abs(fromMs - expectedFromMs)).toBeLessThan(60000);
+    expect(fromMs).toBeLessThanOrEqual(toMs);
+    expect(toMs).toBeGreaterThanOrEqual(before - 5000);
+    expect(toMs).toBeLessThanOrEqual(after + 5000);
+  });
+
+  test('GET /api/reports/route returns MSPF route sorted ASC', async () => {
+    traccar.getDevices.mockResolvedValue([]);
+    mspf.getDevice.mockResolvedValue({ id: mspfDeviceId, status: 'WORKING' });
+    mspf.getDeviceRoute.mockResolvedValue([
+      { deviceId: mspfDeviceId, latitude: -7.32, longitude: 112.74, speed: 40, deviceTime: '2026-06-15T12:00:00Z' },
+      { deviceId: mspfDeviceId, latitude: -7.31, longitude: 112.73, speed: 20, deviceTime: '2026-06-15T10:00:00Z' },
+    ]);
+
+    const res = await request(app)
+      .get(`/api/reports/route?deviceId=${mspfDeviceId}&from=2026-06-15T00:00:00Z&to=2026-06-15T23:59:59Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.length).toBe(2);
+    const times = res.body.map(p => new Date(p.deviceTime).getTime());
+    expect([...times].sort((a, b) => a - b)).toEqual(times);
+    expect(res.body[0].deviceTime).toBe('2026-06-15T10:00:00Z');
+  });
+
+  test('GET /api/reports/route returns FoxLogger route sorted ASC', async () => {
+    traccar.getDevices.mockResolvedValue([]);
+    mspf.getDevice.mockResolvedValue(null);
+    foxlogger.getDevices.mockResolvedValue({
+      data: [{ id: parseInt(foxDeviceId, 10), uniqueId: foxDeviceId, name: 'FL Device', status: 'online' }],
+      total: 1,
+      next: null,
+    });
+    foxlogger.getDeviceRoute.mockResolvedValue([
+      { deviceId: parseInt(foxDeviceId, 10), latitude: -6.31, longitude: 106.94, speed: 0, deviceTime: '2026-07-28T08:00:00Z' },
+      { deviceId: parseInt(foxDeviceId, 10), latitude: -6.32, longitude: 106.95, speed: 0, deviceTime: '2026-07-28T07:00:00Z' },
+    ]);
+
+    const res = await request(app)
+      .get(`/api/reports/route?deviceId=${foxDeviceId}&from=2026-07-28T00:00:00Z&to=2026-07-28T23:59:59Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.length).toBe(2);
+    const times = res.body.map(p => new Date(p.deviceTime).getTime());
+    expect([...times].sort((a, b) => a - b)).toEqual(times);
+    expect(res.body[0].deviceTime).toBe('2026-07-28T07:00:00Z');
   });
 });
 

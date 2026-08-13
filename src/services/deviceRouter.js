@@ -1,11 +1,26 @@
 const cache = require('./cache');
 
 function getSourceByDeviceId(deviceId) {
-  return cache.get(`device:src:${deviceId}`);
+  const strKey = `device:src:${deviceId}`;
+  const cached = cache.get(strKey);
+  if (cached) return cached;
+  // Fallback: strip leading zeros for IMEI matching
+  const stripped = String(deviceId).replace(/^0+/, '');
+  if (stripped !== String(deviceId)) {
+    const strippedKey = `device:src:${stripped}`;
+    const found = cache.get(strippedKey);
+    if (found) return found;
+  }
+  return null;
 }
 
 function setSourceByDeviceId(deviceId, source) {
   cache.set(`device:src:${deviceId}`, source, 300);
+  // Also store alias without leading zeros for IMEI matching
+  const stripped = String(deviceId).replace(/^0+/, '');
+  if (stripped !== String(deviceId) && stripped.length > 0) {
+    cache.set(`device:src:${stripped}`, source, 300);
+  }
 }
 
 function buildDeviceMap(devices) {
