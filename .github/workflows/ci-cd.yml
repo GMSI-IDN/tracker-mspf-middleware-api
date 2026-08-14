@@ -126,5 +126,5 @@ jobs:
               -e CACHE_DEVICE_TTL -e CACHE_PROVIDER -e MCCS_CACHE_TTL \
               -v "$DEPLOY_PATH/data:/app/data" \
               "$IMAGE:$IMAGE_TAG" node src/scripts/migrate.js
-            docker compose up -d
+            docker compose -p middleware-$IMAGE_TAG up -d
             docker image prune -f
