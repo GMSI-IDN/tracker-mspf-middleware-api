@@ -123,7 +123,7 @@ function maybeHeartbeat() {
         status: d.status,
         lastUpdate: d.lastKnownTime > 0 ? new Date(d.lastKnownTime).toISOString() : undefined,
       });
-    } catch {}
+    } catch { }
   }
 }
 

@@ -7,7 +7,7 @@ const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 function getTimeZoneOffsetMs(date, timeZone) {
   const dtf = new Intl.DateTimeFormat('en-US', {
     timeZone,
-    hour12: false,
+    hourCycle: 'h23',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -16,11 +16,17 @@ function getTimeZoneOffsetMs(date, timeZone) {
     second: '2-digit',
   });
   const parts = Object.fromEntries(dtf.formatToParts(date).map(p => [p.type, p.value]));
+  let hour = parseInt(parts.hour, 10);
+  let day = parseInt(parts.day, 10);
+  if (hour === 24) {
+    hour = 0;
+    day += 1;
+  }
   const wallAsUtc = Date.UTC(
     parseInt(parts.year, 10),
     parseInt(parts.month, 10) - 1,
-    parseInt(parts.day, 10),
-    parseInt(parts.hour, 10),
+    day,
+    hour,
     parseInt(parts.minute, 10),
     parseInt(parts.second, 10)
   );
