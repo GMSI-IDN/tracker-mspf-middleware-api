@@ -91,11 +91,7 @@ function normalizeDevice(d) {
     source: 'mspf', group: `mspf_${d.bcId}`,
     lastUpdate: toUtcIso(d.lastCommunicatedAt) || undefined,
     voltage: d.tags?.volt ?? undefined,
-<<<<<<< HEAD
-    internalBattery: d.tags?.addr_IB ?? mccsCache.get(d.id)?.addr?.IB ?? undefined,
-=======
     internalBattery: d.tags?.addr_IB ?? mccsCache.get(d.id)?.data?.addr?.IB ?? undefined,
->>>>>>> 131c35dd023d869f3a6c89cdd6a8c8bc4ebe7d64
     batteryLevel: undefined,
     ignition: undefined,
     attributes: {
@@ -141,7 +137,7 @@ let mccsCacheTtl = 10000;
 try {
   const cfg = require('../config');
   mccsCacheTtl = cfg.mspf.cacheTtl;
-} catch {}
+} catch { }
 const mccsCache = new NodeCache({
   stdTTL: Math.ceil(mccsCacheTtl / 1000),
   checkperiod: 5,
@@ -187,7 +183,7 @@ async function getBatchMccsData(deviceIds, statusMap = {}) {
       for (let j = 0; j < batch.length; j++) {
         const id = batch[j];
         const data = fetched[j].status === 'fulfilled' ? fetched[j].value : null;
-        if (data) { try { mccsCache.set(id, data); } catch {} }
+        if (data) { try { mccsCache.set(id, data); } catch { } }
         results[id] = data;
       }
     }
@@ -196,25 +192,6 @@ async function getBatchMccsData(deviceIds, statusMap = {}) {
   return results;
 }
 
-<<<<<<< HEAD
-function normalizeMccsToAttributes(mccsData) {
-  if (!mccsData) return {};
-  const attrs = {
-    tid: mccsData.tid, mid: mccsData.mid, ts: mccsData.ts, code: mccsData.code,
-    kph: mccsData.kph, alt: mccsData.alt, dir: mccsData.dir,
-    hdop: mccsData.hdop, sats: mccsData.sats,
-    odom: mccsData.odom, volt: mccsData.volt,
-    gpio: mccsData.gpio, accm: mccsData.accm,
-    ver: mccsData.ver, sno: mccsData.sno,
-    diff: mccsData.diff, gtm: mccsData.gtm,
-    relay: mccsData.relay, mode: mccsData.mode,
-    addr_IGN: mccsData.addr?.IGN, addr_FIX: mccsData.addr?.FIX,
-    addr_EB: mccsData.addr?.EB, addr_IB: mccsData.addr?.IB,
-    addr_AD: mccsData.addr?.AD, addr_AD2: mccsData.addr?.AD2,
-    addr_TE: mccsData.addr?.TE, addr_RS: mccsData.addr?.RS,
-    addr_NT: mccsData.addr?.NT,
-    addr_x: mccsData.addr?.x, addr_y: mccsData.addr?.y, addr_z: mccsData.addr?.z,
-=======
 function normalizeMccsToAttributes(mccsRecord) {
   if (!mccsRecord) return {};
   const d = mccsRecord.data ?? mccsRecord;
@@ -227,15 +204,14 @@ function normalizeMccsToAttributes(mccsRecord) {
     ver: d.ver, sno: d.sno,
     diff: d.diff, gtm: d.gtm,
     relay: d.relay, mode: d.mode,
-      createdAt: mccsRecord.createdAt ? toUtcIso(mccsRecord.createdAt) || undefined : undefined,
-      insDtm: mccsRecord.insDtm ? toUtcIso(mccsRecord.insDtm) || undefined : undefined,
+    createdAt: mccsRecord.createdAt ? toUtcIso(mccsRecord.createdAt) || undefined : undefined,
+    insDtm: mccsRecord.insDtm ? toUtcIso(mccsRecord.insDtm) || undefined : undefined,
     addr_IGN: d.addr?.IGN, addr_FIX: d.addr?.FIX,
     addr_EB: d.addr?.EB, addr_IB: d.addr?.IB,
     addr_AD: d.addr?.AD, addr_AD2: d.addr?.AD2,
     addr_TE: d.addr?.TE, addr_RS: d.addr?.RS,
     addr_NT: d.addr?.NT,
     addr_x: d.addr?.x, addr_y: d.addr?.y, addr_z: d.addr?.z,
->>>>>>> 131c35dd023d869f3a6c89cdd6a8c8bc4ebe7d64
   };
   return Object.fromEntries(Object.entries(attrs).filter(([_, v]) => v !== undefined));
 }
@@ -264,7 +240,7 @@ async function enrichPositions(positions) {
   }
 
   let mccsMap = {};
-  try { mccsMap = await getBatchMccsData(deviceIds, statusMap); } catch {};
+  try { mccsMap = await getBatchMccsData(deviceIds, statusMap); } catch { };
 
   const latestTimes = {};
   for (const p of positions) {
@@ -347,8 +323,8 @@ function normalizeMccsForDeviceDetail(mccsRecord) {
       ver: d.ver, sno: d.sno,
       diff: d.diff, gtm: d.gtm,
       relay: d.relay, mode: d.mode,
-    createdAt: mccsRecord.createdAt ? toUtcIso(mccsRecord.createdAt) || undefined : undefined,
-    insDtm: mccsRecord.insDtm ? toUtcIso(mccsRecord.insDtm) || undefined : undefined,
+      createdAt: mccsRecord.createdAt ? toUtcIso(mccsRecord.createdAt) || undefined : undefined,
+      insDtm: mccsRecord.insDtm ? toUtcIso(mccsRecord.insDtm) || undefined : undefined,
       addr: {
         IGN: d.addr?.IGN, FIX: d.addr?.FIX,
         EB: d.addr?.EB, IB: d.addr?.IB,
@@ -493,7 +469,7 @@ async function init() {
   }
 }
 
-init().catch(() => {});
+init().catch(() => { });
 
 async function getDeviceParking(deviceId, params = {}) {
   const res = await getApi().get(`/v3/stats/devices/${deviceId}/parking`, { params });
@@ -539,7 +515,7 @@ async function getDeviceStatsReports(deviceId, params = {}) {
     pages++;
     if (pages > 50) break;
   } while (start);
-  try { statsReportsCache.set(cacheKey, results); } catch {}
+  try { statsReportsCache.set(cacheKey, results); } catch { }
   return results;
 }
 
@@ -559,7 +535,7 @@ async function getBcStatsReports(bcId, params = {}) {
     pages++;
     if (pages > 50) break;
   } while (start);
-  try { statsReportsCache.set(cacheKey, results); } catch {}
+  try { statsReportsCache.set(cacheKey, results); } catch { }
   return results;
 }
 

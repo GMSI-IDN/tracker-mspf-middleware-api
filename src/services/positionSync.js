@@ -123,7 +123,7 @@ function maybeHeartbeat() {
         status: d.status,
         lastUpdate: d.lastKnownTime > 0 ? new Date(d.lastKnownTime).toISOString() : undefined,
       });
-    } catch {}
+    } catch { }
   }
 }
 
@@ -162,19 +162,6 @@ async function syncPositions() {
     }
   }
 
-<<<<<<< HEAD
-  if (mspfResult.status === 'fulfilled' && mspfResult.value) {
-    let activeIds = getActiveMspfIds();
-    if (!activeIds) {
-      logger.warn('[PositionSync] device cache expired, rebuilding...');
-      const [t, m] = await Promise.allSettled([
-        traccar.getDevices({ all: true }),
-        mspf.waitForInit().then(() => mspf.getDevices()),
-      ]);
-      const rebuild = [];
-      if (t.status === 'fulfilled' && t.value) {
-        for (const d of t.value) rebuild.push({ id: d.id, name: d.name, uniqueId: d.uniqueId, status: d.status || 'offline', source: 'traccar', group: `traccar_${d.groupId}`, lastUpdate: d.lastUpdate || (d.attributes?.motionTime ? new Date(d.attributes.motionTime).toISOString() : undefined), voltage: d.attributes?.power ?? undefined, attributes: d.attributes || {} });
-=======
   if (!useStale) {
     const now = new Date().toISOString();
 
@@ -182,7 +169,6 @@ async function syncPositions() {
       for (const p of traccarResult.value) {
         positions.push(normalizePosition({ ...p, serverTime: p.serverTime || now, source: 'traccar' }));
         actT++;
->>>>>>> 131c35dd023d869f3a6c89cdd6a8c8bc4ebe7d64
       }
     }
 
