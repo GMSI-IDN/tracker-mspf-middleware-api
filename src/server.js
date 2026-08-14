@@ -1,19 +1,21 @@
 const http = require('http');
 const app = require('./app');
 const config = require('./config');
-const { setupWebSocket } = require('./websocket');
-const { startPositionSync } = require('./services/positionSync');
+const { setupWebSocket, emitPosition, emitStatusFor } = require('./websocket');
+const { startPositionSync, setEmitHooks } = require('./services/positionSync');
 const traccar = require('./services/traccar');
 const mspf = require('./services/mspf');
+const foxlogger = require('./services/foxlogger');
 const deviceRouter = require('./services/deviceRouter');
 const cache = require('./services/cache');
 const { logger } = require('./middleware/logger');
 const db = require('./db');
 
 async function buildDeviceCache() {
-  const [traccarResult, mspfResult] = await Promise.allSettled([
+  const [traccarResult, mspfResult, foxloggerResult] = await Promise.allSettled([
     traccar.getDevices({ all: true }),
     mspf.waitForInit().then(() => mspf.getDevices()),
+    foxlogger.waitForInit().then(() => foxlogger.getDevices()),
   ]);
 
   const merged = [];
@@ -29,9 +31,14 @@ async function buildDeviceCache() {
   if (mspfResult.status === 'fulfilled' && mspfResult.value?.data) {
     merged.push(...mspfResult.value.data);
   }
+  if (foxloggerResult.status === 'fulfilled' && foxloggerResult.value?.data) {
+    merged.push(...foxloggerResult.value.data);
+  }
 
   merged.sort((a, b) => {
-    if (a.id !== b.id) return a.id - b.id;
+    const aId = String(a.id).padStart(20, '0');
+    const bId = String(b.id).padStart(20, '0');
+    if (aId !== bId) return aId < bId ? -1 : 1;
     if (a.source < b.source) return -1;
     if (a.source > b.source) return 1;
     return 0;
@@ -45,6 +52,12 @@ async function buildDeviceCache() {
 const server = http.createServer(app);
 
 setupWebSocket(server);
+
+setEmitHooks({
+  onPosition: (item) => emitPosition(item),
+  onStatus: (payload) => emitStatusFor(payload),
+});
+
 buildDeviceCache().then(() => startPositionSync());
 
 server.listen(config.port, () => {

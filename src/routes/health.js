@@ -1,6 +1,7 @@
 const express = require('express');
 const traccar = require('../services/traccar');
 const mspf = require('../services/mspf');
+const foxlogger = require('../services/foxlogger');
 const { logger } = require('../middleware/logger');
 
 const router = express.Router();
@@ -34,6 +35,22 @@ router.get('/detailed', async (req, res, next) => {
       }
     } catch {
       deps.push({ name: 'mspf', status: 'unhealthy' });
+    }
+
+    try {
+      if (foxlogger.getApi) {
+        const api = foxlogger.getApi();
+        if (api) {
+          await api.get('/geo-fences/0', { timeout: 5000 });
+          deps.push({ name: 'foxlogger', status: 'healthy' });
+        } else {
+          deps.push({ name: 'foxlogger', status: 'unhealthy' });
+        }
+      } else {
+        deps.push({ name: 'foxlogger', status: 'unknown' });
+      }
+    } catch {
+      deps.push({ name: 'foxlogger', status: 'unhealthy' });
     }
 
     const allHealthy = deps.every(d => d.status === 'healthy');

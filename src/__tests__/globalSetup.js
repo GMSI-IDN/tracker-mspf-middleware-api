@@ -7,10 +7,11 @@ process.env.MSPF_CLIENT_ID = 'test-client';
 process.env.MSPF_CLIENT_SECRET = 'test-secret';
 process.env.DB_DRIVER = 'sqlite3';
 process.env.DB_PATH = './data/test.db';
-process.env.CACHE_DEVICE_TTL = '120';
 process.env.LOG_LEVEL = 'silent';
-process.env.RATE_LIMIT_MAX = '10000';
-process.env.RATE_LIMIT_AUTH_MAX = '10000';
-process.env.FOXLOGGER_EMAIL = '';
-process.env.FOXLOGGER_PASSWORD = '';
-process.env.RUN_MIGRATIONS = 'false';
+
+const db = require('../db');
+
+module.exports = async () => {
+  await db.waitForMigration();
+  await db.destroy();
+};

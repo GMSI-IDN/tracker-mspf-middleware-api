@@ -1,6 +1,7 @@
 const { classifyAxiosError } = require('../utils/axiosError');
 const { logger } = require('../middleware/logger');
 const { calcRunningStatus } = require('../utils/deviceStatus');
+const { toUtcIso } = require('../utils/timestamp');
 
 const axios = require('axios');
 const config = require('../config');
@@ -88,9 +89,13 @@ function normalizeDevice(d) {
     status: d.status === 'WORKING' ? 'online' : 'offline',
     phone: d.mobileNo || undefined, model: d.deviceType || undefined,
     source: 'mspf', group: `mspf_${d.bcId}`,
-    lastUpdate: d.lastCommunicatedAt || undefined,
+    lastUpdate: toUtcIso(d.lastCommunicatedAt) || undefined,
     voltage: d.tags?.volt ?? undefined,
+<<<<<<< HEAD
     internalBattery: d.tags?.addr_IB ?? mccsCache.get(d.id)?.addr?.IB ?? undefined,
+=======
+    internalBattery: d.tags?.addr_IB ?? mccsCache.get(d.id)?.data?.addr?.IB ?? undefined,
+>>>>>>> 131c35dd023d869f3a6c89cdd6a8c8bc4ebe7d64
     batteryLevel: undefined,
     ignition: undefined,
     attributes: {
@@ -115,9 +120,9 @@ function normalizePosition(deviceId, pos) {
     speed: pos.speed ?? 0,
     course: pos.course ?? 0,
     altitude: pos.altitude ?? 0,
-    deviceTime: pos.deviceTime || (pos.timestamp ? new Date(pos.timestamp * 1000).toISOString() : new Date().toISOString()),
-    serverTime: pos.serverTime || new Date().toISOString(),
-    fixTime: pos.fixTime || pos.deviceTime || (pos.timestamp ? new Date(pos.timestamp * 1000).toISOString() : new Date().toISOString()),
+    deviceTime: toUtcIso(pos.deviceTime) || (pos.timestamp ? new Date(pos.timestamp * 1000).toISOString() : new Date().toISOString()),
+    serverTime: toUtcIso(pos.serverTime) || new Date().toISOString(),
+    fixTime: toUtcIso(pos.fixTime) || toUtcIso(pos.deviceTime) || (pos.timestamp ? new Date(pos.timestamp * 1000).toISOString() : new Date().toISOString()),
     valid: pos.valid !== undefined ? pos.valid : true,
     source: 'mspf',
     attributes: { ...(pos.attributes || {}) },
@@ -150,7 +155,7 @@ async function getLatestMccsData(deviceId) {
     });
     const items = res.data?.data;
     if (items && items.length > 0) {
-      return items[items.length - 1].data;
+      return items[items.length - 1];
     }
     return null;
   } catch {
@@ -191,6 +196,7 @@ async function getBatchMccsData(deviceIds, statusMap = {}) {
   return results;
 }
 
+<<<<<<< HEAD
 function normalizeMccsToAttributes(mccsData) {
   if (!mccsData) return {};
   const attrs = {
@@ -208,6 +214,28 @@ function normalizeMccsToAttributes(mccsData) {
     addr_TE: mccsData.addr?.TE, addr_RS: mccsData.addr?.RS,
     addr_NT: mccsData.addr?.NT,
     addr_x: mccsData.addr?.x, addr_y: mccsData.addr?.y, addr_z: mccsData.addr?.z,
+=======
+function normalizeMccsToAttributes(mccsRecord) {
+  if (!mccsRecord) return {};
+  const d = mccsRecord.data ?? mccsRecord;
+  const attrs = {
+    tid: d.tid, mid: d.mid, ts: d.ts, code: d.code,
+    kph: d.kph, alt: d.alt, dir: d.dir,
+    hdop: d.hdop, sats: d.sats,
+    odom: d.odom, volt: d.volt,
+    gpio: d.gpio, accm: d.accm,
+    ver: d.ver, sno: d.sno,
+    diff: d.diff, gtm: d.gtm,
+    relay: d.relay, mode: d.mode,
+      createdAt: mccsRecord.createdAt ? toUtcIso(mccsRecord.createdAt) || undefined : undefined,
+      insDtm: mccsRecord.insDtm ? toUtcIso(mccsRecord.insDtm) || undefined : undefined,
+    addr_IGN: d.addr?.IGN, addr_FIX: d.addr?.FIX,
+    addr_EB: d.addr?.EB, addr_IB: d.addr?.IB,
+    addr_AD: d.addr?.AD, addr_AD2: d.addr?.AD2,
+    addr_TE: d.addr?.TE, addr_RS: d.addr?.RS,
+    addr_NT: d.addr?.NT,
+    addr_x: d.addr?.x, addr_y: d.addr?.y, addr_z: d.addr?.z,
+>>>>>>> 131c35dd023d869f3a6c89cdd6a8c8bc4ebe7d64
   };
   return Object.fromEntries(Object.entries(attrs).filter(([_, v]) => v !== undefined));
 }
@@ -238,21 +266,31 @@ async function enrichPositions(positions) {
   let mccsMap = {};
   try { mccsMap = await getBatchMccsData(deviceIds, statusMap); } catch {};
 
+  const latestTimes = {};
+  for (const p of positions) {
+    const t = new Date(p.deviceTime || 0).getTime();
+    if (!Number.isNaN(t) && t > (latestTimes[p.deviceId] || 0)) latestTimes[p.deviceId] = t;
+  }
+
   return positions.map(p => {
     const st = statusMap[p.deviceId];
     const mccs = mccsMap[p.deviceId];
+    const mccsData = mccs?.data ?? mccs;
     const mccsAttrs = normalizeMccsToAttributes(mccs);
-    const kph = mccs?.kph;
+    const kph = mccsData?.kph;
     const ignition = st?.ignition === 'ON' ? true : (st?.ignition === 'OFF' ? false : undefined);
     const mspfRunning = st?.running?.status;
     const speed = kph || p.speed || st?.speed || 0;
     const lastUpdate = p.deviceTime || st?.lastCommunicatedAt;
     const running = mspfRunning && mspfRunning !== 'UNKNOWN' ? mspfRunning : calcRunningStatus(ignition, speed, lastUpdate);
+    const isLatest = new Date(p.deviceTime || 0).getTime() >= (latestTimes[p.deviceId] || 0);
+    const serverTime = isLatest && mccs?.insDtm ? toUtcIso(mccs.insDtm) || p.serverTime : p.serverTime;
 
     return {
       ...p,
+      serverTime,
       speed: p.speed || st?.speed || 0,
-      course: p.course || mccs?.dir || 0,
+      course: p.course || mccsData?.dir || 0,
       attributes: {
         ...p.attributes,
         ...(st?.tags || {}),
@@ -279,7 +317,7 @@ function normalizeDeviceStatus(status) {
     ignition: status.ignition || undefined,
     voltage: status.voltage || undefined,
     firmwareVersion: status.firmVersion || undefined,
-    lastCommunicatedAt: status.lastCommunicatedAt || undefined,
+    lastCommunicatedAt: toUtcIso(status.lastCommunicatedAt) || undefined,
     sats: status.sats || undefined,
     rssi: status.rssi || undefined,
     signal: status.signal || undefined,
@@ -295,26 +333,29 @@ function normalizeDeviceStatus(status) {
 
 // ── MCCS data for device detail (nested format) ─────────
 
-function normalizeMccsForDeviceDetail(mccsData) {
-  if (!mccsData) return {};
+function normalizeMccsForDeviceDetail(mccsRecord) {
+  if (!mccsRecord) return {};
+  const d = mccsRecord.data ?? mccsRecord;
   return {
     mobilityData: {
-      tid: mccsData.tid, mid: mccsData.mid, ts: mccsData.ts, code: mccsData.code,
-      kph: mccsData.kph, lat: mccsData.lat, lon: mccsData.lon,
-      alt: mccsData.alt, dir: mccsData.dir,
-      hdop: mccsData.hdop, sats: mccsData.sats,
-      odom: mccsData.odom, volt: mccsData.volt,
-      gpio: mccsData.gpio, accm: mccsData.accm,
-      ver: mccsData.ver, sno: mccsData.sno,
-      diff: mccsData.diff, gtm: mccsData.gtm,
-      relay: mccsData.relay, mode: mccsData.mode,
+      tid: d.tid, mid: d.mid, ts: d.ts, code: d.code,
+      kph: d.kph, lat: d.lat, lon: d.lon,
+      alt: d.alt, dir: d.dir,
+      hdop: d.hdop, sats: d.sats,
+      odom: d.odom, volt: d.volt,
+      gpio: d.gpio, accm: d.accm,
+      ver: d.ver, sno: d.sno,
+      diff: d.diff, gtm: d.gtm,
+      relay: d.relay, mode: d.mode,
+    createdAt: mccsRecord.createdAt ? toUtcIso(mccsRecord.createdAt) || undefined : undefined,
+    insDtm: mccsRecord.insDtm ? toUtcIso(mccsRecord.insDtm) || undefined : undefined,
       addr: {
-        IGN: mccsData.addr?.IGN, FIX: mccsData.addr?.FIX,
-        EB: mccsData.addr?.EB, IB: mccsData.addr?.IB,
-        AD: mccsData.addr?.AD, AD2: mccsData.addr?.AD2,
-        TE: mccsData.addr?.TE, RS: mccsData.addr?.RS,
-        NT: mccsData.addr?.NT,
-        x: mccsData.addr?.x, y: mccsData.addr?.y, z: mccsData.addr?.z,
+        IGN: d.addr?.IGN, FIX: d.addr?.FIX,
+        EB: d.addr?.EB, IB: d.addr?.IB,
+        AD: d.addr?.AD, AD2: d.addr?.AD2,
+        TE: d.addr?.TE, RS: d.addr?.RS,
+        NT: d.addr?.NT,
+        x: d.addr?.x, y: d.addr?.y, z: d.addr?.z,
       },
     },
   };
@@ -480,6 +521,48 @@ async function getStatsSummary(params = {}) {
   return res.data;
 }
 
+const statsReportsCache = new NodeCache({ stdTTL: 3600, checkperiod: 300 });
+
+async function getDeviceStatsReports(deviceId, params = {}) {
+  const cacheKey = `stats:device:${deviceId}:${params.startDate || ''}:${params.endDate || ''}`;
+  const cached = statsReportsCache.get(cacheKey);
+  if (cached) return cached;
+  const results = [];
+  let start;
+  let pages = 0;
+  do {
+    const query = { ...params, dimensions: 'DAILY', timezone: 'UTC', limit: 100 };
+    if (start) query.start = start;
+    const res = await getApi().get(`/v3/stats/devices/${deviceId}/reports`, { params: query });
+    results.push(...(res.data?.data || []));
+    start = res.data?.next;
+    pages++;
+    if (pages > 50) break;
+  } while (start);
+  try { statsReportsCache.set(cacheKey, results); } catch {}
+  return results;
+}
+
+async function getBcStatsReports(bcId, params = {}) {
+  const cacheKey = `stats:bc:${bcId}:${params.startDate || ''}:${params.endDate || ''}`;
+  const cached = statsReportsCache.get(cacheKey);
+  if (cached) return cached;
+  const results = [];
+  let start;
+  let pages = 0;
+  do {
+    const query = { ...params, bcId, dimensions: 'DAILY', timezone: 'UTC', limit: 1000 };
+    if (start) query.start = start;
+    const res = await getApi().get('/v3/stats/devices/reports', { params: query });
+    results.push(...(res.data?.data || []));
+    start = res.data?.next;
+    pages++;
+    if (pages > 50) break;
+  } while (start);
+  try { statsReportsCache.set(cacheKey, results); } catch {}
+  return results;
+}
+
 async function getMspfEvents(params = {}) {
   const res = await getApi().get('/v4/events', { params });
   return res.data?.data || res.data || [];
@@ -499,6 +582,8 @@ module.exports = {
   getDeviceParking, getDeviceParkingAll,
   getDeviceTrip,
   getStatsSummary,
+  getDeviceStatsReports,
+  getBcStatsReports,
   getMspfEvents,
   getMspfClosedEvents,
 };

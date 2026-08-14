@@ -2,6 +2,7 @@ const express = require('express');
 const createError = require('http-errors');
 const traccar = require('../services/traccar');
 const mspf = require('../services/mspf');
+const foxlogger = require('../services/foxlogger');
 const deviceRouter = require('../services/deviceRouter');
 const cache = require('../services/cache');
 const db = require('../db');
@@ -59,10 +60,13 @@ router.get('/', async (req, res, next) => {
       let devSource = source;
       if (group) { const p = deviceRouter.resolveGroup(group); if (p) devSource = p.source; }
       if (!devSource) devSource = deviceRouter.getSourceByDeviceId(idNum);
+      if (!devSource) devSource = deviceRouter.getSourceByDeviceId(deviceId);
       if (!devSource) throw createError(404, 'Device not found', { code: 'ERR_NOT_FOUND' });
 
-      if (req.user.role !== 'admin' && req.user.groups?.length > 0) {
-        const dg = await db('device_groups').where({ device_id: idNum, source: devSource }).whereIn('group_id', req.user.groups).first();
+      if (req.user.role !== 'admin') {
+        if (!req.user.groups?.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+        const lookupId = devSource === 'foxlogger' ? deviceId : idNum;
+        const dg = await db('device_groups').where({ device_id: lookupId, source: devSource }).whereIn('group_id', req.user.groups).first();
         if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
       }
 
@@ -70,6 +74,9 @@ router.get('/', async (req, res, next) => {
       if (devSource === 'traccar') {
         const data = await traccar.getPositions({ deviceId: idNum, from, to, limit });
         positions = data.map(normalizeTraccarPosition);
+      } else if (devSource === 'foxlogger') {
+        const data = await foxlogger.getPositions({ status: undefined });
+        positions = (data || []).filter(p => p.deviceId === idNum);
       } else if (from || to) {
         positions = await mspf.getDeviceRoute(idNum, { from, to });
       } else {
@@ -81,10 +88,22 @@ router.get('/', async (req, res, next) => {
 
     let positions = cache.get('positions:merged') || [];
     const userGroups = req.user.groups || [];
-    if (req.user.role !== 'admin' && userGroups.length > 0) {
+    if (req.user.role !== 'admin') {
+      if (userGroups.length === 0) { positions = []; }
+      else {
       const mappings = await db('device_groups').whereIn('group_id', userGroups).select('device_id', 'source');
-      const allowed = new Set(mappings.map(m => `${m.source}:${m.device_id}`));
-      positions = positions.filter(p => allowed.has(`${p.source}:${p.deviceId}`));
+      const allowedStr = new Set(mappings.filter(m => m.source !== 'foxlogger').map(m => `${m.source}:${m.device_id}`));
+      const foxAllowedStr = new Set(mappings.filter(m => m.source === 'foxlogger').map(m => `${m.device_id}`));
+      positions = positions.filter(p => {
+        if (allowedStr.has(`${p.source}:${p.deviceId}`)) return true;
+        if (p.source === 'foxlogger' && foxAllowedStr.has(String(p.deviceId))) return true;
+        if (p.source === 'foxlogger' && foxlogger.resolveImei) {
+          const imei = foxlogger.resolveImei(p.deviceId);
+          if (imei && foxAllowedStr.has(imei)) return true;
+        }
+        return false;
+      });
+      }
     }
 
     await applyCustomAttributes(positions, req.user);
@@ -103,16 +122,25 @@ router.get('/latest', async (req, res, next) => {
       let devSource = source;
       if (group) { const p = deviceRouter.resolveGroup(group); if (p) devSource = p.source; }
       if (!devSource) devSource = deviceRouter.getSourceByDeviceId(idNum);
+      if (!devSource) devSource = deviceRouter.getSourceByDeviceId(deviceId);
       if (!devSource) throw createError(404, 'Device not found', { code: 'ERR_NOT_FOUND' });
 
-      if (req.user.role !== 'admin' && req.user.groups?.length > 0) {
-        const dg = await db('device_groups').where({ device_id: idNum, source: devSource }).whereIn('group_id', req.user.groups).first();
+      if (req.user.role !== 'admin') {
+        if (!req.user.groups?.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+        const lookupId = devSource === 'foxlogger' ? deviceId : idNum;
+        const dg = await db('device_groups').where({ device_id: lookupId, source: devSource }).whereIn('group_id', req.user.groups).first();
         if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
       }
 
       if (devSource === 'traccar') {
         const data = await traccar.getPositions({ deviceId: idNum });
         return res.json((data || []).map(normalizeTraccarPosition));
+      }
+      if (devSource === 'foxlogger') {
+        const data = await foxlogger.getPositions({ status: undefined });
+        const positions = (data || []).filter(p => p.deviceId === idNum);
+        await applyCustomAttributes(positions, req.user);
+        return res.json(positions);
       }
       const positions = (cache.get('positions:merged') || []).filter(p => p.deviceId === idNum && p.source === 'mspf');
       await applyCustomAttributes(positions, req.user);
@@ -121,10 +149,22 @@ router.get('/latest', async (req, res, next) => {
 
     let positions = cache.get('positions:merged') || [];
     const userGroups = req.user.groups || [];
-    if (req.user.role !== 'admin' && userGroups.length > 0) {
+    if (req.user.role !== 'admin') {
+      if (userGroups.length === 0) { positions = []; }
+      else {
       const mappings = await db('device_groups').whereIn('group_id', userGroups).select('device_id', 'source');
-      const allowed = new Set(mappings.map(m => `${m.source}:${m.device_id}`));
-      positions = positions.filter(p => allowed.has(`${p.source}:${p.deviceId}`));
+      const allowedStr = new Set(mappings.filter(m => m.source !== 'foxlogger').map(m => `${m.source}:${m.device_id}`));
+      const foxAllowedStr = new Set(mappings.filter(m => m.source === 'foxlogger').map(m => `${m.device_id}`));
+      positions = positions.filter(p => {
+        if (allowedStr.has(`${p.source}:${p.deviceId}`)) return true;
+        if (p.source === 'foxlogger' && foxAllowedStr.has(String(p.deviceId))) return true;
+        if (p.source === 'foxlogger' && foxlogger.resolveImei) {
+          const imei = foxlogger.resolveImei(p.deviceId);
+          if (imei && foxAllowedStr.has(imei)) return true;
+        }
+        return false;
+      });
+      }
     }
 
     await applyCustomAttributes(positions, req.user);

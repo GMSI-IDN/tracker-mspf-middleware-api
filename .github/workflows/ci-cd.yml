@@ -1,0 +1,130 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [development, staging, production]
+  pull_request:
+    branches: [development, staging, production]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - run: npm ci
+      - run: npm test
+
+  build:
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: meta
+        run: echo "image=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ github.ref_name }}
+            ${{ steps.meta.outputs.image }}:${{ github.ref_name }}-${{ github.sha }}
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Upload compose file to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          port: ${{ vars.SSH_PORT || 22 }}
+          username: ${{ secrets.SSH_USERNAME }}
+          password: ${{ secrets.SSH_PASSWORD }}
+          source: "docker-compose.deploy.yml"
+          target: "/tmp"
+
+      - name: Pull image and restart on server
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ needs.build.outputs.image }}
+          IMAGE_TAG: ${{ github.ref_name }}
+          VIRTUAL_HOST: ${{ vars.VIRTUAL_HOST }}
+          LETSENCRYPT_HOST: ${{ vars.LETSENCRYPT_HOST }}
+          LETSENCRYPT_EMAIL: ${{ vars.LETSENCRYPT_EMAIL }}
+          PROXY_NETWORK: ${{ vars.PROXY_NETWORK }}
+          PORT: ${{ vars.PORT }}
+          NODE_ENV: ${{ vars.NODE_ENV }}
+          DB_DRIVER: ${{ vars.DB_DRIVER }}
+          DB_PATH: ${{ vars.DB_PATH }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          JWT_EXPIRY: ${{ vars.JWT_EXPIRY }}
+          TRACCAR_URL: ${{ vars.TRACCAR_URL }}
+          TRACCAR_USERNAME: ${{ secrets.TRACCAR_USERNAME }}
+          TRACCAR_PASSWORD: ${{ secrets.TRACCAR_PASSWORD }}
+          MSPF_URL: ${{ vars.MSPF_URL }}
+          MSPF_CLIENT_ID: ${{ secrets.MSPF_CLIENT_ID }}
+          MSPF_CLIENT_SECRET: ${{ secrets.MSPF_CLIENT_SECRET }}
+          MSPF_TOKEN_URL: ${{ secrets.MSPF_TOKEN_URL }}
+          CACHE_DEVICE_TTL: ${{ vars.CACHE_DEVICE_TTL }}
+          CACHE_PROVIDER: ${{ vars.CACHE_PROVIDER }}
+          MCCS_CACHE_TTL: ${{ vars.MCCS_CACHE_TTL }}
+          RATE_LIMIT_WINDOW_MS: ${{ vars.RATE_LIMIT_WINDOW_MS }}
+          RATE_LIMIT_MAX: ${{ vars.RATE_LIMIT_MAX }}
+          RATE_LIMIT_AUTH_MAX: ${{ vars.RATE_LIMIT_AUTH_MAX }}
+          WEBSOCKET_PATH: ${{ vars.WEBSOCKET_PATH }}
+          POLL_INTERVAL: ${{ vars.POLL_INTERVAL }}
+          REDIS_URL: ${{ secrets.REDIS_URL }}
+          CORS_ORIGIN: ${{ vars.CORS_ORIGIN }}
+          LOG_LEVEL: ${{ vars.LOG_LEVEL }}
+          REQUEST_TIMEOUT: ${{ vars.REQUEST_TIMEOUT }}
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          port: ${{ vars.SSH_PORT || 22 }}
+          username: ${{ secrets.SSH_USERNAME }}
+          password: ${{ secrets.SSH_PASSWORD }}
+          envs: GHCR_TOKEN,IMAGE,IMAGE_TAG,VIRTUAL_HOST,LETSENCRYPT_HOST,LETSENCRYPT_EMAIL,PROXY_NETWORK,PORT,NODE_ENV,DB_DRIVER,DB_PATH,JWT_SECRET,JWT_EXPIRY,TRACCAR_URL,TRACCAR_USERNAME,TRACCAR_PASSWORD,MSPF_URL,MSPF_CLIENT_ID,MSPF_CLIENT_SECRET,MSPF_TOKEN_URL,CACHE_DEVICE_TTL,CACHE_PROVIDER,MCCS_CACHE_TTL,RATE_LIMIT_WINDOW_MS,RATE_LIMIT_MAX,RATE_LIMIT_AUTH_MAX,WEBSOCKET_PATH,POLL_INTERVAL,REDIS_URL,CORS_ORIGIN,LOG_LEVEL,REQUEST_TIMEOUT
+          script: |
+            set -e
+            DEPLOY_PATH="${{ vars.DEPLOY_PATH }}"
+            mkdir -p "$DEPLOY_PATH"
+            mv /tmp/docker-compose.deploy.yml "$DEPLOY_PATH/docker-compose.yml"
+            cd "$DEPLOY_PATH"
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+            docker pull "$IMAGE:$IMAGE_TAG"
+            docker run --rm \
+              -e PORT -e NODE_ENV -e DB_DRIVER -e DB_PATH -e JWT_SECRET -e JWT_EXPIRY \
+              -e TRACCAR_URL -e TRACCAR_USERNAME -e TRACCAR_PASSWORD \
+              -e MSPF_URL -e MSPF_CLIENT_ID -e MSPF_CLIENT_SECRET -e MSPF_TOKEN_URL \
+              -e CACHE_DEVICE_TTL -e CACHE_PROVIDER -e MCCS_CACHE_TTL \
+              -v "$DEPLOY_PATH/data:/app/data" \
+              "$IMAGE:$IMAGE_TAG" node src/scripts/migrate.js
+            docker compose up -d
+            docker image prune -f

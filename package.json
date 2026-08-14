@@ -17,13 +17,15 @@
     "setupFiles": [
       "./src/__tests__/jest.setup.js"
     ],
+    "globalSetup": "./src/__tests__/globalSetup.js",
     "testEnvironment": "node",
     "roots": [
       "src/__tests__"
     ],
     "testPathIgnorePatterns": [
       "/node_modules/",
-      "jest.setup.js"
+      "jest.setup.js",
+      "globalSetup.js"
     ],
     "transform": {}
   },
@@ -43,6 +45,7 @@
     "ioredis": "^5.11.1",
     "jsonwebtoken": "^9.0.3",
     "knex": "^3.2.10",
+    "mathjs": "^11.12.0",
     "morgan": "^1.11.0",
     "node-cache": "^5.1.2",
     "socket.io": "^4.8.3",
