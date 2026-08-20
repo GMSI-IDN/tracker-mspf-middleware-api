@@ -66,6 +66,7 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           port: ${{ vars.SSH_PORT || 22 }}
           username: ${{ secrets.SSH_USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
           password: ${{ secrets.SSH_PASSWORD }}
           source: "docker-compose.deploy.yml"
           target: "/tmp"
@@ -80,10 +81,15 @@ jobs:
           LETSENCRYPT_HOST: ${{ vars.LETSENCRYPT_HOST }}
           LETSENCRYPT_EMAIL: ${{ vars.LETSENCRYPT_EMAIL }}
           PROXY_NETWORK: ${{ vars.PROXY_NETWORK }}
-          PORT: ${{ vars.PORT }}
-          NODE_ENV: ${{ vars.NODE_ENV }}
+          PORT: ${{ vars.PORT || '3000' }}
+          NODE_ENV: ${{ vars.NODE_ENV || 'production' }}
           DB_DRIVER: ${{ vars.DB_DRIVER }}
           DB_PATH: ${{ vars.DB_PATH }}
+          DB_HOST: ${{ vars.DB_HOST }}
+          DB_PORT: ${{ vars.DB_PORT }}
+          DB_NAME: ${{ vars.DB_NAME }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASS: ${{ secrets.DB_PASS }}
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
           JWT_EXPIRY: ${{ vars.JWT_EXPIRY }}
           TRACCAR_URL: ${{ vars.TRACCAR_URL }}
@@ -92,16 +98,29 @@ jobs:
           MSPF_URL: ${{ vars.MSPF_URL }}
           MSPF_CLIENT_ID: ${{ secrets.MSPF_CLIENT_ID }}
           MSPF_CLIENT_SECRET: ${{ secrets.MSPF_CLIENT_SECRET }}
-          MSPF_TOKEN_URL: ${{ secrets.MSPF_TOKEN_URL }}
+          MSPF_TOKEN_URL: ${{ vars.MSPF_TOKEN_URL || secrets.MSPF_TOKEN_URL }}
+          # Secrets didahulukan; vars sebagai fallback agar deploy tetap jalan
+          # sebelum FOXLOGGER_* dipindahkan dari Variables ke Secrets.
+          FOXLOGGER_EMAIL: ${{ secrets.FOXLOGGER_EMAIL || vars.FOXLOGGER_EMAIL }}
+          FOXLOGGER_PASSWORD: ${{ secrets.FOXLOGGER_PASSWORD || vars.FOXLOGGER_PASSWORD }}
+          FOXLOGGER_TIMEZONE: ${{ vars.FOXLOGGER_TIMEZONE || 'Asia/Jakarta' }}
+          DEFAULT_USER_TIMEZONE: ${{ vars.DEFAULT_USER_TIMEZONE || 'Asia/Jakarta' }}
           CACHE_DEVICE_TTL: ${{ vars.CACHE_DEVICE_TTL }}
-          CACHE_PROVIDER: ${{ vars.CACHE_PROVIDER }}
           MCCS_CACHE_TTL: ${{ vars.MCCS_CACHE_TTL }}
           RATE_LIMIT_WINDOW_MS: ${{ vars.RATE_LIMIT_WINDOW_MS }}
           RATE_LIMIT_MAX: ${{ vars.RATE_LIMIT_MAX }}
           RATE_LIMIT_AUTH_MAX: ${{ vars.RATE_LIMIT_AUTH_MAX }}
           WEBSOCKET_PATH: ${{ vars.WEBSOCKET_PATH }}
           POLL_INTERVAL: ${{ vars.POLL_INTERVAL }}
-          REDIS_URL: ${{ secrets.REDIS_URL }}
+          REDIS_URL: ${{ secrets.REDIS_URL || vars.REDIS_URL }}
+          OFFLINE_THRESHOLD_MS: ${{ vars.OFFLINE_THRESHOLD_MS }}
+          ONLINE_THRESHOLD_MS: ${{ vars.ONLINE_THRESHOLD_MS }}
+          STATUS_COOLDOWN_MS: ${{ vars.STATUS_COOLDOWN_MS }}
+          DEVICE_STATUS_HEARTBEAT_MS: ${{ vars.DEVICE_STATUS_HEARTBEAT_MS }}
+          POSITION_EMIT_CHANGE_ONLY: ${{ vars.POSITION_EMIT_CHANGE_ONLY }}
+          TRACCAR_OFFLINE_THRESHOLD_MS: ${{ vars.TRACCAR_OFFLINE_THRESHOLD_MS }}
+          MSPF_OFFLINE_THRESHOLD_MS: ${{ vars.MSPF_OFFLINE_THRESHOLD_MS }}
+          FOXLOGGER_OFFLINE_THRESHOLD_MS: ${{ vars.FOXLOGGER_OFFLINE_THRESHOLD_MS }}
           CORS_ORIGIN: ${{ vars.CORS_ORIGIN }}
           LOG_LEVEL: ${{ vars.LOG_LEVEL }}
           REQUEST_TIMEOUT: ${{ vars.REQUEST_TIMEOUT }}
@@ -109,8 +128,9 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           port: ${{ vars.SSH_PORT || 22 }}
           username: ${{ secrets.SSH_USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
           password: ${{ secrets.SSH_PASSWORD }}
-          envs: GHCR_TOKEN,IMAGE,IMAGE_TAG,VIRTUAL_HOST,LETSENCRYPT_HOST,LETSENCRYPT_EMAIL,PROXY_NETWORK,PORT,NODE_ENV,DB_DRIVER,DB_PATH,JWT_SECRET,JWT_EXPIRY,TRACCAR_URL,TRACCAR_USERNAME,TRACCAR_PASSWORD,MSPF_URL,MSPF_CLIENT_ID,MSPF_CLIENT_SECRET,MSPF_TOKEN_URL,CACHE_DEVICE_TTL,CACHE_PROVIDER,MCCS_CACHE_TTL,RATE_LIMIT_WINDOW_MS,RATE_LIMIT_MAX,RATE_LIMIT_AUTH_MAX,WEBSOCKET_PATH,POLL_INTERVAL,REDIS_URL,CORS_ORIGIN,LOG_LEVEL,REQUEST_TIMEOUT
+          envs: GHCR_TOKEN,IMAGE,IMAGE_TAG,VIRTUAL_HOST,LETSENCRYPT_HOST,LETSENCRYPT_EMAIL,PROXY_NETWORK,PORT,NODE_ENV,DB_DRIVER,DB_PATH,DB_HOST,DB_PORT,DB_NAME,DB_USER,DB_PASS,JWT_SECRET,JWT_EXPIRY,TRACCAR_URL,TRACCAR_USERNAME,TRACCAR_PASSWORD,MSPF_URL,MSPF_CLIENT_ID,MSPF_CLIENT_SECRET,MSPF_TOKEN_URL,FOXLOGGER_EMAIL,FOXLOGGER_PASSWORD,FOXLOGGER_TIMEZONE,DEFAULT_USER_TIMEZONE,CACHE_DEVICE_TTL,MCCS_CACHE_TTL,RATE_LIMIT_WINDOW_MS,RATE_LIMIT_MAX,RATE_LIMIT_AUTH_MAX,WEBSOCKET_PATH,POLL_INTERVAL,REDIS_URL,OFFLINE_THRESHOLD_MS,ONLINE_THRESHOLD_MS,STATUS_COOLDOWN_MS,DEVICE_STATUS_HEARTBEAT_MS,POSITION_EMIT_CHANGE_ONLY,TRACCAR_OFFLINE_THRESHOLD_MS,MSPF_OFFLINE_THRESHOLD_MS,FOXLOGGER_OFFLINE_THRESHOLD_MS,CORS_ORIGIN,LOG_LEVEL,REQUEST_TIMEOUT
           script: |
             set -e
             DEPLOY_PATH="${{ vars.DEPLOY_PATH }}"
@@ -121,10 +141,12 @@ jobs:
             docker pull "$IMAGE:$IMAGE_TAG"
             docker run --rm \
               -e PORT -e NODE_ENV -e DB_DRIVER -e DB_PATH -e JWT_SECRET -e JWT_EXPIRY \
+              -e DB_HOST -e DB_PORT -e DB_NAME -e DB_USER -e DB_PASS \
               -e TRACCAR_URL -e TRACCAR_USERNAME -e TRACCAR_PASSWORD \
               -e MSPF_URL -e MSPF_CLIENT_ID -e MSPF_CLIENT_SECRET -e MSPF_TOKEN_URL \
-              -e CACHE_DEVICE_TTL -e CACHE_PROVIDER -e MCCS_CACHE_TTL \
+              -e CACHE_DEVICE_TTL -e MCCS_CACHE_TTL \
               -v "$DEPLOY_PATH/data:/app/data" \
               "$IMAGE:$IMAGE_TAG" node src/scripts/migrate.js
             docker compose -p middleware-$IMAGE_TAG up -d --remove-orphans
             docker image prune -f
+            docker logout ghcr.io
