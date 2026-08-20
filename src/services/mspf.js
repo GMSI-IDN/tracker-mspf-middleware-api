@@ -137,7 +137,7 @@ let mccsCacheTtl = 10000;
 try {
   const cfg = require('../config');
   mccsCacheTtl = cfg.mspf.cacheTtl;
-} catch {}
+} catch { }
 const mccsCache = new NodeCache({
   stdTTL: Math.ceil(mccsCacheTtl / 1000),
   checkperiod: 5,
@@ -183,7 +183,7 @@ async function getBatchMccsData(deviceIds, statusMap = {}) {
       for (let j = 0; j < batch.length; j++) {
         const id = batch[j];
         const data = fetched[j].status === 'fulfilled' ? fetched[j].value : null;
-        if (data) { try { mccsCache.set(id, data); } catch {} }
+        if (data) { try { mccsCache.set(id, data); } catch { } }
         results[id] = data;
       }
     }
@@ -204,8 +204,8 @@ function normalizeMccsToAttributes(mccsRecord) {
     ver: d.ver, sno: d.sno,
     diff: d.diff, gtm: d.gtm,
     relay: d.relay, mode: d.mode,
-      createdAt: mccsRecord.createdAt ? toUtcIso(mccsRecord.createdAt) || undefined : undefined,
-      insDtm: mccsRecord.insDtm ? toUtcIso(mccsRecord.insDtm) || undefined : undefined,
+    createdAt: mccsRecord.createdAt ? toUtcIso(mccsRecord.createdAt) || undefined : undefined,
+    insDtm: mccsRecord.insDtm ? toUtcIso(mccsRecord.insDtm) || undefined : undefined,
     addr_IGN: d.addr?.IGN, addr_FIX: d.addr?.FIX,
     addr_EB: d.addr?.EB, addr_IB: d.addr?.IB,
     addr_AD: d.addr?.AD, addr_AD2: d.addr?.AD2,
@@ -240,7 +240,7 @@ async function enrichPositions(positions) {
   }
 
   let mccsMap = {};
-  try { mccsMap = await getBatchMccsData(deviceIds, statusMap); } catch {};
+  try { mccsMap = await getBatchMccsData(deviceIds, statusMap); } catch { };
 
   const latestTimes = {};
   for (const p of positions) {
@@ -323,8 +323,8 @@ function normalizeMccsForDeviceDetail(mccsRecord) {
       ver: d.ver, sno: d.sno,
       diff: d.diff, gtm: d.gtm,
       relay: d.relay, mode: d.mode,
-    createdAt: mccsRecord.createdAt ? toUtcIso(mccsRecord.createdAt) || undefined : undefined,
-    insDtm: mccsRecord.insDtm ? toUtcIso(mccsRecord.insDtm) || undefined : undefined,
+      createdAt: mccsRecord.createdAt ? toUtcIso(mccsRecord.createdAt) || undefined : undefined,
+      insDtm: mccsRecord.insDtm ? toUtcIso(mccsRecord.insDtm) || undefined : undefined,
       addr: {
         IGN: d.addr?.IGN, FIX: d.addr?.FIX,
         EB: d.addr?.EB, IB: d.addr?.IB,
@@ -469,7 +469,7 @@ async function init() {
   }
 }
 
-init().catch(() => {});
+init().catch(() => { });
 
 async function getDeviceParking(deviceId, params = {}) {
   const res = await getApi().get(`/v3/stats/devices/${deviceId}/parking`, { params });
@@ -515,7 +515,7 @@ async function getDeviceStatsReports(deviceId, params = {}) {
     pages++;
     if (pages > 50) break;
   } while (start);
-  try { statsReportsCache.set(cacheKey, results); } catch {}
+  try { statsReportsCache.set(cacheKey, results); } catch { }
   return results;
 }
 
@@ -535,7 +535,7 @@ async function getBcStatsReports(bcId, params = {}) {
     pages++;
     if (pages > 50) break;
   } while (start);
-  try { statsReportsCache.set(cacheKey, results); } catch {}
+  try { statsReportsCache.set(cacheKey, results); } catch { }
   return results;
 }
 
