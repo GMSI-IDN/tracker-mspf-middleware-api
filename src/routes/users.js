@@ -6,7 +6,7 @@ const db = require('../db');
 const config = require('../config');
 const { isValidTimeZone } = require('../utils/timestamp');
 const { invalidateUserAuthStatus } = require('../services/userAuth');
-const { disconnectUserSockets } = require('../websocket');
+const { disconnectUserSockets, refreshUserSockets } = require('../websocket');
 const validate = require('../middleware/validate');
 
 const router = express.Router();
@@ -124,8 +124,13 @@ router.put('/:id',
       if (req.body.role !== undefined) updates.role = req.body.role;
       if (req.body.groups !== undefined) updates.groups = JSON.stringify(req.body.groups);
       if (req.body.permissions !== undefined) {
-        updates.permissions = JSON.stringify(req.body.permissions);
-        shouldRevokeTokens = true;
+        const newPermStr = JSON.stringify(req.body.permissions);
+        const oldPermStr = user.permissions || '{"canCutEngine":false}';
+        updates.permissions = newPermStr;
+        // Only revoke tokens if permissions actually changed value, not just because it was included in request payload
+        if (newPermStr !== oldPermStr) {
+          shouldRevokeTokens = true;
+        }
       }
       if (req.body.timezone !== undefined) updates.timezone = req.body.timezone;
 
@@ -138,6 +143,8 @@ router.put('/:id',
         invalidateUserAuthStatus(req.params.id);
         if (shouldRevokeTokens) {
           disconnectUserSockets(req.params.id);
+        } else if (req.body.groups !== undefined) {
+          Promise.resolve(refreshUserSockets?.(req.params.id)).catch(() => {});
         }
       }
 

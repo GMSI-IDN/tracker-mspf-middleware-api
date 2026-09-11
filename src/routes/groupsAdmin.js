@@ -104,11 +104,17 @@ router.put('/:id',
   }
 );
 
+const { invalidateGroupsCache, invalidateSyncRulesCache } = require('../services/groupMembership');
+
 router.delete('/:id', async (req, res, next) => {
   try {
     const group = await db('groups').where({ id: req.params.id }).first();
     if (!group) throw createError(404, 'Group not found', { code: 'ERR_NOT_FOUND' });
+    await db('device_groups').where({ group_id: req.params.id }).del();
+    await db('group_sync_rules').where({ middleware_group_id: req.params.id }).del();
     await db('groups').where({ id: req.params.id }).del();
+    invalidateGroupsCache();
+    invalidateSyncRulesCache();
     res.json({ message: 'Group deleted' });
   } catch (err) {
     next(err);

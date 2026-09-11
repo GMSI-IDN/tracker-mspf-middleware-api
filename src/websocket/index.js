@@ -10,6 +10,7 @@ const { statusTracker } = require('../utils/liveStatus');
 const { toUtcIso } = require('../utils/timestamp');
 const { logger } = require('../middleware/logger');
 const { getUserAuthStatus } = require('../services/userAuth');
+const { getAllowedDeviceKeys } = require('../services/groupMembership');
 const db = require('../db');
 
 let io = null;
@@ -57,8 +58,7 @@ function setupWebSocket(httpServer) {
       socket.allowedDevices = new Set();
       if (user.groups?.length > 0) {
         try {
-          const mappings = await db('device_groups').whereIn('group_id', user.groups).select('device_id', 'source');
-          for (const m of mappings) socket.allowedDevices.add(`${m.source}:${m.device_id}`);
+          socket.allowedDevices = await getAllowedDeviceKeys(user.groups);
           console.log(`[WS] ${user.username} (${user.role}) connect, groups:${JSON.stringify(user.groups)}, allowedDevices:${socket.allowedDevices.size}`);
         } catch (err) {
           logger.warn(`WS: failed to load allowed devices for ${user.username}: ${err.message}`);
@@ -383,6 +383,23 @@ function disconnectUserSockets(userId) {
   });
 }
 
+async function refreshUserSockets(userId) {
+  if (!io) return;
+  const numId = Number(userId);
+  const { getUserAuthStatus } = require('../services/userAuth');
+  const authStatus = await getUserAuthStatus(numId);
+  if (!authStatus || !authStatus.isActive) return;
+
+  const newAllowed = await getAllowedDeviceKeys(authStatus.groups || []);
+  io.sockets.sockets.forEach((socket) => {
+    if (socket.user && Number(socket.user.id) === numId) {
+      socket.user.groups = authStatus.groups;
+      socket.allowedDevices = newAllowed;
+      emitStatusSnapshot(socket, socket.user);
+    }
+  });
+}
+
 module.exports = {
   setupWebSocket,
   emitPosition,
@@ -393,4 +410,5 @@ module.exports = {
   emitCommandResult,
   getIO,
   disconnectUserSockets,
+  refreshUserSockets,
 };

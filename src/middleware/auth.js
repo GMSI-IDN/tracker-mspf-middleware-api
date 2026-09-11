@@ -46,9 +46,17 @@ async function authMiddleware(req, res, next) {
           timestamp: new Date().toISOString(),
         });
       }
+
+      req.user = {
+        ...decoded,
+        role: authStatus.role || decoded.role,
+        groups: authStatus.groups ?? decoded.groups,
+        permissions: authStatus.permissions ?? decoded.permissions,
+      };
+    } else {
+      req.user = decoded;
     }
 
-    req.user = decoded;
     next();
   } catch (err) {
     return res.status(401).json({
