@@ -7,6 +7,7 @@ const deviceRouter = require('../services/deviceRouter');
 const cache = require('../services/cache');
 const db = require('../db');
 const { applyRules, enrichWithRules, getDeviceRules } = require('../services/customAttributes');
+const { sanitizePositions } = require('../utils/sanitizer');
 
 const router = express.Router();
 
@@ -83,7 +84,7 @@ router.get('/', async (req, res, next) => {
         positions = (cache.get('positions:merged') || []).filter(p => p.deviceId === idNum && p.source === 'mspf');
       }
       await applyCustomAttributes(positions, req.user);
-      return res.json(positions);
+      return res.json(sanitizePositions(positions, req.user.role === 'admin'));
     }
 
     let positions = cache.get('positions:merged') || [];
@@ -107,7 +108,7 @@ router.get('/', async (req, res, next) => {
     }
 
     await applyCustomAttributes(positions, req.user);
-    res.json(positions);
+    res.json(sanitizePositions(positions, req.user.role === 'admin'));
   } catch (err) {
     next(err);
   }
@@ -134,17 +135,18 @@ router.get('/latest', async (req, res, next) => {
 
       if (devSource === 'traccar') {
         const data = await traccar.getPositions({ deviceId: idNum });
-        return res.json((data || []).map(normalizeTraccarPosition));
+        const positions = (data || []).map(normalizeTraccarPosition);
+        return res.json(sanitizePositions(positions, req.user.role === 'admin'));
       }
       if (devSource === 'foxlogger') {
         const data = await foxlogger.getPositions({ status: undefined });
         const positions = (data || []).filter(p => p.deviceId === idNum);
         await applyCustomAttributes(positions, req.user);
-        return res.json(positions);
+        return res.json(sanitizePositions(positions, req.user.role === 'admin'));
       }
       const positions = (cache.get('positions:merged') || []).filter(p => p.deviceId === idNum && p.source === 'mspf');
       await applyCustomAttributes(positions, req.user);
-      return res.json(positions);
+      return res.json(sanitizePositions(positions, req.user.role === 'admin'));
     }
 
     let positions = cache.get('positions:merged') || [];
@@ -168,7 +170,7 @@ router.get('/latest', async (req, res, next) => {
     }
 
     await applyCustomAttributes(positions, req.user);
-    res.json(positions);
+    res.json(sanitizePositions(positions, req.user.role === 'admin'));
   } catch (err) {
     next(err);
   }
