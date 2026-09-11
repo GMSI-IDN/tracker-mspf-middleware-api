@@ -49,6 +49,34 @@ Gunakan **Context7 MCP** (`context7_resolve-library-id` + `context7_query-docs`)
    - `CHANGELOG.md` — catat perubahan fitur/perbaikan
    - `API_REFERENCE.md` — jika ada endpoint baru atau perubahan response
    - `PROGRESS.md` — update progress tracker
+9. **Aturan Migrasi Database (Append-Only Invariant):**
+   - **DILARANG MENGEDIT** file migrasi yang sudah pernah ada di folder `migrations/`. File lama adalah catatan sejarah yang sudah tercatat di tabel sistem `knex_migrations` server staging/production.
+   - Mengedit file lama **tidak akan pernah dieksekusi** di database server (karena Knex men-skip file yang namanya sudah tercatat di `knex_migrations`), namun akan merusak sinkronisasi skema (*schema drift*) pada database baru/lokal.
+   - Setiap perubahan skema (tambah tabel, tambah/ubah kolom, index) **WAJIB SELALU MEMBUAT FILE MIGRASI BARU** (format: `YYYYMMDD_deskripsi.js`).
+   - Untuk tabel yang sudah memiliki data, penambahan kolom baru **wajib** memiliki `defaultTo(...)` atau `nullable()`.
+   - Selalu sertakan fungsi `exports.down` untuk keselamatan rollback.
+
+## Invariant: Custom Groups Hybrid Sync & Strict Customer Deduplication
+
+1. **Hybrid Container Groups:**
+   - Satu custom group (`groups`) dapat berisi kendaraan dari **lebih dari 1 aturan sinkronisasi** (`group_sync_rules` dari Traccar Group maupun MSPF BC) **DAN** dapat digabung dengan **penambahan kendaraan mandiri secara manual** (`device_groups`).
+2. **Multi-Group Customer Scoping & Strict Deduplication:**
+   - Pengguna level `customer` dapat memiliki lebih dari 1 custom group (`user.groups = [1, 2]`).
+   - Jika terdapat kendaraan yang sama yang terdaftar di lebih dari 1 grup milik customer (overlap/irisan), pada daftar kendaraan `GET /api/devices`:
+     - Kendaraan tersebut **WAJIB HANYA MUNCUL 1 KALI** (ter-deduplikasi secara ketat).
+     - Atribut `customGroups` pada kendaraan tersebut memuat seluruh grup milik customer tempat kendaraan itu terdaftar (`[ { id: 1, name: "Group A" }, { id: 2, name: "Group B" } ]`).
+3. **Single Source of Truth (`devices:merged` Cache):**
+   - Query `GET /api/devices` (baik global maupun berparameter `?group=X`) **selalu membaca dari in-memory cache `devices:merged`**, TIDAK BOLEH melakukan fetch HTTP lambat/N+1 ke server upstream.
+   - Pembangunan cache wajib meng-await `mspf.waitForInit()` dan `foxlogger.waitForInit()`.
+
+## Invariant: Role-Based Upstream Vendor Sanitization (White-Label Customer View)
+
+Gateway ini berfungsi sebagai **Unified GPS Facade** atas multi-vendor upstream (`traccar`, `mspf`, `foxlogger`).
+- **Role `admin`:** Respons API dan WebSocket **tetap mempertahankan** field `source` (`'traccar'`, `'mspf'`, `'foxlogger'`) dan vendor `group` (contoh: `'traccar_5'`). Ini diperlukan oleh Admin Frontend untuk pengelompokan (grouping), diagnostik teknis, dan pemetaan sync group (`/api/admin/group-sync`).
+- **Role `customer`:** Respons API (`devices`, `positions`, `commands`, `reports`, `dashboard`) dan WebSocket broadcasts (`position`, `device-status`) **wajib disanitasi** menggunakan helper `src/utils/sanitizer.js`:
+  - Field `source` **dihilangkan 100%**.
+  - Field vendor `group` (misal: `traccar_5`) **dihilangkan** (customer hanya melihat `customGroups`).
+  - Tidak boleh membocorkan nama vendor backend kepada pengguna level customer.
 
 ---
 

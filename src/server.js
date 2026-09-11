@@ -58,7 +58,11 @@ setEmitHooks({
   onStatus: (payload) => emitStatusFor(payload),
 });
 
-buildDeviceCache().then(() => startPositionSync());
+buildDeviceCache().then(() => {
+  startPositionSync();
+  const { runAutoSync } = require('./services/autoSync');
+  Promise.resolve(runAutoSync?.()).catch(() => {});
+});
 
 server.listen(config.port, () => {
   logger.info(`API Gateway running on port ${config.port}`);

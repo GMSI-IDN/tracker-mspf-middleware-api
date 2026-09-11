@@ -15,18 +15,23 @@ if (missing.length > 0) {
   throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
 }
 
+const rawDriver = String(process.env.DB_DRIVER || 'sqlite3').toLowerCase().trim();
+const isPgDriver = rawDriver === 'pg' || rawDriver === 'postgres' || rawDriver === 'postgresql';
+
 const config = {
   port: parseInt(process.env.PORT, 10) || 3000,
   env: process.env.NODE_ENV || 'development',
-  dbDriver: process.env.DB_DRIVER || 'sqlite3',
+  dbDriver: isPgDriver ? 'pg' : 'sqlite3',
 
   db: {
     path: process.env.DB_PATH || './data/gateway.db',
+    url: process.env.DATABASE_URL || '',
     host: process.env.DB_HOST || 'localhost',
     port: parseInt(process.env.DB_PORT, 10) || 5432,
     name: process.env.DB_NAME || 'gateway',
     user: process.env.DB_USER || '',
     pass: process.env.DB_PASS || '',
+    ssl: process.env.DB_SSL === 'true',
   },
 
   jwt: {

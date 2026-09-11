@@ -156,6 +156,9 @@
 | **Urutan playback konsisten ASC** — sort by `deviceTime` naik di gateway (safety net; MSPF sudah ASC via `reverse()`) | ✅ |
 | **Timezone per user** — kolom `users.timezone`, `timezone` **required** saat add user & optional saat edit (validasi IANA), fallback `DEFAULT_USER_TIMEZONE` (.env), login/`/me` + GET users mengembalikan `timezone`, default range report memakai zona user — **159 test pass** | ✅ |
 | **Device metadata 2 owner** — tabel `device_metadata` direcreate + kolom `owner` (`admin`/`customer`) + `updated_by` (audit user id); response `GET devices`/detail jadi `metadata` flat gabungan + `metadataOwners` map per-key; rule: metadata admin **tidak bisa di-update/hapus customer** (403), customer hanya bisa tulis/hapus `owner=customer`, admin bisa edit kedua owner; data lama → `owner=admin`; helper murni `mergeMetadataBlobs` (admin menang saat key bentrok) | ✅ |
+| **User profile self-update (`PUT /api/auth/me`) + email & nama + dual login** — migrasi kolom `email`/`first_name`/`last_name`, login mengenali username/email, self-update profil user aman tanpa ubah role/groups, validasi confirmPassword di create & update, total **178 test pass** | ✅ |
+| **User enable/disable (`isActive`) & instant session revocation (`token_version`)** — skema `is_active` & `token_version`, pemblokiran login `403 ERR_ACCOUNT_DISABLED`, pencabutan instan token aktif `401 ERR_TOKEN_REVOKED`, pemutusan paksa socket WebSocket user nonaktif, total **180 test pass** | ✅ |
+| **Top 10 Device Distance 24h (`GET /api/reports/top-distance`)** — leaderboard jarak tempuh 24 jam dengan master cache 30m TTL, RBAC customer filtering via `device_groups`, alias `/top-mileage`, total **187 test pass** | ✅ |
 
 ## Catatan Waktu FoxLogger (jangan diulang)
 
@@ -205,3 +208,137 @@
 | **Events `type` (request FE)** — `/api/reports/events` **tidak punya field `type`**; data mentah ada (`e.type` Traccar, `e.monitorName` MSPF) tapi dibuang saat mapping. Rencana: tambah `type` di SEMUA response (single & multi-device) — Traccar raw type, MSPF `monitorName`; `name` tetap label enrich (null multi-device); envelope seragam (`geofenceId`/`monitorId`/`openedAt`/`closedAt` = null bila tak relevan). **Backlog — bukan prioritas sekarang** | ⬜ Backlog |
 | **Filter `?type=` server-side** — simetris dengan `?status=`/`?name=` (opsional, ikut saat implementasi events) | ⬜ Backlog |
 | **FoxLogger live speed/course 0** — limitasi source (`report-position` tidak sediakan kecepatan/arah); marker statis untuk **live** — sudah dikomunikasikan ke FE. (Playback kini punya `course`+`nopol` via `report-rollback`.) | ✅/partial |
+
+## Phase 12 — Live Group Session Continuity & Non-Disruptive Assignment: ✅
+
+| Task | Status |
+|------|--------|
+| **Eliminasi Force Logout Saat Edit Group** — Penambahan/pengurangan custom group pada user tidak lagi memicu token revocation (`token_version` stabil) | ✅ |
+| **Live Group Resolution di Auth Middleware** — `authMiddleware` meng-overlay `authStatus.groups` dan `authStatus.permissions` terkini ke `req.user` secara live | ✅ |
+| **Real-Time WebSocket Group Reload** — `refreshUserSockets(userId)` memperbarui `socket.allowedDevices` dan `socket.user.groups` tanpa memutus koneksi socket | ✅ |
+| **Integration Tests** — 2 test di `src/__tests__/liveUserGroups.test.js` memverifikasi sesi tetap aktif saat grup diubah (total 244 test pass) | ✅ |
+
+## Phase 11 — Dynamic Linked Sync Groups vs Manual Devices & Privilege Hardening: ✅
+
+| Task | Status |
+|------|--------|
+| **Group Membership Service (`src/services/groupMembership.js`)** — Pemisahan ketat Add Mandiri (`device_groups`) dan Dynamic Linked Sync (`group_sync_rules`) | ✅ |
+| **No Unintended Deletions** — Perangkat sync tidak lagi di-dump ke `device_groups`; di UI Admin hanya perangkat manual yang memiliki tombol delete | ✅ |
+| **Instant Dynamic Unlink** — Menghapus aturan sync di `DELETE /api/admin/group-sync/:id` seketika mencabut seluruh perangkat terkait tanpa residu | ✅ |
+| **Privilege Security Hardening** — Pengetatan akses ketat di seluruh endpoint (`devices`, `positions`, `commands`, `reports`, `dashboard`, `websocket`) | ✅ |
+| **Accurate Custom Group Device Count** — `GET /api/groups` menghitung total kendaraan aktual secara real-time | ✅ |
+| **Integration Tests** — 4 test di `src/__tests__/groupMembershipPrivilege.test.js` memverifikasi pencegahan kebocoran hak akses (total 242 test pass) | ✅ |
+
+## Phase 10 — Custom Groups Hybrid Sync, Deduplication & Performance Consolidation: ✅
+
+| Task | Status |
+|------|--------|
+| **Device Sync Listing Fix** — Memperbaiki cache builder di `src/routes/devices.js` dengan `waitForInit()` agar seluruh device MSPF/FoxLogger termuat lengkap | ✅ |
+| **Eliminasi N+1 Query & Fast Group Filter** — Menghapus percabangan HTTP loop lambat di `GET /api/devices?group=X`, seluruh query ditarik langsung dari `devices:merged` (<2ms) | ✅ |
+| **Strict Customer Deduplication** — Menjamin kendaraan yang beririsan di beberapa custom group hanya muncul tepat 1 kali di list customer | ✅ |
+| **Custom Groups Array Enrichment** — Memastikan seluruh grup milik customer yang menampung kendaraan tersebut tertempel di field `customGroups` | ✅ |
+| **Auto-Sync Service Fixes** — `fetchMspfDevices` meng-await `waitForInit()`; `fetchTraccarDevices` memfilter `d.groupId === groupId`; trigger instan saat rule dibuat | ✅ |
+| **Integration Tests** — 4 test di `src/__tests__/customGroupSync.test.js` memverifikasi multi-sync, add mandiri, deduplikasi, dan trigger sync instan (total 238 test pass) | ✅ |
+| **Dokumentasi Invariant** — Dicatat di `AGENTS.md`, `CHANGELOG.md`, `API_REFERENCE.md`, `USER_GUIDE.md`, dan `PROGRESS.md` | ✅ |
+
+## Phase 9 — Unified Command Mapping & MSPF engineResume Bug Fix: ✅
+
+| Task | Status |
+|------|--------|
+| **Bug Fix MSPF engineResume** — Memperbaiki evaluasi ternary salah yang memicu pemanggilan `INACTIVE` pada MSPF saat FE mengirim `engineResume` | ✅ |
+| **Bidirectional Unified Mapping** — `engineResume`/`activate` selalu dipetakan ke `ACTIVE` (MSPF) dan `engineResume` (Traccar); `engineStop`/`deactivate` dipetakan ke `INACTIVE` (MSPF) dan `engineStop` (Traccar) | ✅ |
+| **Safety Guard MSPF Commands** — Perintah tak dikenal ke MSPF ditolak dengan `400 ERR_NOT_SUPPORTED` untuk mencegah deactivation tak sengaja | ✅ |
+| **Unified Command Types** — `GET /api/commands/types/:deviceId` untuk MSPF kini mengembalikan `['engineResume', 'engineStop', 'activate', 'deactivate']` | ✅ |
+| **Comprehensive Tests** — 7 test baru di `src/__tests__/commands.test.js` memverifikasi terjemahan perintah lintas provider (total 234 test pass) | ✅ |
+| **Dokumentasi Lengkap** — Pembaruan spesifikasi di `CHANGELOG.md`, `API_REFERENCE.md`, `USER_GUIDE.md`, dan `PROGRESS.md` | ✅ |
+
+## Phase 8 — Dynamic Database Switching (SQLite & PostgreSQL) & Production Startup Safety: ✅
+
+| Task | Status |
+|------|--------|
+| **PostgreSQL Driver (`pg`)** — Terpasang di `dependencies` (`^8.23.0`) | ✅ |
+| **Dynamic Knexfile Config** — Switch dinamis via `DB_DRIVER=sqlite` vs `DB_DRIVER=pg` tanpa keterikatan pada nama `NODE_ENV` | ✅ |
+| **Connection Flexibility** — Mendukung `DATABASE_URL` (single string), discrete params (`DB_HOST`, `DB_PORT`, dll.), dan SSL toggle | ✅ |
+| **Production Startup Safety** — Menghapus auto-seed dari server reboot/startup (`src/db/index.js`), server murni menjalankan `migrate.latest()` | ✅ |
+| **Explicit Seed Script** — Menambahkan script `src/scripts/seed.js` dan command `npm run seed` untuk inisialisasi awal manual | ✅ |
+| **Docker Compose PostgreSQL Service** — Service `postgres:16-alpine` + volume `pg_data` siap digunakan di `docker-compose.yml` | ✅ |
+| **Test Verification** — 227 unit & integration tests lulus 100% | ✅ |
+
+## Phase 7 — Unified Telematics Immobilizer State (engineControl): ✅
+
+| Task | Status |
+|------|--------|
+| **Engine Control Utility (`src/utils/engineControl.js`)** — Rekonsiliasi state mesin: `desired`, `state`, `isApplied`, `lastAppliedAt` murni berbasis `activationStatus` (MSPF) dan `attributes.blocked` (Traccar) tanpa false-positive | ✅ |
+| **Device Endpoints Integration** — `GET /api/devices` & `GET /api/devices/:id` menyertakan `engineControl` di root device untuk Admin dan Customer | ✅ |
+| **Immediate Command Feedback** — `POST /api/commands` dan `PUT /activation` mengembalikan initial pending state `engineControl` | ✅ |
+| **WebSocket Real-Time Stream** — Event `device-status` mengalirkan update `engineControl` on-change dan heartbeat | ✅ |
+| **Comprehensive Tests** — 12 unit & integration tests di `src/__tests__/engineControl.test.js` (total 227 test pass) | ✅ |
+| **Dokumentasi Lengkap** — Spesifikasi di `CHANGELOG.md`, `API_REFERENCE.md`, `USER_GUIDE.md`, dan `PROGRESS.md` | ✅ |
+
+## Phase 6 — Role-Based Upstream Vendor Sanitization (White-Label Customer View): ✅
+
+| Task | Status |
+|------|--------|
+| **Sanitizer Utility (`src/utils/sanitizer.js`)** — Helper native untuk masking field `source` dan vendor `group` | ✅ |
+| **Devices & Detail Sanitization** — `GET /api/devices`, `GET /api/devices/:id`, `PUT/DELETE /metadata` membersihkan tag vendor untuk customer | ✅ |
+| **Positions Sanitization** — `GET /api/positions` & `GET /api/positions/latest` membersihkan `source` pada koordinat customer | ✅ |
+| **Commands & Logs Sanitization** — `POST /api/commands`, `GET /types`, `PUT /activation`, `GET /logs` membersihkan `source` untuk customer | ✅ |
+| **Reports & Dashboard Sanitization** — Route playback, parking, idle, trips, summary, top-distance, events, and dashboard membersihkan `source` untuk customer | ✅ |
+| **WebSocket Stream Sanitization** — Event `position` & `device-status` otomatis membuang `source` saat dipancarkan ke socket non-admin | ✅ |
+| **Admin Zero-Breaking Guarantee** — Admin 100% mempertahankan seluruh tag vendor (`source`, `group`) untuk grouping di UI Admin dan diagnostik | ✅ |
+| **Comprehensive Tests** — 10 test baru di `src/__tests__/roleSanitization.test.js` memverifikasi isolasi sanitasi role (total 215 test pass) | ✅ |
+| **Dokumentasi Invariant** — Dicatat di `AGENTS.md`, `API_REFERENCE.md`, `USER_GUIDE.md`, dan `CHANGELOG.md` | ✅ |
+
+## Phase 5 — User Capabilities, Safety Interlock & Command Audit Trail: ✅
+
+| Task | Status |
+|------|--------|
+| **DB Migration User Permissions** — Kolom `permissions` JSON di tabel `users` (default `{"canCutEngine":false}`) | ✅ |
+| **DB Migration Command Logs** — Tabel `command_logs` untuk audit trail persisten (user, device, command, reason, confirmed, status, ip) | ✅ |
+| **User & Auth Capabilities Integration** — `formatUser`, JWT payload, `GET /api/auth/me`, `POST /api/users`, `PUT /api/users/:id` mendukung `permissions`; bump `token_version` instan saat permission diubah | ✅ |
+| **Device Access Boundary** — Validasi kepemilikan perangkat di `device_groups` bagi non-admin pada semua endpoint command | ✅ |
+| **Engine Cut Capability Guard** — Perintah `engineStop`, `deactivate`, `INACTIVE` hanya diizinkan untuk admin atau customer dengan `canCutEngine: true` | ✅ |
+| **Two-Step Safety Notice & Confirmation** — Perintah mematikan mesin mewajibkan `confirm: true` atau merespons `422 WARN_CONFIRMATION_REQUIRED` dengan pesan keselamatan telematika | ✅ |
+| **Dynamic Command Types Filtering** — Endpoint `GET /api/commands/types/:deviceId` otomatis menyembunyikan opsi `engineStop` dari UI jika user tidak berizin | ✅ |
+| **Command Debounce & Anti-Spam** — In-memory lock 5 detik per perangkat mencegah double-click/spam command | ✅ |
+| **FoxLogger Device Protection** — Penolakan eksplisit dengan `400 ERR_NOT_SUPPORTED` untuk perangkat FoxLogger | ✅ |
+| **Audit Trail Endpoint** — `GET /api/commands/logs` dengan filter `deviceId`, `source`, `status`, pagination, dan user-scoped isolation | ✅ |
+| **Comprehensive Test Suite** — 18 unit & integration tests baru di `src/__tests__/commands.test.js` (total 205 test pass) | ✅ |
+| **Dokumentasi Lengkap** — Pembaruan spesifikasi di `CHANGELOG.md`, `API_REFERENCE.md`, `USER_GUIDE.md`, dan `PROGRESS.md` | ✅ |
+
+## Phase 4 — Code Simplification & Over-Engineering Clean-Up (Ponytail Audit)
+
+> Fokus: Menghapus dead code, dependensi mubazir, duplikasi logika, dan inefisiensi N+1 tanpa mengubah perilaku/kontrak API.
+
+### 1. Dependensi Tidak Terpakai (Dead Dependencies)
+- [ ] **Hapus dependensi `socket.io-client` dari `package.json`**
+  - *Alasan:* Proyek ini adalah backend server yang memancarkan WebSocket via `socket.io` server. Dependency client tidak pernah diimpor di `src/` maupun unit/integration test.
+- [ ] **Hapus dependensi `compression` dari `package.json`**
+  - *Alasan:* Dependency HTTP compression terpasang di dependencies tetapi tidak pernah dimount via `app.use(compression())` di `src/app.js` atau file mana pun.
+- [ ] **Hapus dependensi `morgan` dari `package.json`**
+  - *Alasan:* Proyek sudah menggunakan custom Winston structured logger (`src/middleware/logger.js`). Morgan tidak pernah di-import ataupun dipakai.
+
+### 2. Dead Code & Speculative Functions
+- [ ] **Hapus import `lodash/set` dan `lodash/unset` di `src/services/customAttributes.js`**
+  - *Alasan:* Lodash bukan dependency langsung di `package.json` (hanya terbawa transitif), dan kedua fungsi tersebut tidak pernah dipanggil sama sekali di file tersebut.
+- [ ] **Hapus `foxlogger.getGeoFences` dan `foxlogger.getAlarmReports` di `src/services/foxlogger.js`**
+  - *Alasan:* Endpoint upstream ini tidak digunakan oleh route gateway mana pun (hanya tersisa di mock unit test).
+- [ ] **Hapus `searchDevices` di `src/services/foxlogger.js` dan `src/services/mspf.js`**
+  - *Alasan:* Pencarian device di gateway ditangani secara in-memory via cache `devices:merged` di `src/routes/devices.js`. Method pencarian remote ke upstream ini tidak pernah dipanggil.
+- [ ] **Hapus `traccar.getCommands` di `src/services/traccar.js` dan `mspf.getCommandHistory` di `src/services/mspf.js`**
+  - *Alasan:* Speculative functions. Gateway hanya mengekspos endpoint pengiriman command (`POST /api/commands`), tidak ada pembacaan command history dari upstream.
+- [ ] **Hapus parameter spekulatif `perGroup` dan `perType` di `resolveThresholds` (`src/utils/liveStatus.js`)**
+  - *Alasan:* Dibuat sebagai "future extension point", tetapi tidak ada caller yang mengirimkan opsi ini sehingga hanya menjadi branch mati.
+
+### 3. Refactoring & Eliminasi Redundansi (Shrink / Performance)
+- [x] **Eliminasi N+1 sequential loop saat query `GET /api/devices?group={id}` di `src/routes/devices.js`**
+  - *Alasan:* Saat query berparameter `group`, route melakukan loop HTTP request satu per satu (`traccar.getDevices({ id })`, `mspf.getDevice(id)`). Kini sudah membaca dan memfilter data langsung dari in-memory cache `devices:merged` yang selalu sinkron, memangkas latensi dari detik menjadi <2ms dan memastikan seluruh group ter-enrich dengan benar.
+- [ ] **Konsolidasi helper `applyCustomAttributes` & `normalizeTraccarPosition` antara `src/routes/reports.js` dan `src/routes/positions.js`**
+  - *Alasan:* Duplikasi logika identik di kedua route. Sentralisasi fungsi ke service/util bersama mencegah inkonsistensi data saat ada pembaruan aturan atribut.
+- [ ] **Satukan instance `NodeCache` di `src/services/mspf.js` ke cache singleton `src/services/cache.js`**
+  - *Alasan:* `mspf.js` membuat instance `NodeCache` baru secara terpisah (`mccsCache` dan `statsReportsCache`). Menggunakan cache singleton membuat manajemen lifecycle, TTL, dan pemantauan memori terpusat.
+- [ ] **Sederhanakan wrapper `resolveGroup` di `src/services/deviceRouter.js`**
+  - *Alasan:* `resolveGroup` hanya fungsi alias passthrough untuk `getGroupSource` tanpa penambahan logika apa pun.
+- [ ] **Hapus inline `require('../services/cache')` di `src/routes/deviceGroups.js`**
+  - *Alasan:* File tersebut sudah mengimpor `const cache = require('../services/cache')` di line 5. Pemanggilan ulang require di dalam scope fungsi bersifat redundan.
+

@@ -7,6 +7,8 @@ const deviceRouter = require('../services/deviceRouter');
 const cache = require('../services/cache');
 const db = require('../db');
 const { applyRules, enrichWithRules, getDeviceRules } = require('../services/customAttributes');
+const { sanitizePositions } = require('../utils/sanitizer');
+const { isDeviceAllowedForGroups, getAllowedDeviceKeys } = require('../services/groupMembership');
 
 const router = express.Router();
 
@@ -66,8 +68,8 @@ router.get('/', async (req, res, next) => {
       if (req.user.role !== 'admin') {
         if (!req.user.groups?.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
         const lookupId = devSource === 'foxlogger' ? deviceId : idNum;
-        const dg = await db('device_groups').where({ device_id: lookupId, source: devSource }).whereIn('group_id', req.user.groups).first();
-        if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+        const allowed = await isDeviceAllowedForGroups(lookupId, devSource, req.user.groups);
+        if (!allowed) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
       }
 
       let positions;
@@ -83,31 +85,22 @@ router.get('/', async (req, res, next) => {
         positions = (cache.get('positions:merged') || []).filter(p => p.deviceId === idNum && p.source === 'mspf');
       }
       await applyCustomAttributes(positions, req.user);
-      return res.json(positions);
+      return res.json(sanitizePositions(positions, req.user.role === 'admin'));
     }
 
     let positions = cache.get('positions:merged') || [];
     const userGroups = req.user.groups || [];
     if (req.user.role !== 'admin') {
-      if (userGroups.length === 0) { positions = []; }
-      else {
-      const mappings = await db('device_groups').whereIn('group_id', userGroups).select('device_id', 'source');
-      const allowedStr = new Set(mappings.filter(m => m.source !== 'foxlogger').map(m => `${m.source}:${m.device_id}`));
-      const foxAllowedStr = new Set(mappings.filter(m => m.source === 'foxlogger').map(m => `${m.device_id}`));
-      positions = positions.filter(p => {
-        if (allowedStr.has(`${p.source}:${p.deviceId}`)) return true;
-        if (p.source === 'foxlogger' && foxAllowedStr.has(String(p.deviceId))) return true;
-        if (p.source === 'foxlogger' && foxlogger.resolveImei) {
-          const imei = foxlogger.resolveImei(p.deviceId);
-          if (imei && foxAllowedStr.has(imei)) return true;
-        }
-        return false;
-      });
+      if (userGroups.length === 0) {
+        positions = [];
+      } else {
+        const allowedKeys = await getAllowedDeviceKeys(userGroups);
+        positions = positions.filter(p => allowedKeys.has(`${p.source}:${p.deviceId}`));
       }
     }
 
     await applyCustomAttributes(positions, req.user);
-    res.json(positions);
+    res.json(sanitizePositions(positions, req.user.role === 'admin'));
   } catch (err) {
     next(err);
   }
@@ -128,47 +121,39 @@ router.get('/latest', async (req, res, next) => {
       if (req.user.role !== 'admin') {
         if (!req.user.groups?.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
         const lookupId = devSource === 'foxlogger' ? deviceId : idNum;
-        const dg = await db('device_groups').where({ device_id: lookupId, source: devSource }).whereIn('group_id', req.user.groups).first();
-        if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+        const allowed = await isDeviceAllowedForGroups(lookupId, devSource, req.user.groups);
+        if (!allowed) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
       }
 
       if (devSource === 'traccar') {
         const data = await traccar.getPositions({ deviceId: idNum });
-        return res.json((data || []).map(normalizeTraccarPosition));
+        const positions = (data || []).map(normalizeTraccarPosition);
+        return res.json(sanitizePositions(positions, req.user.role === 'admin'));
       }
       if (devSource === 'foxlogger') {
         const data = await foxlogger.getPositions({ status: undefined });
         const positions = (data || []).filter(p => p.deviceId === idNum);
         await applyCustomAttributes(positions, req.user);
-        return res.json(positions);
+        return res.json(sanitizePositions(positions, req.user.role === 'admin'));
       }
       const positions = (cache.get('positions:merged') || []).filter(p => p.deviceId === idNum && p.source === 'mspf');
       await applyCustomAttributes(positions, req.user);
-      return res.json(positions);
+      return res.json(sanitizePositions(positions, req.user.role === 'admin'));
     }
 
     let positions = cache.get('positions:merged') || [];
     const userGroups = req.user.groups || [];
     if (req.user.role !== 'admin') {
-      if (userGroups.length === 0) { positions = []; }
-      else {
-      const mappings = await db('device_groups').whereIn('group_id', userGroups).select('device_id', 'source');
-      const allowedStr = new Set(mappings.filter(m => m.source !== 'foxlogger').map(m => `${m.source}:${m.device_id}`));
-      const foxAllowedStr = new Set(mappings.filter(m => m.source === 'foxlogger').map(m => `${m.device_id}`));
-      positions = positions.filter(p => {
-        if (allowedStr.has(`${p.source}:${p.deviceId}`)) return true;
-        if (p.source === 'foxlogger' && foxAllowedStr.has(String(p.deviceId))) return true;
-        if (p.source === 'foxlogger' && foxlogger.resolveImei) {
-          const imei = foxlogger.resolveImei(p.deviceId);
-          if (imei && foxAllowedStr.has(imei)) return true;
-        }
-        return false;
-      });
+      if (userGroups.length === 0) {
+        positions = [];
+      } else {
+        const allowedKeys = await getAllowedDeviceKeys(userGroups);
+        positions = positions.filter(p => allowedKeys.has(`${p.source}:${p.deviceId}`));
       }
     }
 
     await applyCustomAttributes(positions, req.user);
-    res.json(positions);
+    res.json(sanitizePositions(positions, req.user.role === 'admin'));
   } catch (err) {
     next(err);
   }

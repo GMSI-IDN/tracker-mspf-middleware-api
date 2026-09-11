@@ -10,6 +10,8 @@ const config = require('../config');
 const { toUtcIso, toUtcDateStr, startOfDayIso } = require('../utils/timestamp');
 const { buildSeries } = require('../utils/periodStats');
 const { applyRules, enrichWithRules, getDeviceRules } = require('../services/customAttributes');
+const { sanitizePositions, sanitizeReportItems } = require('../utils/sanitizer');
+const { isDeviceAllowedForGroups, getAllowedDeviceKeys } = require('../services/groupMembership');
 
 const router = express.Router();
 
@@ -88,8 +90,8 @@ router.get('/route', async (req, res, next) => {
     if (req.user.role !== 'admin') {
       if (!req.user.groups?.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
       const deviceLookupId = devSource === 'foxlogger' ? deviceId : idNum;
-      const dg = await db('device_groups').where({ device_id: deviceLookupId, source: devSource }).whereIn('group_id', req.user.groups).first();
-      if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+      const allowed = await isDeviceAllowedForGroups(deviceLookupId, devSource, req.user.groups);
+      if (!allowed) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
     }
 
     if (devSource === 'mspf' && effectiveFrom && effectiveTo) {
@@ -115,7 +117,7 @@ router.get('/route', async (req, res, next) => {
     positions = (positions || []).sort((a, b) => (new Date(a.deviceTime).getTime() || 0) - (new Date(b.deviceTime).getTime() || 0));
 
     await applyCustomAttributes(positions, req.user);
-    res.json(positions);
+    res.json(sanitizePositions(positions, req.user.role === 'admin'));
   } catch (err) {
     next(err);
   }
@@ -177,8 +179,8 @@ router.get('/parking', async (req, res, next) => {
 
     if (req.user.role !== 'admin') {
       if (!req.user.groups?.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
-      const dg = await db('device_groups').where({ device_id: idNum, source: devSource }).whereIn('group_id', req.user.groups).first();
-      if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+      const allowed = await isDeviceAllowedForGroups(idNum, devSource, req.user.groups);
+      if (!allowed) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
     }
 
     let parking;
@@ -206,10 +208,11 @@ router.get('/parking', async (req, res, next) => {
     parking.sort((a, b) => new Date(b.startTime) - new Date(a.startTime));
 
     const totalDuration = parking.reduce((sum, p) => sum + (p.duration || 0), 0);
+    const isAdmin = req.user.role === 'admin';
 
     res.json({
       deviceId: idNum,
-      source: devSource,
+      ...(isAdmin ? { source: devSource } : {}),
       period: { from, to: to || new Date().toISOString() },
       parking,
       summary: {
@@ -289,8 +292,8 @@ router.get('/idle', async (req, res, next) => {
 
     if (req.user.role !== 'admin') {
       if (!req.user.groups?.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
-      const dg = await db('device_groups').where({ device_id: idNum, source: devSource }).whereIn('group_id', req.user.groups).first();
-      if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+      const allowed = await isDeviceAllowedForGroups(idNum, devSource, req.user.groups);
+      if (!allowed) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
     }
 
     let idle;
@@ -307,10 +310,11 @@ router.get('/idle', async (req, res, next) => {
     idle.sort((a, b) => new Date(b.startTime) - new Date(a.startTime));
 
     const totalDuration = idle.reduce((sum, p) => sum + (p.duration || 0), 0);
+    const isAdmin = req.user.role === 'admin';
 
     res.json({
       deviceId: idNum,
-      source: devSource,
+      ...(isAdmin ? { source: devSource } : {}),
       period: { from, to: to || new Date().toISOString() },
       idle,
       summary: { total: idle.length, totalDuration },
@@ -398,8 +402,8 @@ router.get('/trips', async (req, res, next) => {
 
     if (req.user.role !== 'admin') {
       if (!req.user.groups?.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
-      const dg = await db('device_groups').where({ device_id: idNum, source: devSource }).whereIn('group_id', req.user.groups).first();
-      if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+      const allowed = await isDeviceAllowedForGroups(idNum, devSource, req.user.groups);
+      if (!allowed) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
     }
 
     let trips;
@@ -433,10 +437,11 @@ router.get('/trips', async (req, res, next) => {
 
     const totalDuration = trips.reduce((s, t) => s + (t.duration || 0), 0);
     const totalDistance = trips.reduce((s, t) => s + (t.distance || 0), 0);
+    const isAdmin = req.user.role === 'admin';
 
     res.json({
       deviceId: idNum,
-      source: devSource,
+      ...(isAdmin ? { source: devSource } : {}),
       period: { from, to: to || new Date().toISOString() },
       trips,
       summary: { total: trips.length, totalDuration, totalDistance: parseFloat(totalDistance.toFixed(2)) },
@@ -467,10 +472,15 @@ function enrichMspfSummary(summary, routePositions) {
   return summary;
 }
 
-function summaryResponse(summaries) {
+function summaryResponse(summaries, isAdmin = true) {
   const totalDistance = summaries.reduce((s, r) => s + (r.distance || 0), 0);
   const totalDuration = summaries.reduce((s, r) => s + (r.duration || 0), 0);
-  return { summaries, total: { devices: summaries.length, distance: parseFloat(totalDistance.toFixed(2)), duration: totalDuration } };
+  const outputSummaries = isAdmin ? summaries : summaries.map(s => {
+    const copy = { ...s };
+    delete copy.source;
+    return copy;
+  });
+  return { summaries: outputSummaries, total: { devices: summaries.length, distance: parseFloat(totalDistance.toFixed(2)), duration: totalDuration } };
 }
 
 function mspfStatsRowToItem(r) {
@@ -606,7 +616,11 @@ router.get('/summary', async (req, res, next) => {
         const groupInfo = await db('groups').where({ id: groupId }).first();
         if (!groupInfo) throw createError(404, 'Group not found', { code: 'ERR_NOT_FOUND' });
         if (!isAdmin && !userGroups.includes(groupId)) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
-        const dgs = await db('device_groups').where({ group_id: groupId }).select('device_id', 'source');
+        const allowedKeys = await getAllowedDeviceKeys([groupId]);
+        const dgs = Array.from(allowedKeys).map(k => {
+          const [s, id] = k.split(':');
+          return { device_id: parseInt(id, 10), source: s };
+        });
         const items = await collectGroupSummaryItems(dgs, fromIso, toIso);
         const seriesData = buildSeries(items, fromIso, toIso, granularity);
         return res.json({
@@ -631,8 +645,8 @@ router.get('/summary', async (req, res, next) => {
       if (!isAdmin) {
         if (!userGroups.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
         const lookupId = devSource === 'foxlogger' ? idStr : idNum;
-        const dg = await db('device_groups').where({ device_id: lookupId, source: devSource }).whereIn('group_id', userGroups).first();
-        if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+        const allowed = await isDeviceAllowedForGroups(lookupId, devSource, userGroups);
+        if (!allowed) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
       }
 
       let items;
@@ -666,8 +680,11 @@ router.get('/summary', async (req, res, next) => {
       let deviceIds = [];
       if (!isAdmin) {
         if (userGroups.length > 0) {
-          const dgs = await db('device_groups').whereIn('group_id', userGroups).select('device_id', 'source');
-          deviceIds = dgs.map(d => ({ id: d.device_id, source: d.source }));
+          const allowedKeys = await getAllowedDeviceKeys(userGroups);
+          deviceIds = Array.from(allowedKeys).map(k => {
+            const [s, id] = k.split(':');
+            return { id: parseInt(id, 10), source: s };
+          });
         }
       }
 
@@ -691,7 +708,7 @@ router.get('/summary', async (req, res, next) => {
         }
       }
 
-      return res.json({ period: { from: from || undefined, to: to || new Date().toISOString() }, ...summaryResponse(summaries) });
+      return res.json({ period: { from: from || undefined, to: to || new Date().toISOString() }, ...summaryResponse(summaries, isAdmin) });
     }
 
     const idNum = parseInt(deviceId, 10);
@@ -719,8 +736,8 @@ router.get('/summary', async (req, res, next) => {
 
     if (req.user.role !== 'admin') {
       if (!req.user.groups?.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
-      const dg = await db('device_groups').where({ device_id: idNum, source: devSource }).whereIn('group_id', req.user.groups).first();
-      if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+      const allowed = await isDeviceAllowedForGroups(idNum, devSource, req.user.groups);
+      if (!allowed) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
     }
 
     if (devSource === 'traccar') {
@@ -728,9 +745,9 @@ router.get('/summary', async (req, res, next) => {
       const s = (data || [])[0] || {};
       return res.json({
         deviceId: idNum,
-        source: 'traccar',
+        ...(isAdmin ? { source: 'traccar' } : {}),
         period: { from, to: to || new Date().toISOString() },
-        ...summaryResponse([{ deviceId: idNum, deviceName: s.deviceName || '', source: 'traccar', distance: s.distance || 0, maxSpeed: s.maxSpeed || null, averageSpeed: s.averageSpeed || null, duration: s.duration || 0, engineHours: s.engineHours || null, spentFuel: s.spentFuel || null }]),
+        ...summaryResponse([{ deviceId: idNum, deviceName: s.deviceName || '', source: 'traccar', distance: s.distance || 0, maxSpeed: s.maxSpeed || null, averageSpeed: s.averageSpeed || null, duration: s.duration || 0, engineHours: s.engineHours || null, spentFuel: s.spentFuel || null }], isAdmin),
       });
     }
 
@@ -740,9 +757,9 @@ router.get('/summary', async (req, res, next) => {
       const raw = (data?.data || [])[0] || {};
       return res.json({
         deviceId: foxImei,
-        source: 'foxlogger',
+        ...(isAdmin ? { source: 'foxlogger' } : {}),
         period: { from, to: to || new Date().toISOString() },
-        ...summaryResponse([{ deviceId: foxImei, deviceName: raw.gps_name || '', source: 'foxlogger', distance: parseFloat(raw.distance || 0), maxSpeed: parseFloat(raw.speed_max || 0), averageSpeed: parseFloat(raw.speed_avg || 0), duration: (parseInt(raw.time_hour || 0) * 3600) + (parseInt(raw.time_minute || 0) * 60) + (parseInt(raw.time_second || 0)), engineHours: null, spentFuel: parseFloat(raw.fuel_usage || 0) }]),
+        ...summaryResponse([{ deviceId: foxImei, deviceName: raw.gps_name || '', source: 'foxlogger', distance: parseFloat(raw.distance || 0), maxSpeed: parseFloat(raw.speed_max || 0), averageSpeed: parseFloat(raw.speed_avg || 0), duration: (parseInt(raw.time_hour || 0) * 3600) + (parseInt(raw.time_minute || 0) * 60) + (parseInt(raw.time_second || 0)), engineHours: null, spentFuel: parseFloat(raw.fuel_usage || 0) }], isAdmin),
       });
     }
 
@@ -757,9 +774,215 @@ router.get('/summary', async (req, res, next) => {
 
     res.json({
       deviceId: idNum,
-      source: 'mspf',
+      ...(isAdmin ? { source: 'mspf' } : {}),
       period: { from, to: to || new Date().toISOString() },
-      ...summaryResponse([enriched]),
+      ...summaryResponse([enriched], isAdmin),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ponytail: in-memory NodeCache master distance summary. Ceiling: single-instance gateway. Upgrade path: Redis cache or worker cron.
+async function getMasterDistance24h() {
+  const cacheKey = 'reports:masterDistance:24h';
+  const cached = cache.get(cacheKey);
+  if (cached) return cached;
+
+  const now = new Date();
+  const fromDate = new Date(now.getTime() - 24 * 3600 * 1000);
+  const fromIso = fromDate.toISOString();
+  const toIso = now.toISOString();
+  const startDate = toUtcDateStr(fromIso);
+  const endDate = toUtcDateStr(toIso);
+
+  const merged = cache.get('devices:merged') || [];
+  const map = new Map();
+
+  for (const d of merged) {
+    map.set(`${d.source}:${d.id}`, {
+      deviceId: d.id,
+      name: d.name || `${d.source}:${d.id}`,
+      source: d.source,
+      distance: 0,
+      duration: 0,
+    });
+  }
+
+  const bcIds = [...new Set(merged
+    .filter(d => d.source === 'mspf' && d.group)
+    .map(d => parseInt(d.group.replace('mspf_', ''), 10))
+    .filter(Boolean)
+  )];
+
+  const foxDevices = merged.filter(d => d.source === 'foxlogger');
+
+  const [traccarResult, mspfBcResults, mspfSummaryResult, foxResults] = await Promise.allSettled([
+    traccar.getReportSummary({ from: fromIso, to: toIso }),
+    bcIds.length > 0
+      ? Promise.allSettled(bcIds.map(bc => mspf.getBcStatsReports(bc, { startDate, endDate })))
+      : Promise.resolve([]),
+    mspf.getStatsSummary ? mspf.getStatsSummary() : Promise.resolve({ data: [] }),
+    foxDevices.length > 0
+      ? Promise.allSettled(foxDevices.map(f => foxlogger.getDeviceSummary(f.id, { from: fromIso, to: toIso, user_id: foxlogger.getUserId?.() })))
+      : Promise.resolve([]),
+  ]);
+
+  if (traccarResult.status === 'fulfilled' && Array.isArray(traccarResult.value)) {
+    for (const s of traccarResult.value) {
+      const key = `traccar:${s.deviceId}`;
+      const existing = map.get(key);
+      const dist = s.distance || 0;
+      const dur = s.duration || 0;
+      if (existing) {
+        existing.distance += dist;
+        existing.duration += dur;
+        if ((!existing.name || existing.name === `traccar:${s.deviceId}`) && s.deviceName) {
+          existing.name = s.deviceName;
+        }
+      } else {
+        map.set(key, {
+          deviceId: s.deviceId,
+          name: s.deviceName || `traccar:${s.deviceId}`,
+          source: 'traccar',
+          distance: dist,
+          duration: dur,
+        });
+      }
+    }
+  }
+
+  let mspfCount = 0;
+  if (mspfBcResults.status === 'fulfilled' && Array.isArray(mspfBcResults.value)) {
+    for (const r of mspfBcResults.value) {
+      if (r.status === 'fulfilled' && Array.isArray(r.value)) {
+        for (const row of r.value) {
+          mspfCount++;
+          const key = `mspf:${row.deviceId}`;
+          const existing = map.get(key);
+          const dist = parseFloat(row.mileage || 0);
+          const dur = parseInt(row.drivingtime || 0, 10);
+          if (existing) {
+            existing.distance += dist;
+            existing.duration += dur;
+            if ((!existing.name || existing.name === `${row.deviceId}`) && row.vin) {
+              existing.name = row.vin;
+            }
+          } else {
+            map.set(key, {
+              deviceId: row.deviceId,
+              name: row.vin || `mspf:${row.deviceId}`,
+              source: 'mspf',
+              distance: dist,
+              duration: dur,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  if (mspfSummaryResult.status === 'fulfilled' && mspfSummaryResult.value?.data) {
+    for (const s of mspfSummaryResult.value.data) {
+      const key = `mspf:${s.deviceId}`;
+      const existing = map.get(key);
+      const dist = s.totalMileage || 0;
+      const dur = s.totalDrivingTime || 0;
+      if (existing) {
+        if (existing.distance === 0) {
+          existing.distance = dist;
+          existing.duration = dur;
+        }
+      } else {
+        map.set(key, {
+          deviceId: s.deviceId,
+          name: `mspf:${s.deviceId}`,
+          source: 'mspf',
+          distance: dist,
+          duration: dur,
+        });
+      }
+    }
+  }
+
+  if (foxResults.status === 'fulfilled' && Array.isArray(foxResults.value)) {
+    for (let i = 0; i < foxResults.value.length; i++) {
+      const r = foxResults.value[i];
+      if (r.status === 'fulfilled' && r.value) {
+        const foxId = foxDevices[i]?.id;
+        const key = `foxlogger:${foxId}`;
+        const existing = map.get(key);
+        const rows = Array.isArray(r.value.data) ? r.value.data : (r.value.data ? [r.value.data] : []);
+        for (const row of rows) {
+          const dist = parseFloat(row.distance || 0);
+          const dur = (parseInt(row.time_hour || 0, 10) * 3600) + (parseInt(row.time_minute || 0, 10) * 60) + parseInt(row.time_second || 0, 10);
+          if (existing) {
+            existing.distance += dist;
+            existing.duration += dur;
+            if (row.gps_name) existing.name = row.gps_name;
+          }
+        }
+      }
+    }
+  }
+
+  const list = Array.from(map.values()).map(d => ({
+    ...d,
+    distance: parseFloat((d.distance || 0).toFixed(2)),
+  }));
+
+  const result = {
+    period: { from: fromIso, to: toIso, hours: 24 },
+    devices: list,
+  };
+
+  cache.set(cacheKey, result, 1800); // 30 minutes TTL
+  return result;
+}
+
+router.get(['/top-distance', '/top-mileage'], async (req, res, next) => {
+  try {
+    const { group, refresh, limit = 10 } = req.query;
+    if (refresh === 'true') {
+      cache.del('reports:masterDistance:24h');
+    }
+
+    const master = await getMasterDistance24h();
+    const isAdmin = req.user.role === 'admin';
+    const userGroups = req.user.groups || [];
+
+    let filtered = master.devices;
+
+    if (group) {
+      const groupId = parseInt(group, 10);
+      const groupInfo = await db('groups').where({ id: groupId }).first();
+      if (!groupInfo) throw createError(404, 'Group not found', { code: 'ERR_NOT_FOUND' });
+      if (!isAdmin && !userGroups.includes(groupId)) {
+        throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+      }
+      const allowedKeys = await getAllowedDeviceKeys([groupId]);
+      filtered = filtered.filter(d => allowedKeys.has(`${d.source}:${d.deviceId}`));
+    } else if (!isAdmin) {
+      if (userGroups.length === 0) {
+        filtered = [];
+      } else {
+        const allowedKeys = await getAllowedDeviceKeys(userGroups);
+        filtered = filtered.filter(d => allowedKeys.has(`${d.source}:${d.deviceId}`));
+      }
+    }
+
+    filtered.sort((a, b) => b.distance - a.distance || a.deviceId - b.deviceId);
+    const maxLimit = Math.max(1, Math.min(parseInt(limit, 10) || 10, 100));
+    const topDevices = filtered.slice(0, maxLimit).map((d, idx) => {
+      const item = { rank: idx + 1, ...d };
+      if (!isAdmin) delete item.source;
+      return item;
+    });
+
+    res.json({
+      period: master.period,
+      totalDevicesEvaluated: filtered.length,
+      topDevices,
     });
   } catch (err) {
     next(err);
@@ -816,8 +1039,8 @@ router.get('/events', async (req, res, next) => {
 
       if (!isAdmin) {
         if (!userGroups.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
-        const dg = await db('device_groups').where({ device_id: idNum, source: devSource }).whereIn('group_id', userGroups).first();
-        if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+        const allowed = await isDeviceAllowedForGroups(idNum, devSource, userGroups);
+        if (!allowed) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
       }
 
       let events = [];
@@ -918,9 +1141,8 @@ router.get('/events', async (req, res, next) => {
     if (!isAdmin) {
       if (userGroups.length === 0) { events = []; }
       else {
-        const dgs = await db('device_groups').whereIn('group_id', userGroups).select('device_id', 'source');
-        const allowed = new Set(dgs.map(d => `${d.source}:${d.device_id}`));
-        events = events.filter(e => allowed.has(`${e.source}:${e.deviceId}`));
+        const allowedKeys = await getAllowedDeviceKeys(userGroups);
+        events = events.filter(e => allowedKeys.has(`${e.source}:${e.deviceId}`));
       }
     }
 
@@ -930,7 +1152,7 @@ router.get('/events', async (req, res, next) => {
 
     res.json({
       period: { from, to: to || new Date().toISOString() },
-      events,
+      events: isAdmin ? events : sanitizeReportItems(events, isAdmin),
       summary: { total: events.length },
     });
   } catch (err) {

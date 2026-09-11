@@ -2,6 +2,136 @@
 
 > Semua perubahan signifikan dicatat di file ini.
 
+## 2026-09-11
+
+### Live Group Session Continuity & Non-Disruptive Customer Group Assignment
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **Eliminasi Force Logout Saat Edit Group** — `src/routes/users.js`: admin menambahkan/mengubah `groups` pada akun customer tidak lagi memicu `token_version` bump ataupun pencabutan token (`shouldRevokeTokens` kini hanya aktif jika password diubah, akun dinonaktifkan, atau nilai permission berubah secara riil) | `src/routes/users.js` |
+| ~now | **Live Group Resolution di Auth Middleware** — `src/services/userAuth.js` & `src/middleware/auth.js`: `getUserAuthStatus` kini meng-cache `groups` dan `permissions` terkini dari database, dan `authMiddleware` langsung meng-overlay data live tersebut ke `req.user`. Customer langsung mendapatkan hak akses ke custom group baru pada sesi token yang sedang berjalan tanpa perlu login ulang | `src/services/userAuth.js`, `src/middleware/auth.js` |
+| ~now | **Live WebSocket Group Refresh** — `src/websocket/index.js`: menambahkan helper `refreshUserSockets(userId)` yang memperbarui `socket.user.groups` dan `socket.allowedDevices` secara real-time saat grup diubah oleh admin tanpa memutus koneksi socket pengguna | `src/websocket/index.js` |
+| ~now | **Test Suite** — 2 unit & integration tests baru di `src/__tests__/liveUserGroups.test.js` memverifikasi bahwa penambahan grup oleh admin tidak me-logout user dan langsung memberikan akses kendaraan grup baru pada token yang sama (total 244 test pass) | `src/__tests__/liveUserGroups.test.js` |
+
+### Segregation of Dynamic Linked Sync Groups vs Manual Devices & Privilege Hardening
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **Group Membership Service** — `src/services/groupMembership.js`: layanan sentral untuk resolusi keanggotaan grup secara dinamis (`enrichAndFilterDevices`, `isDeviceAllowedForGroups`, `getAllowedDeviceKeys`, `getActiveSyncRules`). Memisahkan secara ketat antara **Add Mandiri** (`device_groups`) dan **Dynamic Linked Sync Groups** (`group_sync_rules`) | `src/services/groupMembership.js` |
+| ~now | **Strict Segregation & No Unintended Deletions** — Perangkat hasil sinkronisasi tidak lagi di-dump ke tabel `device_groups` sebagai entri statis. Di Admin UI, hanya perangkat add mandiri yang memiliki tombol hapus/unassign. Perangkat sync tunduk pada aturan link grup upstream | `src/services/autoSync.js`, `src/routes/deviceGroups.js` |
+| ~now | **Instant Dynamic Unlink** — Menghapus aturan sinkronisasi di `DELETE /api/admin/group-sync/:id` seketika mencabut visibilitas dan hak akses seluruh perangkat upstream terkait tanpa meninggalkan data sampah di database | `src/routes/groupSync.js`, `src/services/groupMembership.js` |
+| ~now | **Security Privilege Hardening** — Pengetatan pemeriksaan hak akses di seluruh route (`devices`, `positions`, `commands`, `reports`, `dashboard`, `websocket`). Pengguna level customer tidak dapat mengakses data koordinat, perintah remote, metadata, atau laporan perangkat di luar grup miliknya | `src/routes/*`, `src/websocket/index.js` |
+| ~now | **Database Cleanup Migration** — Migrasi `20260911_clean_historical_synced_device_groups.js` membersihkan sisa baris historis yang pernah di-insert ke `device_groups` oleh auto-sync lama | `migrations/20260911_clean_historical_synced_device_groups.js` |
+| ~now | **Accurate Custom Group Device Count** — `GET /api/groups` kini menghitung total kendaraan aktual secara real-time (`keys.size`) menggantikan nilai hardcoded `0` | `src/routes/groups.js` |
+| ~now | **Test Suite** — 4 unit & integration tests baru di `src/__tests__/groupMembershipPrivilege.test.js` memverifikasi pencegahan kebocoran hak akses, isolasi perangkat antar-customer, pemutusan instan saat rule dihapus, dan pemisahan tabel (total 242 test pass) | `src/__tests__/groupMembershipPrivilege.test.js` |
+
+## 2026-09-10
+
+### Custom Groups Hybrid Sync, Deduplication & Performance Consolidation
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **Bug Fix Device Sync Listing** — `src/routes/devices.js`: memperbaiki kegagalan inisialisasi MSPF/FoxLogger pada pembuatan cache dengan menambahkan `waitForInit()`, memastikan seluruh kendaraan hasil sinkronisasi selalu termuat lengkap ke cache sentral | `src/routes/devices.js` |
+| ~now | **Eliminasi N+1 Query & Fast Group Filter** — Menghapus percabangan HTTP loop lambat di `GET /api/devices?group=X`. Seluruh query filter grup kini ditarik langsung dari in-memory cache `devices:merged` (<2ms) dengan konsistensi penempelan `customGroups`, `metadata`, `liveStatus`, dan `engineControl` | `src/routes/devices.js` |
+| ~now | **Strict Customer Deduplication** — Jika customer memiliki beberapa custom group yang memuat kendaraan yang sama (overlap via multi-sync atau add mandiri), kendaraan dijamin **hanya muncul 1 kali** di list dengan field `customGroups` yang memuat seluruh grup miliknya | `src/routes/devices.js` |
+| ~now | **Auto-Sync Service Fixes** — `src/services/autoSync.js`: `fetchMspfDevices` meng-await `mspf.waitForInit()`; `fetchTraccarDevices` memfilter secara akurat `d.groupId === groupId`; eksekusi instan ditrigger saat rule dibuat di `POST /api/admin/group-sync` | `src/services/autoSync.js`, `src/routes/groupSync.js`, `src/server.js` |
+| ~now | **Test Suite** — 4 unit & integration tests baru di `src/__tests__/customGroupSync.test.js` memverifikasi multi-sync, add mandiri, deduplikasi kendaraan, dan trigger sinkronisasi instan (total 238 test pass) | `src/__tests__/customGroupSync.test.js` |
+
+### Unified Command Mapping & MSPF engineResume Bug Fix
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **Bug Fix MSPF engineResume** — `src/routes/commands.js`: memperbaiki bug di mana perintah `type: "engineResume"` dievaluasi salah oleh ternary `type === 'activate' ? 'ACTIVE' : 'INACTIVE'` sehingga tidak sengaja mengirim `INACTIVE` ke MSPF. Kini menggunakan set `ENGINE_RESUME_TYPES` (`engineResume`, `activate`, `ACTIVE`) yang dijamin memanggil `mspf.activateDevice(id, 'ACTIVE')` | `src/routes/commands.js` |
+| ~now | **Bidirectional Command Translation** — Gateway otomatis menerjemahkan perintah secara dua arah: FE dapat mengirim perintah standar telematika (`engineResume` / `engineStop`) ke seluruh kendaraan lintas provider tanpa perlu membedakan vendor | `src/routes/commands.js` |
+| ~now | **Safety Guard for Unsupported Commands** — Menolak perintah selain aktivasi/deaktivasi pada perangkat MSPF dengan `400 ERR_NOT_SUPPORTED` untuk mencegah deactivation yang tidak diinginkan | `src/routes/commands.js` |
+| ~now | **Unified `GET /types/:deviceId`** — Perangkat MSPF kini mengembalikan `['engineResume', 'engineStop', 'activate', 'deactivate']` sehingga tim FE memiliki konsistensi nama perintah yang sama untuk semua armada | `src/routes/commands.js` |
+| ~now | **Test Suite** — 7 unit & integration tests baru di `src/__tests__/commands.test.js` memverifikasi terjemahan `engineResume` $\rightarrow$ `'ACTIVE'` di MSPF, `engineStop` $\rightarrow$ `'INACTIVE'` di MSPF, legacy fallback, dan error handling (total 234 test pass) | `src/__tests__/commands.test.js` |
+
+### Dynamic Database Switching (SQLite & PostgreSQL) & Production Startup Safety
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **PostgreSQL Driver** — Menambahkan dependensi `pg` (^8.23.0) di `package.json` untuk dukungan native PostgreSQL | `package.json` |
+| ~now | **Dynamic Knexfile Config** — `knexfile.js`: mendukung switch dinamis berbasis `DB_DRIVER` (`sqlite`/`sqlite3` vs `pg`/`postgres`/`postgresql`), mendukung format `DATABASE_URL` (single string), discrete credentials (`DB_HOST`, `DB_PORT`, dll.), dan SSL flag (`DB_SSL`) | `knexfile.js`, `src/config/index.js` |
+| ~now | **Production Startup Safety (No Auto-Seed on Reboot)** — `src/db/index.js`: menghapus eksekusi otomatis `seed.run()` saat startup server normal/rebuild. Server startup murni menjalankan `migrate.latest()`. Seed kini dipisah menjadi script manual mandiri `npm run seed` (`src/scripts/seed.js`) | `src/db/index.js`, `src/scripts/seed.js`, `package.json` |
+| ~now | **Docker Compose Postgres Service** — Menambahkan service `postgres:16-alpine` dan volume `pg_data` di `docker-compose.yml` serta panduan di `.env.example` | `docker-compose.yml`, `.env.example` |
+| ~now | **Test Suite** — Seluruh 227 test tetap lulus 100% (12/12 suite passed) | `src/__tests__/*` |
+
+### Unified Telematics Immobilizer State (`engineControl`)
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **Engine Control Utility** — `src/utils/engineControl.js`: komputasi status terpadu `engineControl` (`desired`, `state`, `isApplied`, `lastAppliedAt`) yang merekonsiliasi status permintaan (*desired intent*) dengan status telemetri fisik (*hardware reported state*). Mengeliminasi potensi *false-positive* dengan mengandalkan murni `activationStatus` resmi di MSPF (menghapus pengecekan pin `relay` umum) dan murni `attributes.blocked` di Traccar (menghapus pengecekan `out1` umum) | `src/utils/engineControl.js` |
+| ~now | **Device Endpoints Integration** — `GET /api/devices` dan `GET /api/devices/:id` menyertakan object `engineControl` di root level objek kendaraan untuk Admin dan Customer | `src/routes/devices.js` |
+| ~now | **Command Response Feedback** — `POST /api/commands` dan `PUT /api/commands/:deviceId/activation` langsung merespons state awal pending (`state: 'DEACTIVATING'` / `'ACTIVATING'`, `isApplied: false`) | `src/routes/commands.js` |
+| ~now | **WebSocket Streaming** — Event WebSocket `device-status` mengalirkan update `engineControl` secara real-time saat status relay fisik terkonfirmasi berubah di jalan raya | `src/websocket/index.js` |
+| ~now | **Test Suite** — 12 unit & integration tests di `src/__tests__/engineControl.test.js` memverifikasi resolusi murni `activationStatus` (MSPF), `blocked` (Traccar), penolakan false-positive pada pin generic, FoxLogger (null), API response, dan sanitasi role (total 227 test pass) | `src/__tests__/engineControl.test.js` |
+| ~now | **Dokumentasi** — Spesifikasi payload `engineControl` di `API_REFERENCE.md`, `USER_GUIDE.md`, dan `PROGRESS.md` | `API_REFERENCE.md`, `USER_GUIDE.md`, `PROGRESS.md` |
+
+### Role-Based Upstream Vendor Sanitization (White-Label Customer View)
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **Sanitizer Utility** — `src/utils/sanitizer.js`: fungsi helper native `sanitizeDevice`, `sanitizeDevices`, `sanitizePosition`, `sanitizePositions`, `sanitizeLog`, `sanitizeLogs`, `sanitizeReportItem`, `sanitizeReportItems` untuk menyaring tag internal | `src/utils/sanitizer.js` |
+| ~now | **Customer Data Masking** — Seluruh respons API (`devices`, `positions`, `commands`, `reports`, `dashboard`) dan WebSocket broadcasts (`position`, `device-status`) menyembunyikan properti `source` dan vendor `group` bagi pengguna level `customer` | `src/routes/devices.js`, `src/routes/positions.js`, `src/routes/commands.js`, `src/routes/reports.js`, `src/routes/dashboard.js`, `src/websocket/index.js` |
+| ~now | **Admin Preservation** — Pengguna level `admin` 100% mempertahankan field `source` (`traccar`, `mspf`, `foxlogger`) dan vendor `group` (`traccar_5`, dll.) untuk kebutuhan grouping FE Admin, diagnostik, dan sync mapping | `src/routes/*` |
+| ~now | **Test Suite** — 10 unit & integration tests baru di `src/__tests__/roleSanitization.test.js` memverifikasi bahwa admin tetap menerima field vendor sementara customer menerima payload bersih tanpa tag internal (total 215 test pass) | `src/__tests__/roleSanitization.test.js` |
+| ~now | **Dokumentasi** — Update invariant di `AGENTS.md`, panduan di `API_REFERENCE.md`, `USER_GUIDE.md`, dan `PROGRESS.md` | `AGENTS.md`, `API_REFERENCE.md`, `USER_GUIDE.md`, `PROGRESS.md` |
+
+### User Permissions Capability Model (`canCutEngine`), Safety Interlock Guard & Command Audit Trail
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **Skema DB** — Migrasi `20260910_add_user_permissions_and_command_logs.js`: kolom `permissions` JSON di tabel `users` (default `{"canCutEngine":false}`) dan tabel `command_logs` untuk pencatatan riwayat audit perintah persisten | `migrations/20260910_add_user_permissions_and_command_logs.js` |
+| ~now | **Extensible Capability Model** — Dukungan field `permissions` pada profil user (`formatUser`, JWT payload, `GET /api/auth/me`, `POST /api/users`, `PUT /api/users/:id`). Token version otomatis di-bump saat permissions berubah untuk invalidasi instan | `src/routes/users.js`, `src/routes/auth.js` |
+| ~now | **Device Access Boundary** — Endpoint `POST /api/commands`, `PUT /api/commands/:deviceId/activation`, dan `GET /api/commands/types/:deviceId` memverifikasi kepemilikan perangkat via `device_groups` bagi non-admin | `src/routes/commands.js` |
+| ~now | **Engine Cut Capability Guard** — Perintah mematikan mesin (`engineStop`, `deactivate`, `INACTIVE`) diblokir (`403 ERR_FORBIDDEN`) jika customer tidak memiliki izin `canCutEngine: true`. Admin bypass seluruh proteksi | `src/routes/commands.js` |
+| ~now | **Safety Notice & Approval Flow** — Perintah mematikan mesin wajib menyertakan `confirm: true`; jika tidak ada, API merespons `422 WARN_CONFIRMATION_REQUIRED` dengan pesan keselamatan telematika | `src/routes/commands.js` |
+| ~now | **Dynamic Command Types Filter** — Endpoint `GET /api/commands/types/:deviceId` otomatis menyembunyikan tipe perintah mematikan mesin jika pengguna tidak memiliki izin `canCutEngine` | `src/routes/commands.js` |
+| ~now | **Command Debounce & Support Guard** — In-memory lock 5 detik mencegah double-click/spam command per perangkat; penolakan otomatis untuk perangkat FoxLogger (`400 ERR_NOT_SUPPORTED`) | `src/routes/commands.js` |
+| ~now | **Audit Trail Endpoint** — `GET /api/commands/logs` dengan filter `deviceId`, `source`, `status`, rentang tanggal, pagination, dan isolasi akses berbasis grup | `src/routes/commands.js` |
+| ~now | **Test Suite** — 18 unit & integration tests baru (`src/__tests__/commands.test.js`) memverifikasi permission check, token revocation, safety warning, filtering, debounce, dan audit trail (total 205 test pass) | `src/__tests__/commands.test.js` |
+| ~now | **Dokumentasi** — Update spesifikasi lengkap di `API_REFERENCE.md`, `USER_GUIDE.md`, dan `PROGRESS.md` | `API_REFERENCE.md`, `USER_GUIDE.md`, `PROGRESS.md` |
+
+## 2026-09-09
+
+### Top Distance / Mileage 24 Jam (`GET /api/reports/top-distance`)
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **Endpoint Baru** — `GET /api/reports/top-distance` & alias `/api/reports/top-mileage` mengembalikan ranking armada dengan jarak tempuh tertinggi dalam 24 jam terakhir | `src/routes/reports.js` |
+| ~now | **Master Shared Cache 30 Menit** — Agregasi borongan Traccar (`getReportSummary`), MSPF (`getBcStatsReports`), dan FoxLogger (`getDeviceSummary`) disimpan dalam in-memory cache TTL 1800s (30m) untuk performa <2ms dan 0 beban server berulang | `src/routes/reports.js` |
+| ~now | **User-Scoped RBAC** — Otomatis membatasi ranking untuk customer hanya pada perangkat di `device_groups` miliknya; admin melihat seluruh armada lintas sumber | `src/routes/reports.js` |
+| ~now | **Filter Fleksibel** — Mendukung query param `limit` (default 10), `group` (filter custom group ID), dan `refresh=true` (bypass master cache) | `src/routes/reports.js` |
+| ~now | **Test Suite** — 7 unit & integration tests baru: autentikasi, sorting descending, limit, alias `/top-mileage`, customer group filtering, dan validasi 403/404 (total 187 test pass) | `src/__tests__/gateway.test.js` |
+| ~now | **Dokumentasi** — Update spesifikasi lengkap di `API_REFERENCE.md` dan `PROGRESS.md` | `API_REFERENCE.md`, `PROGRESS.md` |
+
+### User Enable/Disable (`isActive`) & Immediate Session Revocation (`token_version`)
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **Skema DB** — Migrasi `20260909_add_user_active_and_token_version.js`: kolom `is_active` (boolean, default true) & `token_version` (integer, default 1) | `migrations/20260909_add_user_active_and_token_version.js` |
+| ~now | **User Auth Service & Cache** — `src/services/userAuth.js`: `getUserAuthStatus` dengan fast cache 60s + instant invalidation `invalidateUserAuthStatus` | `src/services/userAuth.js` |
+| ~now | **Auth Middleware Enforcement** — `authMiddleware` memeriksa status aktif & versi token: disabled $\rightarrow$ `403 ERR_ACCOUNT_DISABLED`; versi token lama $\rightarrow$ `401 ERR_TOKEN_REVOKED` | `src/middleware/auth.js` |
+| ~now | **WebSocket Disconnect & Guard** — Handshake `io.use` tolak akun nonaktif/revoked; helper `disconnectUserSockets(userId)` memutus paksa koneksi socket user saat dinonaktifkan/password direset | `src/websocket/index.js` |
+| ~now | **Login Guard** — `POST /api/auth/login` tolak login akun nonaktif dengan `403 ERR_ACCOUNT_DISABLED`; token payload menyertakan `isActive` & `tokenVersion` | `src/routes/auth.js` |
+| ~now | **Self-Profile Password Bump** — `PUT /api/auth/me` menaikkan `token_version` saat ganti password untuk invalidasi sesi lama | `src/routes/auth.js` |
+| ~now | **Admin Toggle `isActive`** — `POST /api/users` & `PUT /api/users/:id` mendukung `isActive`: saat di-disable, otomatis menaikkan `token_version`, menghapus cache, dan memutus WebSocket | `src/routes/users.js` |
+| ~now | **Test Suite** — Tambahan test penolakan login user nonaktif, pemutusan instan token lama saat disable/re-enable (total 180 test pass) | `src/__tests__/gateway.test.js` |
+| ~now | **Dokumentasi** — Update `API_REFERENCE.md` dan `PROGRESS.md` | `API_REFERENCE.md`, `PROGRESS.md` |
+
+### User Profile Expansion & Self-Update (`PUT /api/auth/me`) + Dual-Identifier Login
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **Skema DB** — Migrasi `20260909_add_user_profile_and_email.js` menambahkan kolom `email` (nullable, unique), `first_name`, dan `last_name` pada tabel `users` | `migrations/20260909_add_user_profile_and_email.js` |
+| ~now | **Dual-Identifier Login** — `POST /api/auth/login` mengenali `username` ATAU `email` (case-insensitive) dalam satu kolom input fleksibel | `src/routes/auth.js` |
+| ~now | **Endpoint `PUT /api/auth/me`** — Self-profile update khusus user yang login: mengizinkan update `firstName`, `lastName`, `timezone`, dan `password` (dengan konfirmasi password); field `role` dan `groups` diabaikan/dilindungi | `src/routes/auth.js` |
+| ~now | **Admin User Management** — `POST /api/users` mewajibkan semua field (`username`, `email`, `firstName`, `lastName`, `password`, `confirmPassword`, `timezone`); `PUT /api/users/:id` mendukung edit field profil dengan validasi konfirmasi password | `src/routes/users.js` |
+| ~now | **Enrichment Profil User** — `GET /api/auth/me`, `GET /api/users`, `GET /api/users/:id`, dan login response mengembalikan `email`, `firstName`, `lastName` | `src/routes/auth.js`, `src/routes/users.js` |
+| ~now | **Test Suite** — Tambahan pengujian dual login, `PUT /api/auth/me`, validasi konfirmasi password, proteksi role, dan error handling (total 178 test pass) | `src/__tests__/gateway.test.js` |
+| ~now | **Dokumentasi** — Update `API_REFERENCE.md` dan `PROGRESS.md` | `API_REFERENCE.md`, `PROGRESS.md` |
+
 ## 2026-08-07
 
 ### Device Metadata — 2 Kepemilikan (Admin vs Customer) + Rule Akses
