@@ -172,7 +172,7 @@ Authorization: Bearer <token>
 | `page` | Halaman (default: 1) |
 | `limit` | Jumlah per halaman (default: 50) |
 
-> Untuk **customer**, data akan otomatis terfilter hanya menampilkan kendaraan di Group/BC miliknya.
+> Untuk **customer**, data otomatis terfilter hanya menampilkan kendaraan di grup miliknya, dan field `source` serta vendor `group` disembunyikan (*white-labeled*). Field `source` dan vendor `group` hanya tampil untuk akun **admin** (digunakan untuk pengelompokan teknis di Dashboard Admin).
 
 ### 3.3 Detail Kendaraan
 
@@ -256,6 +256,14 @@ socket.on('device-status', (data) => {
 
 ### 3.6 Kirim Perintah ke Kendaraan
 
+> **PENTING (Safety & Permission Interlock):**
+> - User dengan role `customer` hanya dapat mengirim perintah ke kendaraan yang berada di dalam `groups` miliknya.
+> - Perintah mematikan mesin (`engineStop`, `deactivate`, `desiredStatus: INACTIVE`) membutuhkan izin `permissions.canCutEngine === true` dari Admin.
+> - Perintah mematikan mesin wajib menyertakan flag konfirmasi `"confirm": true`. Jika dikirim tanpa konfirmasi, server mengembalikan status `422 WARN_CONFIRMATION_REQUIRED` sehingga frontend dapat memunculkan dialog peringatan kepada pengguna.
+> - Setiap eksekusi perintah otomatis tersimpan dalam audit log.
+
+**Contoh Request (Matikan Mesin dengan Konfirmasi & Alasan):**
+
 ```bash
 POST /api/commands
 Authorization: Bearer <token>
@@ -265,19 +273,36 @@ Content-Type: application/json
   "deviceId": 101,
   "group": "traccar_5",
   "type": "engineStop",
+  "confirm": true,
+  "reason": "Kendaraan keluar wilayah operasional",
   "data": {}
 }
 ```
 
-**Response:**
+**Response 200 (Sukses):**
 
 ```json
 {
   "success": true,
-  "message": "Command sent successfully",
+  "message": "Command sent",
   "deviceId": 101,
   "commandType": "engineStop",
-  "source": "traccar"
+  "source": "traccar",
+  "data": { ... }
+}
+```
+
+**Response 422 (Dialog Konfirmasi Diperlukan):**
+Jika dikirim tanpa `"confirm": true`, FE dapat menangkap respons ini untuk menampilkan konfirmasi ke user:
+```json
+{
+  "success": false,
+  "code": "WARN_CONFIRMATION_REQUIRED",
+  "requiresConfirmation": true,
+  "message": "Confirmation required: Stopping vehicle engine carries safety risks. Set confirm: true to proceed.",
+  "safetyNotice": "Kendaraan hanya dapat dimatikan saat kondisi aman. Pastikan konfirmasi disetujui.",
+  "deviceId": 101,
+  "commandType": "engineStop"
 }
 ```
 
@@ -286,37 +311,80 @@ Content-Type: application/json
 Satu endpoint untuk menghidupkan atau mematikan kendaraan, baik dari **Traccar** maupun **MSPF**.
 
 ```bash
-PUT /api/devices/2045/activation
+PUT /api/commands/2045/activation
 Authorization: Bearer <token>
 Content-Type: application/json
 
 {
-  "desiredStatus": "INACTIVE"
+  "desiredStatus": "INACTIVE",
+  "confirm": true,
+  "reason": "Penyalahgunaan kendaraan"
 }
 ```
 
-| Status | Arti | Traccar | MSPF |
-|--------|------|---------|------|
-| `ACTIVE` | Aktifkan / hidupkan mesin | Kirim perintah `engineResume` | Activation → ACTIVE |
-| `INACTIVE` | Nonaktifkan / matikan mesin | Kirim perintah `engineStop` | Activation → INACTIVE |
+| Status | Arti | Traccar | MSPF | Syarat Keamanan |
+|--------|------|---------|------|-----------------|
+| `ACTIVE` | Aktifkan / hidupkan mesin | Kirim perintah `engineResume` | Activation → ACTIVE | Normal |
+| `INACTIVE` | Nonaktifkan / matikan mesin | Kirim perintah `engineStop` | Activation → INACTIVE | Wajib `canCutEngine: true` & `confirm: true` |
 
 > Gateway otomatis menentukan perintah yang tepat berdasarkan sumber device (Traccar atau MSPF).
+
+### 3.8 Memantau Status Eksekusi Mesin (Unified Immobilizer Feedback)
+
+Ketika perintah mematikan mesin (`engineStop` / `INACTIVE`) dikirim, kendaraan tidak selalu mati seketika (menunggu unit berhenti atau kondisi hardware aman).
+
+Backend menyediakan field seragam **`engineControl`** di dalam data device (`GET /api/devices`, `GET /api/devices/:id`), respons command, dan event WebSocket `device-status`:
+
+```json
+{
+  "engineControl": {
+    "desired": "INACTIVE",
+    "state": "INACTIVE",
+    "isApplied": true,
+    "lastAppliedAt": "2026-09-10T11:20:00.000Z"
+  }
+}
+```
+
+| Field | Tipe | Nilai | Arti |
+|-------|------|-------|------|
+| `desired` | string / null | `"ACTIVE"` / `"INACTIVE"` | Status yang diinginkan oleh pengguna |
+| `state` | string | `"ACTIVE"`, `"DEACTIVATING"`, `"INACTIVE"`, `"ACTIVATING"` | Status operasional immobilizer saat ini |
+| `isApplied` | boolean | `true` / `false` | **`true` jika relay fisik di kendaraan sudah terkonfirmasi terputus/tersambung** |
+| `lastAppliedAt` | string / null | ISO timestamp | Waktu konfirmasi fisik terakhir dari telemetri perangkat |
+
+**Panduan Tampilan di Frontend:**
+- `isApplied: false` & `state: "DEACTIVATING"` $\rightarrow$ Tampilkan badge kuning: **"Memproses Pemutusan Mesin..."**
+- `isApplied: true` & `state: "INACTIVE"` $\rightarrow$ Tampilkan badge merah: **"Mesin Dinonaktifkan (Terkonfirmasi)"**
+- `isApplied: true` & `state: "ACTIVE"` $\rightarrow$ Tampilkan badge hijau: **"Mesin Normal / Aktif"**
+
+### 3.9 Riwayat Perintah Kendaraan (Audit Trail)
+
+Melihat log histori eksekusi perintah (siapa yang mengirim, waktu, target unit, konfirmasi, alasan, dan status eksekusi):
+
+```bash
+GET /api/commands/logs?deviceId=101&limit=20
+Authorization: Bearer <token>
+```
 
 ---
 
 ## 4. Alur Penggunaan
 
 **Untuk customer:**
-1. Login → dapat token
-2. `GET /api/auth/me` → cek role & groups yang diakses
+1. Login → dapat token & object `permissions` (contoh: `{ canCutEngine: false }`)
+2. `GET /api/auth/me` → cek role, permissions & groups yang diakses
 3. `GET /api/groups` → lihat daftar Group/BC yang bisa diakses
 4. `GET /api/devices?group=traccar_5` → lihat kendaraan di group tersebut
-5. `GET /api/positions?deviceId=101&group=traccar_5` → lihat posisi
-6. `POST /api/commands` → kirim perintah
-7. `PUT /api/devices/:id/activation` → matikan/hidupkan (khusus MSPF)
+5. `GET /api/commands/types/:deviceId` → lihat tipe perintah yang diizinkan (tipe `engineStop` otomatis tersembunyi jika `canCutEngine: false`)
+6. `GET /api/positions?deviceId=101&group=traccar_5` → lihat posisi
+7. `POST /api/commands` → kirim perintah (sertakan `confirm: true` jika mematikan mesin)
+8. `GET /api/commands/logs` → lihat riwayat eksekusi perintah kendaraan
 
 **Untuk admin (tambahan):**
 1. `GET /api/users` → lihat daftar semua user
+2. `POST /api/users` / `PUT /api/users/:id` → atur izin `permissions: { canCutEngine: true/false }` untuk customer
+3. `GET /api/commands/logs` → audit trail seluruh armada lintas user & device
 2. `GET /api/users/:id` → lihat detail user & groups-nya
 3. `PUT /api/users/:id/groups` → atur Group/BC mana saja yang bisa diakses customer
 
