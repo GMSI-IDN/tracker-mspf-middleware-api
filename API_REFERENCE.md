@@ -193,6 +193,11 @@ Untuk admin, semua device. Untuk customer, hanya device di Group/BC yang di-assi
 | `offset` | integer | 0 | Offset untuk pagination |
 | `limit` | integer | 50 | Jumlah data per halaman (max 200) |
 
+> **Catatan Custom Groups & Deduplikasi:**
+> - Parameter `group` menerima ID custom group integer (contoh: `?group=1`).
+> - Satu custom group dapat memuat kendaraan dari berbagai aturan sinkronisasi (multi-sync rules) dan penambahan manual.
+> - Jika user level customer memiliki beberapa custom group yang memuat kendaraan yang sama, daftar kendaraan **dijamin hanya menampilkan kendaraan tersebut sebanyak 1 kali (ter-deduplikasi)**, dan atribut `customGroups` akan mencantumkan semua grup terkait.
+
 **Response 200:**
 ```json
 {
@@ -1069,11 +1074,15 @@ Perintah mematikan mesin kendaraan (`engineStop`, `deactivate`, atau `desiredSta
 
 ### POST /api/commands
 
-Mengirim perintah ke device. Gateway otomatis routing ke backend yang tepat (Traccar atau MSPF). Perangkat FoxLogger tidak mendukung pengiriman remote command (`400 ERR_NOT_SUPPORTED`).
+Mengirim perintah ke device. Gateway secara cerdas melakukan routing dan **terjemahan otomatis dua arah (Unified Command Translation)**:
+- Perintah hidupkan mesin (`engineResume`, `activate`) $\rightarrow$ otomatis dikirim sebagai `engineResume` ke Traccar dan `desiredStatus: 'ACTIVE'` ke MSPF.
+- Perintah matikan mesin (`engineStop`, `deactivate`) $\rightarrow$ otomatis dikirim sebagai `engineStop` ke Traccar dan `desiredStatus: 'INACTIVE'` ke MSPF.
+- FE cukup mengirim perintah standar yang seragam (`type: "engineResume"` / `type: "engineStop"`) untuk semua jenis kendaraan tanpa perlu membedakan vendor backend.
+- Perangkat FoxLogger tidak mendukung pengiriman remote command (`400 ERR_NOT_SUPPORTED`).
 
 **Request Body:**
 - `deviceId` (wajib, integer/string): ID perangkat target
-- `type` (wajib, string): Tipe perintah (contoh: `engineStop`, `engineResume`, `activate`, `deactivate`, dll.)
+- `type` (wajib, string): Tipe perintah (`engineStop`, `engineResume`, `activate`, `deactivate`, dll.)
 - `data` (opsional, object): Parameter payload tambahan untuk Traccar
 - `source` (opsional, string): `traccar` atau `mspf`
 - `group` (opsional, string): prefix group ID jika spesifik
