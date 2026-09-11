@@ -13,8 +13,17 @@ const { runAutoSync } = require('../services/autoSync');
 const { applyRules, getDeviceRules } = require('../services/customAttributes');
 const { statusTracker } = require('../utils/liveStatus');
 const { mergeMetadataBlobs } = require('../utils/deviceMetadata');
+const { sanitizeDevice, sanitizeDevices } = require('../utils/sanitizer');
+const { deriveEngineControl } = require('../utils/engineControl');
 
 const router = express.Router();
+
+function attachEngineControl(devices) {
+  if (!devices || devices.length === 0) return;
+  for (const d of devices) {
+    d.engineControl = deriveEngineControl(d, d.source);
+  }
+}
 
 function overlayLiveStatus(devices) {
   if (!devices || devices.length === 0) return;
@@ -125,7 +134,8 @@ router.get('/', async (req, res, next) => {
       const paged = filtered.slice(offsetNum, offsetNum + limitNum);
       await enrichMetadata(paged);
       overlayLiveStatus(paged);
-      return res.json({ devices: paged, total: filtered.length, offset: offsetNum, limit: limitNum });
+      attachEngineControl(paged);
+      return res.json({ devices: sanitizeDevices(paged, isAdmin), total: filtered.length, offset: offsetNum, limit: limitNum });
     }
 
     const cacheKey = 'devices:merged';
@@ -220,7 +230,8 @@ router.get('/', async (req, res, next) => {
 
     await enrichMetadata(paged);
     overlayLiveStatus(paged);
-    res.json({ devices: paged, total, offset: offsetNum, limit: limitNum });
+    attachEngineControl(paged);
+    res.json({ devices: sanitizeDevices(paged, isAdmin), total, offset: offsetNum, limit: limitNum });
   } catch (err) {
     next(err);
   }
@@ -270,8 +281,9 @@ router.get('/:id', async (req, res, next) => {
     device.customGroups = dgs.map(r => ({ id: r.gid, name: r.gname }));
     await enrichMetadata([device]);
     overlayLiveStatus([device]);
+    attachEngineControl([device]);
 
-    res.json(device);
+    res.json(sanitizeDevice(device, isAdmin));
   } catch (err) {
     next(err);
   }
@@ -317,7 +329,7 @@ router.put('/:id/metadata',
         .onConflict(['device_id', 'source', 'owner'])
         .merge();
 
-      res.json({ deviceId, source: devSource, owner, metadata: req.body.metadata });
+      res.json({ deviceId, ...(isAdmin ? { source: devSource } : {}), owner, metadata: req.body.metadata });
     } catch (err) {
       next(err);
     }
@@ -351,7 +363,7 @@ router.delete('/:id/metadata', async (req, res, next) => {
     const deleted = await db('device_metadata').where({ device_id: deviceId, source: devSource, owner }).delete();
     if (!deleted) throw createError(404, 'Metadata not found', { code: 'ERR_NOT_FOUND' });
 
-    res.json({ deviceId, source: devSource, owner, deleted: true });
+    res.json({ deviceId, ...(isAdmin ? { source: devSource } : {}), owner, deleted: true });
   } catch (err) {
     next(err);
   }

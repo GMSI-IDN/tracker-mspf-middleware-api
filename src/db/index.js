@@ -10,14 +10,19 @@ if (config.dbDriver === 'sqlite3') {
 }
 
 const knexfile = require(path.resolve(rootDir, 'knexfile.js'));
-const env = config.dbDriver === 'pg' ? 'production' : 'development';
-const db = require('knex')(knexfile[env]);
+const driverKey = config.dbDriver === 'pg' ? 'pg' : 'sqlite';
+const db = require('knex')(knexfile[driverKey] || knexfile.sqlite);
 
 let migrationDone = false;
 const migrationQueue = [];
 
+// ponytail: in-app migration runner ceiling: multi-replica concurrency race on startup -> upgrade path: dedicated initContainer or CI/CD pre-deploy migration runner
 function runMigrations() {
-  return db.migrate.latest().then(() => db.seed.run());
+  const shouldSeed = process.env.NODE_ENV === 'test' || process.env.AUTO_SEED === 'true';
+  if (shouldSeed) {
+    return db.migrate.latest().then(() => db.seed.run());
+  }
+  return db.migrate.latest();
 }
 
 if (process.env.RUN_MIGRATIONS === 'false') {

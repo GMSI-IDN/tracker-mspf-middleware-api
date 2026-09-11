@@ -49,6 +49,21 @@ Gunakan **Context7 MCP** (`context7_resolve-library-id` + `context7_query-docs`)
    - `CHANGELOG.md` — catat perubahan fitur/perbaikan
    - `API_REFERENCE.md` — jika ada endpoint baru atau perubahan response
    - `PROGRESS.md` — update progress tracker
+9. **Aturan Migrasi Database (Append-Only Invariant):**
+   - **DILARANG MENGEDIT** file migrasi yang sudah pernah ada di folder `migrations/`. File lama adalah catatan sejarah yang sudah tercatat di tabel sistem `knex_migrations` server staging/production.
+   - Mengedit file lama **tidak akan pernah dieksekusi** di database server (karena Knex men-skip file yang namanya sudah tercatat di `knex_migrations`), namun akan merusak sinkronisasi skema (*schema drift*) pada database baru/lokal.
+   - Setiap perubahan skema (tambah tabel, tambah/ubah kolom, index) **WAJIB SELALU MEMBUAT FILE MIGRASI BARU** (format: `YYYYMMDD_deskripsi.js`).
+   - Untuk tabel yang sudah memiliki data, penambahan kolom baru **wajib** memiliki `defaultTo(...)` atau `nullable()`.
+   - Selalu sertakan fungsi `exports.down` untuk keselamatan rollback.
+
+## Invariant: Role-Based Upstream Vendor Sanitization (White-Label Customer View)
+
+Gateway ini berfungsi sebagai **Unified GPS Facade** atas multi-vendor upstream (`traccar`, `mspf`, `foxlogger`).
+- **Role `admin`:** Respons API dan WebSocket **tetap mempertahankan** field `source` (`'traccar'`, `'mspf'`, `'foxlogger'`) dan vendor `group` (contoh: `'traccar_5'`). Ini diperlukan oleh Admin Frontend untuk pengelompokan (grouping), diagnostik teknis, dan pemetaan sync group (`/api/admin/group-sync`).
+- **Role `customer`:** Respons API (`devices`, `positions`, `commands`, `reports`, `dashboard`) dan WebSocket broadcasts (`position`, `device-status`) **wajib disanitasi** menggunakan helper `src/utils/sanitizer.js`:
+  - Field `source` **dihilangkan 100%**.
+  - Field vendor `group` (misal: `traccar_5`) **dihilangkan** (customer hanya melihat `customGroups`).
+  - Tidak boleh membocorkan nama vendor backend kepada pengguna level customer.
 
 ---
 

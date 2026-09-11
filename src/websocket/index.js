@@ -4,10 +4,12 @@ const config = require('../config');
 const traccar = require('../services/traccar');
 const foxlogger = require('../services/foxlogger');
 const { deriveRunningStatus } = require('../utils/deviceStatus');
+const { deriveEngineControl } = require('../utils/engineControl');
 const { applyRules, computeFormula, getDeviceRules } = require('../services/customAttributes');
 const { statusTracker } = require('../utils/liveStatus');
 const { toUtcIso } = require('../utils/timestamp');
 const { logger } = require('../middleware/logger');
+const { getUserAuthStatus } = require('../services/userAuth');
 const db = require('../db');
 
 let io = null;
@@ -25,11 +27,22 @@ function setupWebSocket(httpServer) {
     cors: { origin: config.cors.origin, credentials: true },
   });
 
-  io.use((socket, next) => {
+  io.use(async (socket, next) => {
     const token = socket.handshake.auth?.token;
     if (!token) return next(new Error('Authentication required'));
     try {
-      socket.user = jwt.verify(token, config.jwt.secret);
+      const decoded = jwt.verify(token, config.jwt.secret);
+      if (decoded.id) {
+        const authStatus = await getUserAuthStatus(decoded.id);
+        if (!authStatus || !authStatus.isActive) {
+          return next(new Error('Account disabled'));
+        }
+        const tokenVer = decoded.tokenVersion ?? 1;
+        if (tokenVer < authStatus.tokenVersion) {
+          return next(new Error('Session revoked'));
+        }
+      }
+      socket.user = decoded;
       next();
     } catch {
       next(new Error('Invalid or expired token'));
@@ -160,6 +173,7 @@ async function emitPosition(data) {
     payload.batteryLevel = attr.batteryLevel ?? undefined;
     payload.ignition = attr.ignition ?? undefined;
     if (user.role !== 'admin') {
+      delete payload.source;
       if (rules.length > 0) {
         applyRules(payload, rules);
       } else {
@@ -188,7 +202,12 @@ function emitDeviceStatus(deviceId, source, data) {
     const user = socket.user;
     if (!user) continue;
     if (user.role !== 'admin' && !isDeviceAllowed(socket, source, deviceId)) continue;
-    socket.emit('device-status', data);
+    let payload = data;
+    if (user.role !== 'admin') {
+      payload = { ...data };
+      delete payload.source;
+    }
+    socket.emit('device-status', payload);
   }
 }
 function emitCommandResult(data) { if (io) io.emit('command-result', data); }
@@ -199,6 +218,8 @@ function emitDeviceStatusFrom(item) {
   const speed = item.speed || 0;
   const ignition = item.attributes?.ignition;
   const running = deriveRunningStatus(item.attributes, speed, lastUpdate);
+  const dev = getDeviceFromCache(item.deviceId, item.source);
+  const engineControl = deriveEngineControl({ ...(dev || {}), attributes: { ...(dev?.attributes || {}), ...(item.attributes || {}) } }, item.source);
 
   emitDeviceStatus(item.deviceId, item.source, {
     deviceId: item.deviceId,
@@ -210,6 +231,7 @@ function emitDeviceStatusFrom(item) {
     voltage: item.attributes?.voltage || item.attributes?.power || null,
     internalBattery: item.attributes?.addr_IB || null,
     batteryLevel: item.attributes?.batteryLevel || null,
+    engineControl: engineControl || null,
   });
 }
 
@@ -226,6 +248,7 @@ function buildStatusPayload({ deviceId, source, status, lastUpdate }) {
   const dev = getDeviceFromCache(deviceId, source);
   const attrs = dev?.attributes || {};
   const isOffline = status === 'offline';
+  const engineControl = deriveEngineControl(dev, source);
   return {
     deviceId,
     source,
@@ -236,6 +259,7 @@ function buildStatusPayload({ deviceId, source, status, lastUpdate }) {
     voltage: isOffline ? null : (attrs.voltage ?? attrs.power ?? attrs.volt ?? dev?.voltage ?? null),
     internalBattery: isOffline ? null : (attrs.addr_IB ?? dev?.internalBattery ?? null),
     batteryLevel: isOffline ? null : (attrs.batteryLevel ?? dev?.batteryLevel ?? null),
+    engineControl: engineControl || null,
   };
 }
 
@@ -348,4 +372,25 @@ function startTraccarFallback() {
   }, config.websocket.pollInterval);
 }
 
-module.exports = { setupWebSocket, emitPosition, emitDeviceStatus, emitDeviceStatusFrom, emitStatusFor, buildStatusPayload, emitCommandResult, getIO };
+function disconnectUserSockets(userId) {
+  if (!io) return;
+  const numId = Number(userId);
+  io.sockets.sockets.forEach((socket) => {
+    if (socket.user && Number(socket.user.id) === numId) {
+      socket.emit('account-disabled', { message: 'Your account has been disabled or session revoked' });
+      socket.disconnect(true);
+    }
+  });
+}
+
+module.exports = {
+  setupWebSocket,
+  emitPosition,
+  emitDeviceStatus,
+  emitDeviceStatusFrom,
+  emitStatusFor,
+  buildStatusPayload,
+  emitCommandResult,
+  getIO,
+  disconnectUserSockets,
+};

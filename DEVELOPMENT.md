@@ -77,6 +77,39 @@ npm start
 | `POST /api/commands` | Traccar `POST /commands/send` |
 | `PUT /api/devices/:id/activation` | MSPF `PUT /v3/devices/{id}/activation` |
 
+---
+
+## Database Migrations & Deployment (Knex + Docker CI/CD)
+
+### 1. Prinsip Append-Only (DILARANG MENGEDIT FILE MIGRASI LAMA)
+- Seluruh file di folder `migrations/` adalah **catatan sejarah permanen (immutable)**.
+- Di database server (baik SQLite maupun PostgreSQL), Knex melacak riwayat file yang sudah dijalankan di tabel sistem **`knex_migrations`**.
+- **Mengapa file lama tidak boleh diedit?**
+  - Saat deploy via GitHub Actions, Knex memeriksa tabel `knex_migrations`.
+  - Jika nama file migrasi sudah tercatat di tabel tersebut, Knex akan **MELEWATKAN (SKIP)** file tersebut.
+  - Perubahan yang Anda ketik pada file lama **TIDAK AKAN PERNAH DIJALANKAN** di server production, menyebabkan perbedaan skema (*schema drift*) yang fatal antara lokal dan production.
+- **Aturan:** Setiap ada kebutuhan mengubah skema (tambah tabel, tambah kolom, ubah tipe kolom, tambah index), **SELALU BUAT FILE MIGRASI BARU** (contoh: `migrations/YYYYMMDD_deskripsi.js`).
+
+### 2. Alur Eksekusi di GitHub Actions & Docker
+Workflow deploy di `.github/workflows/ci-cd.yml` berjalan secara terisolasi dan aman:
+1. GitHub Actions mem-build image Docker dan push ke GHCR.
+2. Di server, sebelum container aplikasi dinyalakan, GitHub Actions menjalankan container migrasi sementara:
+   ```bash
+   docker run --rm ... "$IMAGE:$IMAGE_TAG" node src/scripts/migrate.js
+   ```
+3. Knex membaca tabel `knex_migrations`, lalu mengeksekusi hanya file-file migrasi baru yang belum pernah tercatat.
+4. Container migrasi selesai dan otomatis dihapus (`--rm`).
+5. Container aplikasi utama dijalankan (`docker compose up -d`).
+
+### 3. Panduan Membuat File Migrasi Baru yang Aman
+- **Menambah Kolom pada Tabel yang Sudah Memiliki Data:**
+  Wajib menyertakan `.defaultTo(...)` atau `.nullable()`. Jangan membuat `.notNullable()` tanpa default value pada tabel yang sudah terisi data.
+- **Mengubah Tipe Kolom (Misal TEXT ke DECIMAL):**
+  Gunakan klausa SQL type casting yang aman (misal `USING (kolom::DECIMAL(10,2))` di PostgreSQL) dan bersihkan data kosong sebelum konversi.
+- **Rollback Function:**
+  Selalu implementasikan `exports.down = async function (knex) { ... }` agar migrasi dapat di-rollback jika diperlukan.
+
+---
 
 ## Catatan Penting
 

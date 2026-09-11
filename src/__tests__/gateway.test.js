@@ -1,4 +1,5 @@
 const request = require('supertest');
+const bcrypt = require('bcryptjs');
 
 jest.mock('../services/traccar', () => ({
   getDevices: jest.fn(),
@@ -114,6 +115,10 @@ describe('Health', () => {
 });
 
 describe('Authentication', () => {
+  beforeAll(async () => {
+    await db('users').where({ username: 'admin' }).update({ timezone: null });
+  });
+
   test('POST /api/auth/login with valid credentials returns token', async () => {
     const res = await request(app)
       .post('/api/auth/login')
@@ -156,6 +161,138 @@ describe('Authentication', () => {
     const res = await request(app).get('/api/auth/me');
     expect(res.status).toBe(401);
   });
+
+  test('POST /api/auth/login with email returns token', async () => {
+    await db('users').where({ username: 'admin' }).update({
+      email: 'admin@system.local',
+      first_name: 'Admin',
+      last_name: 'System',
+    });
+
+    const res = await request(app)
+      .post('/api/auth/login')
+      .send({ email: 'admin@system.local', password: 'admin123' });
+    expect(res.status).toBe(200);
+    expect(res.body.token).toBeDefined();
+    expect(res.body.user.email).toBe('admin@system.local');
+    expect(res.body.user.firstName).toBe('Admin');
+    expect(res.body.user.lastName).toBe('System');
+  });
+
+  test('POST /api/auth/login allows case-insensitive email', async () => {
+    const res = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'ADMIN@SYSTEM.LOCAL', password: 'admin123' });
+    expect(res.status).toBe(200);
+    expect(res.body.user.email).toBe('admin@system.local');
+  });
+
+  test('PUT /api/auth/me updates self profile (name, timezone)', async () => {
+    await db('users').where({ username: 'self_profile_user' }).delete();
+    const hash = bcrypt.hashSync('pass123', 10);
+    await db('users').insert({
+      username: 'self_profile_user',
+      email: 'self@example.com',
+      first_name: 'Original',
+      last_name: 'Name',
+      password_hash: hash,
+      role: 'customer',
+      groups: '[]',
+      timezone: 'Asia/Jakarta',
+    });
+
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'self_profile_user', password: 'pass123' });
+    const token = login.body.token;
+
+    const res = await request(app)
+      .put('/api/auth/me')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        firstName: 'Super',
+        lastName: 'User',
+        timezone: 'Asia/Makassar',
+      });
+    expect(res.status).toBe(200);
+    expect(res.body.firstName).toBe('Super');
+    expect(res.body.lastName).toBe('User');
+    expect(res.body.timezone).toBe('Asia/Makassar');
+    expect(res.body.token).toBeDefined();
+
+    await db('users').where({ username: 'self_profile_user' }).delete();
+  });
+
+  test('PUT /api/auth/me updates password when confirmPassword matches', async () => {
+    await db('users').where({ username: 'pwd_test' }).delete();
+    const hash = bcrypt.hashSync('oldpass123', 10);
+    await db('users').insert({
+      username: 'pwd_test',
+      email: 'pwd_test@example.com',
+      first_name: 'Pwd',
+      last_name: 'Test',
+      password_hash: hash,
+      role: 'customer',
+      groups: '[]',
+      timezone: 'Asia/Jakarta',
+    });
+
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'pwd_test', password: 'oldpass123' });
+    const token = login.body.token;
+
+    // Fail if confirmPassword missing
+    const noConfirm = await request(app)
+      .put('/api/auth/me')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ password: 'newpass123' });
+    expect(noConfirm.status).toBe(400);
+    expect(noConfirm.body.code).toBe('ERR_VALIDATION');
+
+    // Fail if confirmPassword doesn't match
+    const mismatch = await request(app)
+      .put('/api/auth/me')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ password: 'newpass123', confirmPassword: 'different123' });
+    expect(mismatch.status).toBe(400);
+    expect(mismatch.body.code).toBe('ERR_VALIDATION');
+
+    // Succeed with matching confirmation
+    const success = await request(app)
+      .put('/api/auth/me')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ password: 'newpass123', confirmPassword: 'newpass123' });
+    expect(success.status).toBe(200);
+
+    // Verify login with new password works
+    const newLogin = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'pwd_test', password: 'newpass123' });
+    expect(newLogin.status).toBe(200);
+  });
+
+  test('PUT /api/auth/me ignores role and groups alteration', async () => {
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'pwd_test', password: 'newpass123' });
+    const token = login.body.token;
+
+    const res = await request(app)
+      .put('/api/auth/me')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ role: 'admin', groups: [1, 2, 3] });
+    expect(res.status).toBe(200);
+    expect(res.body.role).toBe('customer');
+    expect(res.body.groups).toEqual([]);
+
+    await db('users').where({ username: 'pwd_test' }).delete();
+  });
+
+  test('PUT /api/auth/me without token returns 401', async () => {
+    const res = await request(app).put('/api/auth/me').send({ firstName: 'Anon' });
+    expect(res.status).toBe(401);
+  });
 });
 
 describe('User Management', () => {
@@ -188,7 +325,17 @@ describe('User Management', () => {
     const create = await request(app)
       .post('/api/users')
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ username: 'test_customer', password: 'pass123', role: 'customer', groups: [], timezone: 'Asia/Jakarta' });
+      .send({
+        username: 'test_customer',
+        email: 'test_customer@example.com',
+        firstName: 'Test',
+        lastName: 'Customer',
+        password: 'pass123',
+        confirmPassword: 'pass123',
+        role: 'customer',
+        groups: [],
+        timezone: 'Asia/Jakarta',
+      });
     expect([201, 409]).toContain(create.status);
 
     // Login as customer
@@ -235,7 +382,16 @@ describe('User Management', () => {
     const res = await request(app)
       .post('/api/users')
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ username: 'tz_missing', password: 'pass123', role: 'customer', groups: [] });
+      .send({
+        username: 'tz_missing',
+        email: 'tz_missing@example.com',
+        firstName: 'TZ',
+        lastName: 'Missing',
+        password: 'pass123',
+        confirmPassword: 'pass123',
+        role: 'customer',
+        groups: [],
+      });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('ERR_VALIDATION');
     expect(res.body.error).toContain('Timezone is required');
@@ -245,7 +401,17 @@ describe('User Management', () => {
     const res = await request(app)
       .post('/api/users')
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ username: 'tz_invalid', password: 'pass123', role: 'customer', groups: [], timezone: 'Not/AZone' });
+      .send({
+        username: 'tz_invalid',
+        email: 'tz_invalid@example.com',
+        firstName: 'TZ',
+        lastName: 'Invalid',
+        password: 'pass123',
+        confirmPassword: 'pass123',
+        role: 'customer',
+        groups: [],
+        timezone: 'Not/AZone',
+      });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('ERR_VALIDATION');
   });
@@ -255,9 +421,22 @@ describe('User Management', () => {
     const res = await request(app)
       .post('/api/users')
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ username: 'tz_ok', password: 'pass123', role: 'customer', groups: [], timezone: 'Asia/Jakarta' });
+      .send({
+        username: 'tz_ok',
+        email: 'tz_ok@example.com',
+        firstName: 'TZ',
+        lastName: 'Ok',
+        password: 'pass123',
+        confirmPassword: 'pass123',
+        role: 'customer',
+        groups: [],
+        timezone: 'Asia/Jakarta',
+      });
     expect(res.status).toBe(201);
     expect(res.body.timezone).toBe('Asia/Jakarta');
+    expect(res.body.email).toBe('tz_ok@example.com');
+    expect(res.body.firstName).toBe('TZ');
+    expect(res.body.lastName).toBe('Ok');
   });
 
   test('PUT /api/users/:id updates timezone', async () => {
@@ -290,6 +469,121 @@ describe('User Management', () => {
     expect(res.body.code).toBe('ERR_VALIDATION');
   });
 
+  test('POST /api/users fails when email, names, or confirmPassword missing', async () => {
+    const noEmail = await request(app)
+      .post('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        username: 'inc_1',
+        firstName: 'A',
+        lastName: 'B',
+        password: 'pass123',
+        confirmPassword: 'pass123',
+        timezone: 'Asia/Jakarta',
+      });
+    expect(noEmail.status).toBe(400);
+
+    const noName = await request(app)
+      .post('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        username: 'inc_2',
+        email: 'inc_2@example.com',
+        password: 'pass123',
+        confirmPassword: 'pass123',
+        timezone: 'Asia/Jakarta',
+      });
+    expect(noName.status).toBe(400);
+
+    const noConfirm = await request(app)
+      .post('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        username: 'inc_3',
+        email: 'inc_3@example.com',
+        firstName: 'A',
+        lastName: 'B',
+        password: 'pass123',
+        timezone: 'Asia/Jakarta',
+      });
+    expect(noConfirm.status).toBe(400);
+
+    const pwdMismatch = await request(app)
+      .post('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        username: 'inc_4',
+        email: 'inc_4@example.com',
+        firstName: 'A',
+        lastName: 'B',
+        password: 'pass123',
+        confirmPassword: 'mismatch',
+        timezone: 'Asia/Jakarta',
+      });
+    expect(pwdMismatch.status).toBe(400);
+  });
+
+  test('POST /api/users fails on duplicate email', async () => {
+    await db('users').where({ username: 'dup_email_1' }).delete();
+    await db('users').where({ username: 'dup_email_2' }).delete();
+
+    await request(app)
+      .post('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        username: 'dup_email_1',
+        email: 'duplicate@example.com',
+        firstName: 'Dup',
+        lastName: 'One',
+        password: 'pass123',
+        confirmPassword: 'pass123',
+        timezone: 'Asia/Jakarta',
+      });
+
+    const res = await request(app)
+      .post('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        username: 'dup_email_2',
+        email: 'duplicate@example.com',
+        firstName: 'Dup',
+        lastName: 'Two',
+        password: 'pass123',
+        confirmPassword: 'pass123',
+        timezone: 'Asia/Jakarta',
+      });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('ERR_CONFLICT');
+  });
+
+  test('PUT /api/users/:id updates password with confirmPassword', async () => {
+    const users = await request(app)
+      .get('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`);
+    const tzUser = users.body.find(u => u.username === 'tz_ok');
+
+    // Without confirm
+    const fail = await request(app)
+      .put(`/api/users/${tzUser.id}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ password: 'brandnewpass' });
+    expect(fail.status).toBe(400);
+
+    // With confirm
+    const success = await request(app)
+      .put(`/api/users/${tzUser.id}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        firstName: 'NewTZ',
+        lastName: 'NewOk',
+        password: 'brandnewpass',
+        confirmPassword: 'brandnewpass',
+      });
+    expect(success.status).toBe(200);
+    expect(success.body.firstName).toBe('NewTZ');
+    expect(success.body.lastName).toBe('NewOk');
+  });
+
   test('GET /api/auth/me includes timezone fallback for legacy users', async () => {
     const login = await request(app)
       .post('/api/auth/login')
@@ -301,6 +595,111 @@ describe('User Management', () => {
       .set('Authorization', `Bearer ${login.body.token}`);
     expect(res.status).toBe(200);
     expect(res.body.timezone).toBe('Asia/Jakarta');
+  });
+
+  test('POST /api/users creates user with isActive: false and login is rejected', async () => {
+    await db('users').where({ username: 'disabled_user' }).delete();
+    const create = await request(app)
+      .post('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        username: 'disabled_user',
+        email: 'disabled@example.com',
+        firstName: 'Disabled',
+        lastName: 'User',
+        password: 'pass123',
+        confirmPassword: 'pass123',
+        role: 'customer',
+        groups: [],
+        timezone: 'Asia/Jakarta',
+        isActive: false,
+      });
+    expect(create.status).toBe(201);
+    expect(create.body.isActive).toBe(false);
+
+    // Login must fail with 403 ERR_ACCOUNT_DISABLED
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'disabled_user', password: 'pass123' });
+    expect(login.status).toBe(403);
+    expect(login.body.code).toBe('ERR_ACCOUNT_DISABLED');
+  });
+
+  test('Admin disables active user -> existing token immediately revoked', async () => {
+    await db('users').where({ username: 'to_be_disabled' }).delete();
+    const create = await request(app)
+      .post('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        username: 'to_be_disabled',
+        email: 'tobedisabled@example.com',
+        firstName: 'To',
+        lastName: 'Disable',
+        password: 'pass123',
+        confirmPassword: 'pass123',
+        role: 'customer',
+        groups: [],
+        timezone: 'Asia/Jakarta',
+        isActive: true,
+      });
+    const userId = create.body.id;
+
+    // Login and get token
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'to_be_disabled', password: 'pass123' });
+    expect(login.status).toBe(200);
+    const userToken = login.body.token;
+
+    // Verify token works
+    const check1 = await request(app)
+      .get('/api/auth/me')
+      .set('Authorization', `Bearer ${userToken}`);
+    expect(check1.status).toBe(200);
+
+    // Admin disables this user
+    const disableRes = await request(app)
+      .put(`/api/users/${userId}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ isActive: false });
+    expect(disableRes.status).toBe(200);
+    expect(disableRes.body.isActive).toBe(false);
+
+    // Existing token must immediately return 403 ERR_ACCOUNT_DISABLED
+    const check2 = await request(app)
+      .get('/api/auth/me')
+      .set('Authorization', `Bearer ${userToken}`);
+    expect(check2.status).toBe(403);
+    expect(check2.body.code).toBe('ERR_ACCOUNT_DISABLED');
+
+    // Admin re-enables user
+    const enableRes = await request(app)
+      .put(`/api/users/${userId}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ isActive: true });
+    expect(enableRes.status).toBe(200);
+    expect(enableRes.body.isActive).toBe(true);
+
+    // Old token prior to disable is still revoked because token_version was incremented
+    const checkOldToken = await request(app)
+      .get('/api/auth/me')
+      .set('Authorization', `Bearer ${userToken}`);
+    expect(checkOldToken.status).toBe(401);
+    expect(checkOldToken.body.code).toBe('ERR_TOKEN_REVOKED');
+
+    // But user can login afresh and get new working token
+    const loginNew = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'to_be_disabled', password: 'pass123' });
+    expect(loginNew.status).toBe(200);
+    const newToken = loginNew.body.token;
+
+    const checkNewToken = await request(app)
+      .get('/api/auth/me')
+      .set('Authorization', `Bearer ${newToken}`);
+    expect(checkNewToken.status).toBe(200);
+
+    await db('users').where({ username: 'to_be_disabled' }).delete();
   });
 });
 
@@ -394,7 +793,17 @@ describe('Device Metadata', () => {
     await request(app)
       .post('/api/users')
       .set('Authorization', `Bearer ${token}`)
-      .send({ username: 'meta_customer', password: 'pass123', role: 'customer', groups: [groupId], timezone: 'Asia/Jakarta' });
+      .send({
+        username: 'meta_customer',
+        email: 'meta_customer@example.com',
+        firstName: 'Meta',
+        lastName: 'Customer',
+        password: 'pass123',
+        confirmPassword: 'pass123',
+        role: 'customer',
+        groups: [groupId],
+        timezone: 'Asia/Jakarta',
+      });
     const custLogin = await request(app)
       .post('/api/auth/login')
       .send({ username: 'meta_customer', password: 'pass123' });
@@ -626,7 +1035,17 @@ describe('Admin Custom Groups', () => {
     await request(app)
       .post('/api/users')
       .set('Authorization', `Bearer ${token}`)
-      .send({ username: 'cust_test', password: 'pass123', role: 'customer', groups: [], timezone: 'Asia/Jakarta' });
+      .send({
+        username: 'cust_test',
+        email: 'cust_test@example.com',
+        firstName: 'Cust',
+        lastName: 'Test',
+        password: 'pass123',
+        confirmPassword: 'pass123',
+        role: 'customer',
+        groups: [],
+        timezone: 'Asia/Jakarta',
+      });
     const login = await request(app)
       .post('/api/auth/login')
       .send({ username: 'cust_test', password: 'pass123' });
@@ -1403,6 +1822,159 @@ describe('Summary Time-Series Group', () => {
       .get(`/api/reports/summary?group=${groupId}&granularity=day&from=2026-06-01T00:00:00Z`)
       .set('Authorization', `Bearer ${customerToken}`);
     expect(res.status).toBe(403);
+  });
+});
+
+describe('Top Distance (24h) Reports', () => {
+  let token;
+  let customerToken;
+  let testGroupId;
+  const testDevId = 888801;
+
+  beforeAll(async () => {
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'admin', password: 'admin123' });
+    token = login.body.token;
+
+    const grp = await request(app)
+      .post('/api/admin/groups')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'top_km_group' });
+    testGroupId = grp.body.id;
+
+    await db('device_groups').insert({
+      device_id: testDevId,
+      source: 'traccar',
+      group_id: testGroupId,
+    });
+
+    await db('users').where({ username: 'top_km_customer' }).delete();
+    await request(app)
+      .post('/api/users')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        username: 'top_km_customer',
+        email: 'topkm@example.com',
+        firstName: 'Top',
+        lastName: 'KM',
+        password: 'pass123',
+        confirmPassword: 'pass123',
+        role: 'customer',
+        groups: [testGroupId],
+        timezone: 'Asia/Jakarta',
+      });
+
+    const custLogin = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'top_km_customer', password: 'pass123' });
+    customerToken = custLogin.body.token;
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mspf.getBcStatsReports.mockResolvedValue([]);
+  });
+
+  afterAll(async () => {
+    await db('users').where({ username: 'top_km_customer' }).delete();
+    await db('device_groups').where({ device_id: testDevId, source: 'traccar' }).delete();
+    await db('groups').where({ id: testGroupId }).delete();
+  });
+
+  test('GET /api/reports/top-distance without token returns 401', async () => {
+    const res = await request(app).get('/api/reports/top-distance');
+    expect(res.status).toBe(401);
+  });
+
+  test('GET /api/reports/top-distance returns ranked top devices for admin', async () => {
+    traccar.getReportSummary.mockResolvedValue([
+      { deviceId: testDevId, deviceName: 'Traccar Truck 1', distance: 150.2, duration: 3600 },
+      { deviceId: 888802, deviceName: 'Traccar Truck 2', distance: 280.8, duration: 7200 },
+    ]);
+    mspf.getStatsSummary.mockResolvedValue({
+      data: [{ deviceId: 777701, totalMileage: 320.5, totalDrivingTime: 9000 }],
+    });
+
+    const res = await request(app)
+      .get('/api/reports/top-distance?refresh=true')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.period.hours).toBe(24);
+    expect(Array.isArray(res.body.topDevices)).toBe(true);
+    expect(res.body.topDevices.length).toBeGreaterThanOrEqual(3);
+
+    const top = res.body.topDevices;
+    expect(top[0].rank).toBe(1);
+    expect(top[0].distance).toBeGreaterThanOrEqual(top[1].distance);
+    expect(top[1].distance).toBeGreaterThanOrEqual(top[2].distance);
+
+    expect(top[0].deviceId).toBe(777701);
+    expect(top[0].distance).toBe(320.5);
+    expect(top[1].deviceId).toBe(888802);
+    expect(top[1].distance).toBe(280.8);
+    expect(top[2].deviceId).toBe(testDevId);
+    expect(top[2].distance).toBe(150.2);
+  });
+
+  test('GET /api/reports/top-distance with limit=2 limits result count', async () => {
+    const res = await request(app)
+      .get('/api/reports/top-distance?limit=2')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.topDevices.length).toBe(2);
+    expect(res.body.topDevices[0].rank).toBe(1);
+    expect(res.body.topDevices[1].rank).toBe(2);
+  });
+
+  test('GET /api/reports/top-mileage is an alias and returns the same structure', async () => {
+    const res = await request(app)
+      .get('/api/reports/top-mileage')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.topDevices).toBeDefined();
+    expect(res.body.period.hours).toBe(24);
+  });
+
+  test('GET /api/reports/top-distance filters to customer assigned devices only', async () => {
+    const res = await request(app)
+      .get('/api/reports/top-distance')
+      .set('Authorization', `Bearer ${customerToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.topDevices.length).toBe(1);
+    expect(res.body.topDevices[0].deviceId).toBe(testDevId);
+    expect(res.body.topDevices[0].rank).toBe(1);
+  });
+
+  test('GET /api/reports/top-distance with invalid group returns 404', async () => {
+    const res = await request(app)
+      .get('/api/reports/top-distance?group=999999')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('ERR_NOT_FOUND');
+  });
+
+  test('GET /api/reports/top-distance with unassigned group for customer returns 403', async () => {
+    // Create another group unassigned to customer
+    const grp = await request(app)
+      .post('/api/admin/groups')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'unassigned_top_km_grp' });
+    const unassignedId = grp.body.id;
+
+    const res = await request(app)
+      .get(`/api/reports/top-distance?group=${unassignedId}`)
+      .set('Authorization', `Bearer ${customerToken}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('ERR_FORBIDDEN');
+
+    await db('groups').where({ id: unassignedId }).delete();
   });
 });
 

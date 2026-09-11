@@ -108,7 +108,7 @@ router.get('/', async (req, res, next) => {
           eventTime: toUtcIso(e.eventTime),
           status: null,
           deviceId: e.deviceId,
-          source: 'traccar',
+          ...(isAdmin ? { source: 'traccar' } : {}),
         });
         if (recentEvents.length >= 10) break;
       }
