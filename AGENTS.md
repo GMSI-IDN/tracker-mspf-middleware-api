@@ -56,6 +56,19 @@ Gunakan **Context7 MCP** (`context7_resolve-library-id` + `context7_query-docs`)
    - Untuk tabel yang sudah memiliki data, penambahan kolom baru **wajib** memiliki `defaultTo(...)` atau `nullable()`.
    - Selalu sertakan fungsi `exports.down` untuk keselamatan rollback.
 
+## Invariant: Custom Groups Hybrid Sync & Strict Customer Deduplication
+
+1. **Hybrid Container Groups:**
+   - Satu custom group (`groups`) dapat berisi kendaraan dari **lebih dari 1 aturan sinkronisasi** (`group_sync_rules` dari Traccar Group maupun MSPF BC) **DAN** dapat digabung dengan **penambahan kendaraan mandiri secara manual** (`device_groups`).
+2. **Multi-Group Customer Scoping & Strict Deduplication:**
+   - Pengguna level `customer` dapat memiliki lebih dari 1 custom group (`user.groups = [1, 2]`).
+   - Jika terdapat kendaraan yang sama yang terdaftar di lebih dari 1 grup milik customer (overlap/irisan), pada daftar kendaraan `GET /api/devices`:
+     - Kendaraan tersebut **WAJIB HANYA MUNCUL 1 KALI** (ter-deduplikasi secara ketat).
+     - Atribut `customGroups` pada kendaraan tersebut memuat seluruh grup milik customer tempat kendaraan itu terdaftar (`[ { id: 1, name: "Group A" }, { id: 2, name: "Group B" } ]`).
+3. **Single Source of Truth (`devices:merged` Cache):**
+   - Query `GET /api/devices` (baik global maupun berparameter `?group=X`) **selalu membaca dari in-memory cache `devices:merged`**, TIDAK BOLEH melakukan fetch HTTP lambat/N+1 ke server upstream.
+   - Pembangunan cache wajib meng-await `mspf.waitForInit()` dan `foxlogger.waitForInit()`.
+
 ## Invariant: Role-Based Upstream Vendor Sanitization (White-Label Customer View)
 
 Gateway ini berfungsi sebagai **Unified GPS Facade** atas multi-vendor upstream (`traccar`, `mspf`, `foxlogger`).

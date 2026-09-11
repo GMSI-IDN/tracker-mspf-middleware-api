@@ -4,6 +4,26 @@
 
 ## 2026-09-10
 
+### Custom Groups Hybrid Sync, Deduplication & Performance Consolidation
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **Bug Fix Device Sync Listing** — `src/routes/devices.js`: memperbaiki kegagalan inisialisasi MSPF/FoxLogger pada pembuatan cache dengan menambahkan `waitForInit()`, memastikan seluruh kendaraan hasil sinkronisasi selalu termuat lengkap ke cache sentral | `src/routes/devices.js` |
+| ~now | **Eliminasi N+1 Query & Fast Group Filter** — Menghapus percabangan HTTP loop lambat di `GET /api/devices?group=X`. Seluruh query filter grup kini ditarik langsung dari in-memory cache `devices:merged` (<2ms) dengan konsistensi penempelan `customGroups`, `metadata`, `liveStatus`, dan `engineControl` | `src/routes/devices.js` |
+| ~now | **Strict Customer Deduplication** — Jika customer memiliki beberapa custom group yang memuat kendaraan yang sama (overlap via multi-sync atau add mandiri), kendaraan dijamin **hanya muncul 1 kali** di list dengan field `customGroups` yang memuat seluruh grup miliknya | `src/routes/devices.js` |
+| ~now | **Auto-Sync Service Fixes** — `src/services/autoSync.js`: `fetchMspfDevices` meng-await `mspf.waitForInit()`; `fetchTraccarDevices` memfilter secara akurat `d.groupId === groupId`; eksekusi instan ditrigger saat rule dibuat di `POST /api/admin/group-sync` | `src/services/autoSync.js`, `src/routes/groupSync.js`, `src/server.js` |
+| ~now | **Test Suite** — 4 unit & integration tests baru di `src/__tests__/customGroupSync.test.js` memverifikasi multi-sync, add mandiri, deduplikasi kendaraan, dan trigger sinkronisasi instan (total 238 test pass) | `src/__tests__/customGroupSync.test.js` |
+
+### Unified Command Mapping & MSPF engineResume Bug Fix
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **Bug Fix MSPF engineResume** — `src/routes/commands.js`: memperbaiki bug di mana perintah `type: "engineResume"` dievaluasi salah oleh ternary `type === 'activate' ? 'ACTIVE' : 'INACTIVE'` sehingga tidak sengaja mengirim `INACTIVE` ke MSPF. Kini menggunakan set `ENGINE_RESUME_TYPES` (`engineResume`, `activate`, `ACTIVE`) yang dijamin memanggil `mspf.activateDevice(id, 'ACTIVE')` | `src/routes/commands.js` |
+| ~now | **Bidirectional Command Translation** — Gateway otomatis menerjemahkan perintah secara dua arah: FE dapat mengirim perintah standar telematika (`engineResume` / `engineStop`) ke seluruh kendaraan lintas provider tanpa perlu membedakan vendor | `src/routes/commands.js` |
+| ~now | **Safety Guard for Unsupported Commands** — Menolak perintah selain aktivasi/deaktivasi pada perangkat MSPF dengan `400 ERR_NOT_SUPPORTED` untuk mencegah deactivation yang tidak diinginkan | `src/routes/commands.js` |
+| ~now | **Unified `GET /types/:deviceId`** — Perangkat MSPF kini mengembalikan `['engineResume', 'engineStop', 'activate', 'deactivate']` sehingga tim FE memiliki konsistensi nama perintah yang sama untuk semua armada | `src/routes/commands.js` |
+| ~now | **Test Suite** — 7 unit & integration tests baru di `src/__tests__/commands.test.js` memverifikasi terjemahan `engineResume` $\rightarrow$ `'ACTIVE'` di MSPF, `engineStop` $\rightarrow$ `'INACTIVE'` di MSPF, legacy fallback, dan error handling (total 234 test pass) | `src/__tests__/commands.test.js` |
+
 ### Dynamic Database Switching (SQLite & PostgreSQL) & Production Startup Safety
 
 | Waktu | Perubahan | File |

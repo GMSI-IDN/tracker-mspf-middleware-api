@@ -42,6 +42,8 @@ jest.mock('../services/customAttributes', () => ({
 const db = require('../db');
 const deviceRouter = require('../services/deviceRouter');
 const cache = require('../services/cache');
+const mspf = require('../services/mspf');
+const traccar = require('../services/traccar');
 const app = require('../app');
 
 describe('Vehicle Commands, Permissions & Audit Trail', () => {
@@ -139,6 +141,8 @@ describe('Vehicle Commands, Permissions & Audit Trail', () => {
     cache.del('debounce:cmd:traccar:1001');
     cache.del('debounce:cmd:mspf:2001');
     cache.del('debounce:cmd:traccar:9999');
+    mspf.activateDevice.mockClear();
+    traccar.sendCommand.mockClear();
   });
 
   afterAll(async () => {
@@ -331,6 +335,118 @@ describe('Vehicle Commands, Permissions & Audit Trail', () => {
         .set('Authorization', `Bearer ${customerTokenWithCut}`);
 
       expect(res.status).toBe(403);
+    });
+  });
+
+  describe('Unified Commands Mapping across Providers (MSPF & Traccar)', () => {
+    test('POST /api/commands with type: engineResume on MSPF device sends ACTIVE to MSPF', async () => {
+      const res = await request(app)
+        .post('/api/commands')
+        .set('Authorization', `Bearer ${customerTokenWithCut}`)
+        .send({
+          deviceId: 2001,
+          type: 'engineResume',
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.commandType).toBe('engineResume');
+      expect(mspf.activateDevice).toHaveBeenCalledWith(2001, 'ACTIVE');
+      expect(res.body.engineControl).toEqual({
+        desired: 'ACTIVE',
+        state: 'ACTIVATING',
+        isApplied: false,
+        lastAppliedAt: null,
+      });
+    });
+
+    test('POST /api/commands with type: engineStop on MSPF device sends INACTIVE to MSPF', async () => {
+      const res = await request(app)
+        .post('/api/commands')
+        .set('Authorization', `Bearer ${customerTokenWithCut}`)
+        .send({
+          deviceId: 2001,
+          type: 'engineStop',
+          confirm: true,
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.commandType).toBe('engineStop');
+      expect(mspf.activateDevice).toHaveBeenCalledWith(2001, 'INACTIVE');
+      expect(res.body.engineControl).toEqual({
+        desired: 'INACTIVE',
+        state: 'DEACTIVATING',
+        isApplied: false,
+        lastAppliedAt: null,
+      });
+    });
+
+    test('POST /api/commands with legacy type: activate on MSPF device sends ACTIVE to MSPF', async () => {
+      const res = await request(app)
+        .post('/api/commands')
+        .set('Authorization', `Bearer ${customerTokenWithCut}`)
+        .send({
+          deviceId: 2001,
+          type: 'activate',
+        });
+
+      expect(res.status).toBe(200);
+      expect(mspf.activateDevice).toHaveBeenCalledWith(2001, 'ACTIVE');
+    });
+
+    test('POST /api/commands with legacy type: deactivate on MSPF device sends INACTIVE to MSPF', async () => {
+      const res = await request(app)
+        .post('/api/commands')
+        .set('Authorization', `Bearer ${customerTokenWithCut}`)
+        .send({
+          deviceId: 2001,
+          type: 'deactivate',
+          confirm: true,
+        });
+
+      expect(res.status).toBe(200);
+      expect(mspf.activateDevice).toHaveBeenCalledWith(2001, 'INACTIVE');
+    });
+
+    test('POST /api/commands with legacy type: activate on Traccar device translates to engineResume', async () => {
+      const res = await request(app)
+        .post('/api/commands')
+        .set('Authorization', `Bearer ${customerTokenWithCut}`)
+        .send({
+          deviceId: 1001,
+          type: 'activate',
+        });
+
+      expect(res.status).toBe(200);
+      expect(traccar.sendCommand).toHaveBeenCalledWith(expect.objectContaining({
+        deviceId: 1001,
+        type: 'engineResume',
+      }));
+    });
+
+    test('POST /api/commands with unsupported command on MSPF returns 400 ERR_NOT_SUPPORTED', async () => {
+      const res = await request(app)
+        .post('/api/commands')
+        .set('Authorization', `Bearer ${customerTokenWithCut}`)
+        .send({
+          deviceId: 2001,
+          type: 'customUnsupportedCommand',
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('ERR_NOT_SUPPORTED');
+      expect(mspf.activateDevice).not.toHaveBeenCalled();
+    });
+
+    test('GET /types on MSPF device returns unified engineResume and engineStop', async () => {
+      const res = await request(app)
+        .get('/api/commands/types/2001')
+        .set('Authorization', `Bearer ${customerTokenWithCut}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.types).toContain('engineResume');
+      expect(res.body.types).toContain('engineStop');
     });
   });
 
