@@ -176,6 +176,7 @@ Authorization: Bearer <token>
 > 
 > **Aturan Custom Groups & Deduplikasi:**
 > - Satu custom group dapat memuat kendaraan dari **lebih dari 1 aturan sinkronisasi** (Traccar / MSPF) digabung dengan **tambah unit mandiri**.
+> - **Pemisahan Add Mandiri vs Group Sync:** Perangkat hasil group sync terhubung secara dinamis dan tidak dimasukkan ke dalam daftar perangkat manual (tidak dapat dihapus per unit di UI custom group). Jika aturan sync dihapus dari custom group, seluruh perangkat terkait otomatis hilang seketika.
 > - Jika customer memiliki beberapa custom group yang memiliki kendaraan yang sama (overlap), kendaraan tersebut **dijamin hanya muncul 1 kali** di list kendaraan, dengan atribut `customGroups` yang mencantumkan semua grup miliknya.
 > - Field `source` dan vendor `group` hanya tampil untuk akun **admin** (digunakan untuk pengelompokan teknis di Dashboard Admin).
 

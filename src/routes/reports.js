@@ -11,6 +11,7 @@ const { toUtcIso, toUtcDateStr, startOfDayIso } = require('../utils/timestamp');
 const { buildSeries } = require('../utils/periodStats');
 const { applyRules, enrichWithRules, getDeviceRules } = require('../services/customAttributes');
 const { sanitizePositions, sanitizeReportItems } = require('../utils/sanitizer');
+const { isDeviceAllowedForGroups, getAllowedDeviceKeys } = require('../services/groupMembership');
 
 const router = express.Router();
 
@@ -89,8 +90,8 @@ router.get('/route', async (req, res, next) => {
     if (req.user.role !== 'admin') {
       if (!req.user.groups?.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
       const deviceLookupId = devSource === 'foxlogger' ? deviceId : idNum;
-      const dg = await db('device_groups').where({ device_id: deviceLookupId, source: devSource }).whereIn('group_id', req.user.groups).first();
-      if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+      const allowed = await isDeviceAllowedForGroups(deviceLookupId, devSource, req.user.groups);
+      if (!allowed) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
     }
 
     if (devSource === 'mspf' && effectiveFrom && effectiveTo) {
@@ -178,8 +179,8 @@ router.get('/parking', async (req, res, next) => {
 
     if (req.user.role !== 'admin') {
       if (!req.user.groups?.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
-      const dg = await db('device_groups').where({ device_id: idNum, source: devSource }).whereIn('group_id', req.user.groups).first();
-      if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+      const allowed = await isDeviceAllowedForGroups(idNum, devSource, req.user.groups);
+      if (!allowed) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
     }
 
     let parking;
@@ -291,8 +292,8 @@ router.get('/idle', async (req, res, next) => {
 
     if (req.user.role !== 'admin') {
       if (!req.user.groups?.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
-      const dg = await db('device_groups').where({ device_id: idNum, source: devSource }).whereIn('group_id', req.user.groups).first();
-      if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+      const allowed = await isDeviceAllowedForGroups(idNum, devSource, req.user.groups);
+      if (!allowed) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
     }
 
     let idle;
@@ -401,8 +402,8 @@ router.get('/trips', async (req, res, next) => {
 
     if (req.user.role !== 'admin') {
       if (!req.user.groups?.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
-      const dg = await db('device_groups').where({ device_id: idNum, source: devSource }).whereIn('group_id', req.user.groups).first();
-      if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+      const allowed = await isDeviceAllowedForGroups(idNum, devSource, req.user.groups);
+      if (!allowed) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
     }
 
     let trips;
@@ -615,7 +616,11 @@ router.get('/summary', async (req, res, next) => {
         const groupInfo = await db('groups').where({ id: groupId }).first();
         if (!groupInfo) throw createError(404, 'Group not found', { code: 'ERR_NOT_FOUND' });
         if (!isAdmin && !userGroups.includes(groupId)) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
-        const dgs = await db('device_groups').where({ group_id: groupId }).select('device_id', 'source');
+        const allowedKeys = await getAllowedDeviceKeys([groupId]);
+        const dgs = Array.from(allowedKeys).map(k => {
+          const [s, id] = k.split(':');
+          return { device_id: parseInt(id, 10), source: s };
+        });
         const items = await collectGroupSummaryItems(dgs, fromIso, toIso);
         const seriesData = buildSeries(items, fromIso, toIso, granularity);
         return res.json({
@@ -640,8 +645,8 @@ router.get('/summary', async (req, res, next) => {
       if (!isAdmin) {
         if (!userGroups.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
         const lookupId = devSource === 'foxlogger' ? idStr : idNum;
-        const dg = await db('device_groups').where({ device_id: lookupId, source: devSource }).whereIn('group_id', userGroups).first();
-        if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+        const allowed = await isDeviceAllowedForGroups(lookupId, devSource, userGroups);
+        if (!allowed) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
       }
 
       let items;
@@ -675,8 +680,11 @@ router.get('/summary', async (req, res, next) => {
       let deviceIds = [];
       if (!isAdmin) {
         if (userGroups.length > 0) {
-          const dgs = await db('device_groups').whereIn('group_id', userGroups).select('device_id', 'source');
-          deviceIds = dgs.map(d => ({ id: d.device_id, source: d.source }));
+          const allowedKeys = await getAllowedDeviceKeys(userGroups);
+          deviceIds = Array.from(allowedKeys).map(k => {
+            const [s, id] = k.split(':');
+            return { id: parseInt(id, 10), source: s };
+          });
         }
       }
 
@@ -728,8 +736,8 @@ router.get('/summary', async (req, res, next) => {
 
     if (req.user.role !== 'admin') {
       if (!req.user.groups?.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
-      const dg = await db('device_groups').where({ device_id: idNum, source: devSource }).whereIn('group_id', req.user.groups).first();
-      if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+      const allowed = await isDeviceAllowedForGroups(idNum, devSource, req.user.groups);
+      if (!allowed) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
     }
 
     if (devSource === 'traccar') {
@@ -952,34 +960,14 @@ router.get(['/top-distance', '/top-mileage'], async (req, res, next) => {
       if (!isAdmin && !userGroups.includes(groupId)) {
         throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
       }
-      const dgs = await db('device_groups').where({ group_id: groupId }).select('device_id', 'source');
-      const grpKeys = new Set(dgs.filter(m => m.source !== 'foxlogger').map(m => `${m.source}:${m.device_id}`));
-      const foxGrpKeys = new Set(dgs.filter(m => m.source === 'foxlogger').map(m => String(m.device_id)));
-      filtered = filtered.filter(d => {
-        if (d.source !== 'foxlogger') return grpKeys.has(`${d.source}:${d.deviceId}`);
-        if (foxGrpKeys.has(String(d.deviceId))) return true;
-        if (foxlogger.resolveImei) {
-          const imei = foxlogger.resolveImei(d.deviceId);
-          if (imei && foxGrpKeys.has(String(imei))) return true;
-        }
-        return false;
-      });
+      const allowedKeys = await getAllowedDeviceKeys([groupId]);
+      filtered = filtered.filter(d => allowedKeys.has(`${d.source}:${d.deviceId}`));
     } else if (!isAdmin) {
       if (userGroups.length === 0) {
         filtered = [];
       } else {
-        const mappings = await db('device_groups').whereIn('group_id', userGroups).select('device_id', 'source');
-        const allowedKeys = new Set(mappings.filter(m => m.source !== 'foxlogger').map(m => `${m.source}:${m.device_id}`));
-        const foxAllowed = new Set(mappings.filter(m => m.source === 'foxlogger').map(m => String(m.device_id)));
-        filtered = filtered.filter(d => {
-          if (d.source !== 'foxlogger') return allowedKeys.has(`${d.source}:${d.deviceId}`);
-          if (foxAllowed.has(String(d.deviceId))) return true;
-          if (foxlogger.resolveImei) {
-            const imei = foxlogger.resolveImei(d.deviceId);
-            if (imei && foxAllowed.has(String(imei))) return true;
-          }
-          return false;
-        });
+        const allowedKeys = await getAllowedDeviceKeys(userGroups);
+        filtered = filtered.filter(d => allowedKeys.has(`${d.source}:${d.deviceId}`));
       }
     }
 
@@ -1051,8 +1039,8 @@ router.get('/events', async (req, res, next) => {
 
       if (!isAdmin) {
         if (!userGroups.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
-        const dg = await db('device_groups').where({ device_id: idNum, source: devSource }).whereIn('group_id', userGroups).first();
-        if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+        const allowed = await isDeviceAllowedForGroups(idNum, devSource, userGroups);
+        if (!allowed) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
       }
 
       let events = [];
@@ -1153,9 +1141,8 @@ router.get('/events', async (req, res, next) => {
     if (!isAdmin) {
       if (userGroups.length === 0) { events = []; }
       else {
-        const dgs = await db('device_groups').whereIn('group_id', userGroups).select('device_id', 'source');
-        const allowed = new Set(dgs.map(d => `${d.source}:${d.device_id}`));
-        events = events.filter(e => allowed.has(`${e.source}:${e.deviceId}`));
+        const allowedKeys = await getAllowedDeviceKeys(userGroups);
+        events = events.filter(e => allowedKeys.has(`${e.source}:${e.deviceId}`));
       }
     }
 

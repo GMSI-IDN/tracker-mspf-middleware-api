@@ -152,18 +152,24 @@ describe('Custom Groups: Multi-Sync Rules, Manual Add & Customer Deduplication',
     await db('users').where({ username: 'cust_multigroup' }).delete();
   });
 
-  test('Auto-sync populates multi-sync rules and ignores non-matching group devices', async () => {
-    const groupADevices = await db('device_groups').where({ group_id: groupAId }).select('*');
-    // Group A should have: 9101 (traccar), 9102 (traccar), 9201 (mspf), 9202 (mspf), 9301 (foxlogger manual)
-    const deviceIds = groupADevices.map(d => d.device_id);
-    expect(deviceIds).toContain(9101);
-    expect(deviceIds).toContain(9102);
-    expect(deviceIds).toContain(9201);
-    expect(deviceIds).toContain(9202);
-    expect(deviceIds).toContain(9301);
-    // Should NOT contain 9103 (Traccar group 99) or 9203 (MSPF BC 30)
-    expect(deviceIds).not.toContain(9103);
-    expect(deviceIds).not.toContain(9203);
+  test('Group A holds manual additions in device_groups, while synced devices are dynamic', async () => {
+    // device_groups holds strictly manual additions (9301)
+    const manualDevices = await db('device_groups').where({ group_id: groupAId }).select('*');
+    expect(manualDevices.map(d => d.device_id)).toEqual([9301]);
+
+    // But when queried through devices API, all 5 devices (synced + manual) are resolved!
+    const resA = await request(app)
+      .get(`/api/devices?group=${groupAId}`)
+      .set('Authorization', `Bearer ${customerToken}`);
+    expect(resA.status).toBe(200);
+    const idsA = resA.body.devices.map(d => d.id);
+    expect(idsA).toContain(9101);
+    expect(idsA).toContain(9102);
+    expect(idsA).toContain(9201);
+    expect(idsA).toContain(9202);
+    expect(idsA).toContain(9301);
+    expect(idsA).not.toContain(9103);
+    expect(idsA).not.toContain(9203);
   });
 
   test('Customer GET /api/devices strictly deduplicates overlapping devices across groups', async () => {
@@ -235,7 +241,7 @@ describe('Custom Groups: Multi-Sync Rules, Manual Add & Customer Deduplication',
     expect(idsB).not.toContain(9301);
   });
 
-  test('POST /api/admin/group-sync immediately triggers auto-sync into device_groups', async () => {
+  test('POST /api/admin/group-sync immediately makes synced devices accessible without dumping into device_groups', async () => {
     // Create new custom group C
     const groupCId = 9300;
     await db('groups').insert({
@@ -256,15 +262,19 @@ describe('Custom Groups: Multi-Sync Rules, Manual Add & Customer Deduplication',
 
       expect(createRes.status).toBe(201);
 
-      // Wait a tiny tick for async sync to finish
-      await new Promise(r => setTimeout(r, 200));
+      // Verify synced devices do NOT pollute device_groups (strictly manual adds table)
+      const groupCDevicesInDb = await db('device_groups').where({ group_id: groupCId }).select('*');
+      expect(groupCDevicesInDb.length).toBe(0);
 
-      // Verify devices are immediately synced into device_groups for Group C!
-      const groupCDevices = await db('device_groups').where({ group_id: groupCId }).select('*');
-      expect(groupCDevices.length).toBeGreaterThanOrEqual(2);
-      const ids = groupCDevices.map(d => d.device_id);
-      expect(ids).toContain(9101);
-      expect(ids).toContain(9102);
+      // Verify devices are immediately accessible dynamically via devices API for Group C!
+      const resC = await request(app)
+        .get(`/api/devices?group=${groupCId}`)
+        .set('Authorization', `Bearer ${adminToken}`);
+      expect(resC.status).toBe(200);
+      const idsC = resC.body.devices.map(d => d.id);
+      expect(idsC).toContain(9101);
+      expect(idsC).toContain(9102);
+      expect(idsC).not.toContain(9103);
     } finally {
       await db('group_sync_rules').where({ middleware_group_id: groupCId }).delete();
       await db('device_groups').where({ group_id: groupCId }).delete();

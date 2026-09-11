@@ -209,6 +209,26 @@
 | **Filter `?type=` server-side** — simetris dengan `?status=`/`?name=` (opsional, ikut saat implementasi events) | ⬜ Backlog |
 | **FoxLogger live speed/course 0** — limitasi source (`report-position` tidak sediakan kecepatan/arah); marker statis untuk **live** — sudah dikomunikasikan ke FE. (Playback kini punya `course`+`nopol` via `report-rollback`.) | ✅/partial |
 
+## Phase 12 — Live Group Session Continuity & Non-Disruptive Assignment: ✅
+
+| Task | Status |
+|------|--------|
+| **Eliminasi Force Logout Saat Edit Group** — Penambahan/pengurangan custom group pada user tidak lagi memicu token revocation (`token_version` stabil) | ✅ |
+| **Live Group Resolution di Auth Middleware** — `authMiddleware` meng-overlay `authStatus.groups` dan `authStatus.permissions` terkini ke `req.user` secara live | ✅ |
+| **Real-Time WebSocket Group Reload** — `refreshUserSockets(userId)` memperbarui `socket.allowedDevices` dan `socket.user.groups` tanpa memutus koneksi socket | ✅ |
+| **Integration Tests** — 2 test di `src/__tests__/liveUserGroups.test.js` memverifikasi sesi tetap aktif saat grup diubah (total 244 test pass) | ✅ |
+
+## Phase 11 — Dynamic Linked Sync Groups vs Manual Devices & Privilege Hardening: ✅
+
+| Task | Status |
+|------|--------|
+| **Group Membership Service (`src/services/groupMembership.js`)** — Pemisahan ketat Add Mandiri (`device_groups`) dan Dynamic Linked Sync (`group_sync_rules`) | ✅ |
+| **No Unintended Deletions** — Perangkat sync tidak lagi di-dump ke `device_groups`; di UI Admin hanya perangkat manual yang memiliki tombol delete | ✅ |
+| **Instant Dynamic Unlink** — Menghapus aturan sync di `DELETE /api/admin/group-sync/:id` seketika mencabut seluruh perangkat terkait tanpa residu | ✅ |
+| **Privilege Security Hardening** — Pengetatan akses ketat di seluruh endpoint (`devices`, `positions`, `commands`, `reports`, `dashboard`, `websocket`) | ✅ |
+| **Accurate Custom Group Device Count** — `GET /api/groups` menghitung total kendaraan aktual secara real-time | ✅ |
+| **Integration Tests** — 4 test di `src/__tests__/groupMembershipPrivilege.test.js` memverifikasi pencegahan kebocoran hak akses (total 242 test pass) | ✅ |
+
 ## Phase 10 — Custom Groups Hybrid Sync, Deduplication & Performance Consolidation: ✅
 
 | Task | Status |

@@ -15,6 +15,10 @@ const { statusTracker } = require('../utils/liveStatus');
 const { mergeMetadataBlobs } = require('../utils/deviceMetadata');
 const { sanitizeDevice, sanitizeDevices } = require('../utils/sanitizer');
 const { deriveEngineControl } = require('../utils/engineControl');
+const {
+  enrichAndFilterDevices,
+  isDeviceAllowedForGroups,
+} = require('../services/groupMembership');
 
 const router = express.Router();
 
@@ -154,28 +158,8 @@ router.get('/', async (req, res, next) => {
     // 2. Fetch or retrieve merged device list from cache (fast & single source of truth)
     const allDevices = await getOrBuildDeviceCache();
 
-    // 3. Filter devices by group mappings with strict deduplication
-    let filtered;
-    if (targetGroupIds) {
-      const mappings = await db('device_groups')
-        .whereIn('group_id', targetGroupIds)
-        .select('device_id', 'source');
-      if (mappings.length === 0) {
-        return res.json({ devices: [], total: 0, offset: offsetNum, limit: limitNum });
-      }
-
-      const allowedKeys = new Set(mappings.map(m => `${m.source}:${m.device_id}`));
-      const foxAllowed = new Set(mappings.filter(m => m.source === 'foxlogger').map(m => String(m.device_id)));
-
-      // Since allDevices contains unique (source:id) records, filtering preserves strict deduplication
-      filtered = allDevices.filter(d => {
-        if (allowedKeys.has(`${d.source}:${d.id}`)) return true;
-        if (d.source === 'foxlogger' && (foxAllowed.has(String(d.id)) || foxAllowed.has(String(d.uniqueId)))) return true;
-        return false;
-      });
-    } else {
-      filtered = allDevices;
-    }
+    // 3. Filter devices by group memberships (both manual additions & dynamic sync rules) with strict deduplication
+    let filtered = await enrichAndFilterDevices(allDevices, targetGroupIds, isAdmin && !targetGroupIds);
 
     if (source) filtered = filtered.filter(d => d.source === source);
     if (status) filtered = filtered.filter(d => d.status === status);
@@ -196,32 +180,6 @@ router.get('/', async (req, res, next) => {
       }
     }
 
-    // 5. Enrich with custom groups (returns all custom groups this device belongs to)
-    if (paged.length > 0) {
-      const ids = paged.map(d => d.id);
-      const sources = [...new Set(paged.map(d => d.source))];
-      const dgs = await db('device_groups')
-        .whereIn('device_id', ids)
-        .whereIn('source', sources)
-        .join('groups', 'device_groups.group_id', 'groups.id')
-        .select('device_groups.device_id', 'device_groups.source', 'groups.id as gid', 'groups.name as gname')
-        .modify((qb) => {
-          if (!isAdmin) {
-            if (userGroups.length > 0) qb.whereIn('group_id', userGroups);
-            else qb.where('group_id', -1);
-          }
-        });
-      const map = {};
-      for (const r of dgs) {
-        const k = `${r.source}:${r.device_id}`;
-        if (!map[k]) map[k] = [];
-        if (!map[k].some(g => g.id === r.gid)) {
-          map[k].push({ id: r.gid, name: r.gname });
-        }
-      }
-      for (const d of paged) d.customGroups = map[`${d.source}:${d.id}`] || [];
-    }
-
     await enrichMetadata(paged);
     overlayLiveStatus(paged);
     attachEngineControl(paged);
@@ -237,8 +195,19 @@ router.get('/:id', async (req, res, next) => {
     const deviceId = parseInt(req.params.id, 10);
     const userGroups = req.user.groups || [];
     const isAdmin = req.user.role === 'admin';
-    const devSource = source || (group ? deviceRouter.resolveGroup(group)?.source : null) || deviceRouter.getSourceByDeviceId(deviceId);
+    let devSource = source || (group ? deviceRouter.resolveGroup(group)?.source : null) || deviceRouter.getSourceByDeviceId(deviceId);
+    if (!devSource) {
+      await getOrBuildDeviceCache();
+      devSource = deviceRouter.getSourceByDeviceId(deviceId);
+    }
     if (!devSource) throw createError(404, 'Device not found', { code: 'ERR_NOT_FOUND' });
+
+    // Enforce customer privilege check (supports both manual additions & dynamic sync rules)
+    if (!isAdmin) {
+      if (!userGroups.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+      const allowed = await isDeviceAllowedForGroups(deviceId, devSource, userGroups);
+      if (!allowed) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+    }
 
     let device;
     if (devSource === 'traccar') {
@@ -266,13 +235,10 @@ router.get('/:id', async (req, res, next) => {
       }
     }
 
-    // Enrich with custom groups
-    const dgs = await db('device_groups')
-      .where({ device_id: device.id, source: device.source })
-      .join('groups', 'device_groups.group_id', 'groups.id')
-      .select('groups.id as gid', 'groups.name as gname')
-      .modify((qb) => { if (!isAdmin) { if (userGroups.length > 0) qb.whereIn('group_id', userGroups); else qb.where('group_id', -1); } });
-    device.customGroups = dgs.map(r => ({ id: r.gid, name: r.gname }));
+    // Enrich single device with custom groups (supports both manual & sync)
+    const enrichedSingle = await enrichAndFilterDevices([device], null, isAdmin);
+    device.customGroups = (enrichedSingle[0]?.customGroups || []).filter(g => isAdmin || userGroups.includes(g.id));
+
     await enrichMetadata([device]);
     overlayLiveStatus([device]);
     attachEngineControl([device]);
@@ -307,8 +273,8 @@ router.put('/:id/metadata',
 
       if (!isAdmin) {
         if (!userGroups.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
-        const dg = await db('device_groups').where({ device_id: deviceId, source: devSource }).whereIn('group_id', userGroups).first();
-        if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+        const allowed = await isDeviceAllowedForGroups(deviceId, devSource, userGroups);
+        if (!allowed) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
       }
 
       await db('device_metadata')
@@ -350,8 +316,8 @@ router.delete('/:id/metadata', async (req, res, next) => {
 
     if (!isAdmin) {
       if (!userGroups.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
-      const dg = await db('device_groups').where({ device_id: deviceId, source: devSource }).whereIn('group_id', userGroups).first();
-      if (!dg) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+      const allowed = await isDeviceAllowedForGroups(deviceId, devSource, userGroups);
+      if (!allowed) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
     }
 
     const deleted = await db('device_metadata').where({ device_id: deviceId, source: devSource, owner }).delete();

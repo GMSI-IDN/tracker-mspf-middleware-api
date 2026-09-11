@@ -5,6 +5,7 @@ const db = require('../db');
 const traccar = require('../services/traccar');
 const mspf = require('../services/mspf');
 const { runAutoSync } = require('../services/autoSync');
+const { invalidateSyncRulesCache } = require('../services/groupMembership');
 const validate = require('../middleware/validate');
 
 function normalizeRule(r) {
@@ -84,6 +85,7 @@ router.delete('/:id', async (req, res, next) => {
     const rule = await db('group_sync_rules').where({ id: req.params.id }).first();
     if (!rule) throw createError(404, 'Rule not found', { code: 'ERR_NOT_FOUND' });
     await db('group_sync_rules').where({ id: req.params.id }).del();
+    invalidateSyncRulesCache();
     res.json({ message: 'Rule deleted' });
   } catch (err) {
     next(err);

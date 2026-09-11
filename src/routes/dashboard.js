@@ -4,6 +4,7 @@ const mspf = require('../services/mspf');
 const cache = require('../services/cache');
 const db = require('../db');
 const { toUtcIso } = require('../utils/timestamp');
+const { getAllowedDeviceKeys } = require('../services/groupMembership');
 
 const router = express.Router();
 
@@ -53,8 +54,7 @@ router.get('/', async (req, res, next) => {
       if (userGroups.length === 0) {
         allowedDevices = new Set();
       } else {
-        const dgs = await db('device_groups').whereIn('group_id', userGroups).select('device_id', 'source');
-        allowedDevices = new Set(dgs.map(d => `${d.source}:${d.device_id}`));
+        allowedDevices = await getAllowedDeviceKeys(userGroups);
       }
     }
 

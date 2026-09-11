@@ -2,6 +2,29 @@
 
 > Semua perubahan signifikan dicatat di file ini.
 
+## 2026-09-11
+
+### Live Group Session Continuity & Non-Disruptive Customer Group Assignment
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **Eliminasi Force Logout Saat Edit Group** — `src/routes/users.js`: admin menambahkan/mengubah `groups` pada akun customer tidak lagi memicu `token_version` bump ataupun pencabutan token (`shouldRevokeTokens` kini hanya aktif jika password diubah, akun dinonaktifkan, atau nilai permission berubah secara riil) | `src/routes/users.js` |
+| ~now | **Live Group Resolution di Auth Middleware** — `src/services/userAuth.js` & `src/middleware/auth.js`: `getUserAuthStatus` kini meng-cache `groups` dan `permissions` terkini dari database, dan `authMiddleware` langsung meng-overlay data live tersebut ke `req.user`. Customer langsung mendapatkan hak akses ke custom group baru pada sesi token yang sedang berjalan tanpa perlu login ulang | `src/services/userAuth.js`, `src/middleware/auth.js` |
+| ~now | **Live WebSocket Group Refresh** — `src/websocket/index.js`: menambahkan helper `refreshUserSockets(userId)` yang memperbarui `socket.user.groups` dan `socket.allowedDevices` secara real-time saat grup diubah oleh admin tanpa memutus koneksi socket pengguna | `src/websocket/index.js` |
+| ~now | **Test Suite** — 2 unit & integration tests baru di `src/__tests__/liveUserGroups.test.js` memverifikasi bahwa penambahan grup oleh admin tidak me-logout user dan langsung memberikan akses kendaraan grup baru pada token yang sama (total 244 test pass) | `src/__tests__/liveUserGroups.test.js` |
+
+### Segregation of Dynamic Linked Sync Groups vs Manual Devices & Privilege Hardening
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **Group Membership Service** — `src/services/groupMembership.js`: layanan sentral untuk resolusi keanggotaan grup secara dinamis (`enrichAndFilterDevices`, `isDeviceAllowedForGroups`, `getAllowedDeviceKeys`, `getActiveSyncRules`). Memisahkan secara ketat antara **Add Mandiri** (`device_groups`) dan **Dynamic Linked Sync Groups** (`group_sync_rules`) | `src/services/groupMembership.js` |
+| ~now | **Strict Segregation & No Unintended Deletions** — Perangkat hasil sinkronisasi tidak lagi di-dump ke tabel `device_groups` sebagai entri statis. Di Admin UI, hanya perangkat add mandiri yang memiliki tombol hapus/unassign. Perangkat sync tunduk pada aturan link grup upstream | `src/services/autoSync.js`, `src/routes/deviceGroups.js` |
+| ~now | **Instant Dynamic Unlink** — Menghapus aturan sinkronisasi di `DELETE /api/admin/group-sync/:id` seketika mencabut visibilitas dan hak akses seluruh perangkat upstream terkait tanpa meninggalkan data sampah di database | `src/routes/groupSync.js`, `src/services/groupMembership.js` |
+| ~now | **Security Privilege Hardening** — Pengetatan pemeriksaan hak akses di seluruh route (`devices`, `positions`, `commands`, `reports`, `dashboard`, `websocket`). Pengguna level customer tidak dapat mengakses data koordinat, perintah remote, metadata, atau laporan perangkat di luar grup miliknya | `src/routes/*`, `src/websocket/index.js` |
+| ~now | **Database Cleanup Migration** — Migrasi `20260911_clean_historical_synced_device_groups.js` membersihkan sisa baris historis yang pernah di-insert ke `device_groups` oleh auto-sync lama | `migrations/20260911_clean_historical_synced_device_groups.js` |
+| ~now | **Accurate Custom Group Device Count** — `GET /api/groups` kini menghitung total kendaraan aktual secara real-time (`keys.size`) menggantikan nilai hardcoded `0` | `src/routes/groups.js` |
+| ~now | **Test Suite** — 4 unit & integration tests baru di `src/__tests__/groupMembershipPrivilege.test.js` memverifikasi pencegahan kebocoran hak akses, isolasi perangkat antar-customer, pemutusan instan saat rule dihapus, dan pemisahan tabel (total 242 test pass) | `src/__tests__/groupMembershipPrivilege.test.js` |
+
 ## 2026-09-10
 
 ### Custom Groups Hybrid Sync, Deduplication & Performance Consolidation

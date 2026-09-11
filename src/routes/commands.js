@@ -9,6 +9,7 @@ const db = require('../db');
 const cache = require('../services/cache');
 const { sanitizeLogs } = require('../utils/sanitizer');
 const { setEngineDesired, deriveEngineControl } = require('../utils/engineControl');
+const { isDeviceAllowedForGroups, getAllowedDeviceKeys } = require('../services/groupMembership');
 
 const router = express.Router();
 
@@ -32,11 +33,7 @@ async function verifyDeviceAccess(user, deviceId, source) {
   if (user?.role === 'admin') return true;
   const userGroups = user?.groups || [];
   if (!userGroups.length) return false;
-  const dg = await db('device_groups')
-    .where({ device_id: deviceId, source })
-    .whereIn('group_id', userGroups)
-    .first();
-  return Boolean(dg);
+  return isDeviceAllowedForGroups(deviceId, source, userGroups);
 }
 
 // ponytail: single table command_logs ceiling: >10M rows/month -> upgrade path: time-series partitioning or stream to ClickHouse/OpenSearch
@@ -89,13 +86,14 @@ router.get('/logs', async (req, res, next) => {
       if (!userGroups.length) {
         return res.json({ logs: [], total: 0, offset: offsetNum, limit: limitNum });
       }
-      const dgs = await db('device_groups')
-        .whereIn('group_id', userGroups)
-        .select('device_id', 'source');
-      if (!dgs.length) {
+      const allowedKeys = await getAllowedDeviceKeys(userGroups);
+      if (allowedKeys.size === 0) {
         return res.json({ logs: [], total: 0, offset: offsetNum, limit: limitNum });
       }
-      allowedDeviceMap = dgs;
+      allowedDeviceMap = Array.from(allowedKeys).map(k => {
+        const [s, id] = k.split(':');
+        return { device_id: parseInt(id, 10), source: s };
+      });
     }
 
     const baseQuery = db('command_logs');

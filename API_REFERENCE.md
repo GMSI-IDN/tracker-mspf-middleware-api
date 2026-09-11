@@ -196,6 +196,7 @@ Untuk admin, semua device. Untuk customer, hanya device di Group/BC yang di-assi
 > **Catatan Custom Groups & Deduplikasi:**
 > - Parameter `group` menerima ID custom group integer (contoh: `?group=1`).
 > - Satu custom group dapat memuat kendaraan dari berbagai aturan sinkronisasi (multi-sync rules) dan penambahan manual.
+> - Perangkat hasil group sync terhubung secara dinamis (tidak di-insert ke `device_groups` manual). Hanya perangkat manual yang dapat dihapus per-unit via `DELETE /api/admin/device-groups/:id`. Jika aturan sync dihapus, seluruh perangkat dari sync group tersebut langsung hilang seketika.
 > - Jika user level customer memiliki beberapa custom group yang memuat kendaraan yang sama, daftar kendaraan **dijamin hanya menampilkan kendaraan tersebut sebanyak 1 kali (ter-deduplikasi)**, dan atribut `customGroups` akan mencantumkan semua grup terkait.
 
 **Response 200:**
@@ -1473,9 +1474,9 @@ Update data user oleh Admin. Semua field opsional — kirim hanya field yang ing
 - `firstName` / `lastName` (opsional)
 - `password` (opsional, minimal 6 karakter) $\rightarrow$ **jika field password diisi, maka field `confirmPassword` wajib diisi dan harus cocok**. Mengubah password otomatis mencabut seluruh sesi token aktif user (`tokenVersion` naik).
 - `isActive`: boolean (`true` / `false`). **Jika di-set `false` (disabled)**, user otomatis tidak bisa login, seluruh sesi token JWT aktif langsung hangus seketika, dan koneksi WebSocket user langsung diputus paksa.
-- `permissions`: object capability, contoh: `{"canCutEngine": true}`. Mengubah permissions otomatis menaikkan `tokenVersion` dan mencabut sesi token aktif agar izin baru langsung diterapkan saat login berikutnya.
+- `groups` (array integer ID) $\rightarrow$ Menambah atau mengurangi grup **tidak akan me-logout user**. Gateway menyelesaikan keanggotaan grup secara live di `authMiddleware`, sehingga kendaraan dari grup baru langsung terlihat pada sesi yang sedang berjalan.
+- `permissions`: object capability, contoh: `{"canCutEngine": true}`. Mengubah nilai permissions secara riil otomatis mencabut sesi token lama agar izin baru diterapkan.
 - `role` (`admin` / `customer`)
-- `groups` (array integer ID)
 - `timezone` (IANA timezone valid)
 
 **Request (Disable User):**
