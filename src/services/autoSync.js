@@ -5,8 +5,10 @@ const { logger } = require('../middleware/logger');
 
 async function fetchTraccarDevices(groupId) {
   try {
-    const data = await traccar.getDevices({ groupId });
-    return (data || []).map(d => ({ device_id: d.id, source: 'traccar' }));
+    const data = await traccar.getDevices({ all: true });
+    return (data || [])
+      .filter(d => d.groupId === groupId)
+      .map(d => ({ device_id: d.id, source: 'traccar' }));
   } catch {
     return [];
   }
@@ -14,6 +16,7 @@ async function fetchTraccarDevices(groupId) {
 
 async function fetchMspfDevices(bcId) {
   try {
+    if (mspf.waitForInit) await mspf.waitForInit();
     const data = await mspf.getDevices({ 'bc[]': [bcId] });
     return (data.data || []).map(d => ({ device_id: d.id, source: 'mspf' }));
   } catch {
@@ -47,27 +50,27 @@ async function runAutoSync() {
         } catch {}
       }
 
-      // Update source group name
+      // Update source group name if needed
       try {
         if (rule.source === 'traccar') {
           const groups = await traccar.getGroups({ all: true });
           const match = groups.find(g => g.id === rawId);
-          if (match) {
+          if (match && match.name !== rule.source_group_name) {
             await db('group_sync_rules').where({ id: rule.id }).update({ source_group_name: match.name });
           }
         } else {
           const bc = await mspf.getBc(rawId);
-          if (bc?.name) {
+          if (bc?.name && bc.name !== rule.source_group_name) {
             await db('group_sync_rules').where({ id: rule.id }).update({ source_group_name: bc.name });
           }
         }
       } catch {}
     }
 
-    logger.info(`Auto-sync: ${totalInserted} device(s) from ${rules.length} rule(s)`);
+    logger.info(`Auto-sync: ${totalInserted} device(s) processed from ${rules.length} rule(s)`);
   } catch (err) {
     logger.warn(`Auto-sync error: ${err.message}`);
   }
 }
 
-module.exports = { runAutoSync };
+module.exports = { runAutoSync, fetchTraccarDevices, fetchMspfDevices };

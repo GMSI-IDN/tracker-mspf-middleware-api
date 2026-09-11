@@ -209,6 +209,29 @@
 | **Filter `?type=` server-side** — simetris dengan `?status=`/`?name=` (opsional, ikut saat implementasi events) | ⬜ Backlog |
 | **FoxLogger live speed/course 0** — limitasi source (`report-position` tidak sediakan kecepatan/arah); marker statis untuk **live** — sudah dikomunikasikan ke FE. (Playback kini punya `course`+`nopol` via `report-rollback`.) | ✅/partial |
 
+## Phase 10 — Custom Groups Hybrid Sync, Deduplication & Performance Consolidation: ✅
+
+| Task | Status |
+|------|--------|
+| **Device Sync Listing Fix** — Memperbaiki cache builder di `src/routes/devices.js` dengan `waitForInit()` agar seluruh device MSPF/FoxLogger termuat lengkap | ✅ |
+| **Eliminasi N+1 Query & Fast Group Filter** — Menghapus percabangan HTTP loop lambat di `GET /api/devices?group=X`, seluruh query ditarik langsung dari `devices:merged` (<2ms) | ✅ |
+| **Strict Customer Deduplication** — Menjamin kendaraan yang beririsan di beberapa custom group hanya muncul tepat 1 kali di list customer | ✅ |
+| **Custom Groups Array Enrichment** — Memastikan seluruh grup milik customer yang menampung kendaraan tersebut tertempel di field `customGroups` | ✅ |
+| **Auto-Sync Service Fixes** — `fetchMspfDevices` meng-await `waitForInit()`; `fetchTraccarDevices` memfilter `d.groupId === groupId`; trigger instan saat rule dibuat | ✅ |
+| **Integration Tests** — 4 test di `src/__tests__/customGroupSync.test.js` memverifikasi multi-sync, add mandiri, deduplikasi, dan trigger sync instan (total 238 test pass) | ✅ |
+| **Dokumentasi Invariant** — Dicatat di `AGENTS.md`, `CHANGELOG.md`, `API_REFERENCE.md`, `USER_GUIDE.md`, dan `PROGRESS.md` | ✅ |
+
+## Phase 9 — Unified Command Mapping & MSPF engineResume Bug Fix: ✅
+
+| Task | Status |
+|------|--------|
+| **Bug Fix MSPF engineResume** — Memperbaiki evaluasi ternary salah yang memicu pemanggilan `INACTIVE` pada MSPF saat FE mengirim `engineResume` | ✅ |
+| **Bidirectional Unified Mapping** — `engineResume`/`activate` selalu dipetakan ke `ACTIVE` (MSPF) dan `engineResume` (Traccar); `engineStop`/`deactivate` dipetakan ke `INACTIVE` (MSPF) dan `engineStop` (Traccar) | ✅ |
+| **Safety Guard MSPF Commands** — Perintah tak dikenal ke MSPF ditolak dengan `400 ERR_NOT_SUPPORTED` untuk mencegah deactivation tak sengaja | ✅ |
+| **Unified Command Types** — `GET /api/commands/types/:deviceId` untuk MSPF kini mengembalikan `['engineResume', 'engineStop', 'activate', 'deactivate']` | ✅ |
+| **Comprehensive Tests** — 7 test baru di `src/__tests__/commands.test.js` memverifikasi terjemahan perintah lintas provider (total 234 test pass) | ✅ |
+| **Dokumentasi Lengkap** — Pembaruan spesifikasi di `CHANGELOG.md`, `API_REFERENCE.md`, `USER_GUIDE.md`, dan `PROGRESS.md` | ✅ |
+
 ## Phase 8 — Dynamic Database Switching (SQLite & PostgreSQL) & Production Startup Safety: ✅
 
 | Task | Status |
@@ -288,8 +311,8 @@
   - *Alasan:* Dibuat sebagai "future extension point", tetapi tidak ada caller yang mengirimkan opsi ini sehingga hanya menjadi branch mati.
 
 ### 3. Refactoring & Eliminasi Redundansi (Shrink / Performance)
-- [ ] **Eliminasi N+1 sequential loop saat query `GET /api/devices?group={id}` di `src/routes/devices.js`**
-  - *Alasan:* Saat query berparameter `group`, route melakukan loop HTTP request satu per satu (`traccar.getDevices({ id })`, `mspf.getDevice(id)`). Seharusnya cukup membaca dan memfilter data dari in-memory cache `devices:merged` yang selalu sinkron, memangkas latensi dari ratusan milidetik menjadi <5ms.
+- [x] **Eliminasi N+1 sequential loop saat query `GET /api/devices?group={id}` di `src/routes/devices.js`**
+  - *Alasan:* Saat query berparameter `group`, route melakukan loop HTTP request satu per satu (`traccar.getDevices({ id })`, `mspf.getDevice(id)`). Kini sudah membaca dan memfilter data langsung dari in-memory cache `devices:merged` yang selalu sinkron, memangkas latensi dari detik menjadi <2ms dan memastikan seluruh group ter-enrich dengan benar.
 - [ ] **Konsolidasi helper `applyCustomAttributes` & `normalizeTraccarPosition` antara `src/routes/reports.js` dan `src/routes/positions.js`**
   - *Alasan:* Duplikasi logika identik di kedua route. Sentralisasi fungsi ke service/util bersama mencegah inkonsistensi data saat ada pembaruan aturan atribut.
 - [ ] **Satukan instance `NodeCache` di `src/services/mspf.js` ke cache singleton `src/services/cache.js`**

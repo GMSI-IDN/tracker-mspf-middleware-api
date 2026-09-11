@@ -17,7 +17,9 @@ const TRACCAR_ACTIVATION_MAP = {
   INACTIVE: { type: 'engineStop', description: 'Engine off / stop' },
 };
 
-const RESTRICTED_CUT_COMMANDS = new Set(['engineStop', 'deactivate']);
+const ENGINE_RESUME_TYPES = new Set(['engineResume', 'activate', 'ACTIVE']);
+const ENGINE_STOP_TYPES = new Set(['engineStop', 'deactivate', 'INACTIVE']);
+const RESTRICTED_CUT_COMMANDS = new Set(['engineStop', 'deactivate', 'INACTIVE']);
 
 // ponytail: binary capability check ceiling: flat boolean flags only -> upgrade path: CASL or custom policy engine if attribute-based rules needed
 function canCutEngine(user) {
@@ -225,9 +227,18 @@ router.post('/',
       try {
         let result;
         if (devSource === 'traccar') {
-          result = await traccar.sendCommand({ deviceId: idNum, type, ...data });
+          const traccarType = ENGINE_RESUME_TYPES.has(type)
+            ? 'engineResume'
+            : (ENGINE_STOP_TYPES.has(type) ? 'engineStop' : type);
+          result = await traccar.sendCommand({ deviceId: idNum, type: traccarType, ...data });
         } else {
-          result = await mspf.activateDevice(idNum, type === 'activate' ? 'ACTIVE' : 'INACTIVE');
+          if (ENGINE_RESUME_TYPES.has(type)) {
+            result = await mspf.activateDevice(idNum, 'ACTIVE');
+          } else if (ENGINE_STOP_TYPES.has(type)) {
+            result = await mspf.activateDevice(idNum, 'INACTIVE');
+          } else {
+            throw createError(400, `Command type '${type}' is not supported for this device`, { code: 'ERR_NOT_SUPPORTED' });
+          }
         }
 
         await logCommand({
@@ -242,10 +253,10 @@ router.post('/',
         });
 
         let engineControl = null;
-        if (RESTRICTED_CUT_COMMANDS.has(type)) {
+        if (ENGINE_STOP_TYPES.has(type)) {
           setEngineDesired(idNum, devSource, 'INACTIVE');
           engineControl = { desired: 'INACTIVE', state: 'DEACTIVATING', isApplied: false, lastAppliedAt: null };
-        } else if (type === 'engineResume' || type === 'activate') {
+        } else if (ENGINE_RESUME_TYPES.has(type)) {
           setEngineDesired(idNum, devSource, 'ACTIVE');
           engineControl = { desired: 'ACTIVE', state: 'ACTIVATING', isApplied: false, lastAppliedAt: null };
         }
@@ -302,7 +313,7 @@ router.get('/types/:deviceId', async (req, res, next) => {
     if (devSource === 'traccar') {
       types = await traccar.getCommandTypes({ deviceId });
     } else {
-      types = ['activate', 'deactivate'];
+      types = ['engineResume', 'engineStop', 'activate', 'deactivate'];
     }
 
     // Filter out engine cut commands if user does not have permission

@@ -4,6 +4,7 @@ const createError = require('http-errors');
 const db = require('../db');
 const traccar = require('../services/traccar');
 const mspf = require('../services/mspf');
+const { runAutoSync } = require('../services/autoSync');
 const validate = require('../middleware/validate');
 
 function normalizeRule(r) {
@@ -58,6 +59,8 @@ router.post('/',
         source_group_id: sourceGroupId,
         source_group_name: sourceGroupName,
       }).returning('id');
+
+      Promise.resolve(runAutoSync?.()).catch(() => {});
 
       res.status(201).json({
         id: result?.id || result,

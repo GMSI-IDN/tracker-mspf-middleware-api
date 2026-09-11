@@ -172,7 +172,12 @@ Authorization: Bearer <token>
 | `page` | Halaman (default: 1) |
 | `limit` | Jumlah per halaman (default: 50) |
 
-> Untuk **customer**, data otomatis terfilter hanya menampilkan kendaraan di grup miliknya, dan field `source` serta vendor `group` disembunyikan (*white-labeled*). Field `source` dan vendor `group` hanya tampil untuk akun **admin** (digunakan untuk pengelompokan teknis di Dashboard Admin).
+> Untuk **customer**, data otomatis terfilter hanya menampilkan kendaraan di grup miliknya, dan field `source` serta vendor `group` disembunyikan (*white-labeled*).
+> 
+> **Aturan Custom Groups & Deduplikasi:**
+> - Satu custom group dapat memuat kendaraan dari **lebih dari 1 aturan sinkronisasi** (Traccar / MSPF) digabung dengan **tambah unit mandiri**.
+> - Jika customer memiliki beberapa custom group yang memiliki kendaraan yang sama (overlap), kendaraan tersebut **dijamin hanya muncul 1 kali** di list kendaraan, dengan atribut `customGroups` yang mencantumkan semua grup miliknya.
+> - Field `source` dan vendor `group` hanya tampil untuk akun **admin** (digunakan untuk pengelompokan teknis di Dashboard Admin).
 
 ### 3.3 Detail Kendaraan
 
@@ -256,10 +261,14 @@ socket.on('device-status', (data) => {
 
 ### 3.6 Kirim Perintah ke Kendaraan
 
-> **PENTING (Safety & Permission Interlock):**
+> **PENTING (Unified Command Interface):**
+> - FE dapat mengirim perintah standar yang sama untuk **SEMUA KENDARAAN** lintas provider:
+>   - Menghidupkan mesin $\rightarrow$ gunakan `type: "engineResume"`
+>   - Mematikan mesin $\rightarrow$ gunakan `type: "engineStop"` (dengan `"confirm": true`)
+> - Gateway otomatis menerjemahkan perintah ke protokol backend masing-masing (Traccar $\rightarrow$ `engineResume`/`engineStop`, MSPF $\rightarrow$ `desiredStatus: "ACTIVE"`/`"INACTIVE"`). FE tidak perlu membuat *if-else* vendor.
 > - User dengan role `customer` hanya dapat mengirim perintah ke kendaraan yang berada di dalam `groups` miliknya.
-> - Perintah mematikan mesin (`engineStop`, `deactivate`, `desiredStatus: INACTIVE`) membutuhkan izin `permissions.canCutEngine === true` dari Admin.
-> - Perintah mematikan mesin wajib menyertakan flag konfirmasi `"confirm": true`. Jika dikirim tanpa konfirmasi, server mengembalikan status `422 WARN_CONFIRMATION_REQUIRED` sehingga frontend dapat memunculkan dialog peringatan kepada pengguna.
+> - Perintah mematikan mesin membutuhkan izin `permissions.canCutEngine === true` dari Admin.
+> - Perintah mematikan mesin wajib menyertakan flag konfirmasi `"confirm": true`. Jika dikirim tanpa konfirmasi, server mengembalikan status `422 WARN_CONFIRMATION_REQUIRED`.
 > - Setiap eksekusi perintah otomatis tersimpan dalam audit log.
 
 **Contoh Request (Matikan Mesin dengan Konfirmasi & Alasan):**
