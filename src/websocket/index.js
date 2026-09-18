@@ -372,12 +372,21 @@ function startTraccarFallback() {
   }, config.websocket.pollInterval);
 }
 
-function disconnectUserSockets(userId) {
+// ponytail: per-instance socket disconnect ceiling: multi-replica gateway cluster -> upgrade path: socket.io redis-emitter / pubsub for cross-instance user socket disconnect
+function disconnectUserSockets(userId, event = 'account-disabled', message) {
   if (!io) return;
   const numId = Number(userId);
+  const defaultMsg = event === 'session-revoked'
+    ? 'Session has been revoked due to credential or permission changes'
+    : 'Your account has been disabled';
+  const payload = {
+    event,
+    message: message || defaultMsg,
+    code: event === 'session-revoked' ? 'ERR_TOKEN_REVOKED' : 'ERR_ACCOUNT_DISABLED',
+  };
   io.sockets.sockets.forEach((socket) => {
     if (socket.user && Number(socket.user.id) === numId) {
-      socket.emit('account-disabled', { message: 'Your account has been disabled or session revoked' });
+      socket.emit(event, payload);
       socket.disconnect(true);
     }
   });

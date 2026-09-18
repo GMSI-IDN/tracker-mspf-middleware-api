@@ -2,6 +2,83 @@
 
 > Semua perubahan signifikan dicatat di file ini.
 
+## 2026-09-18
+
+### Route Playback True Historical Telemetry Integration & Full Attributes Preservation
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **Integrasi Telemetri Historis Asli MSPF (`enrichRouteWithMccsHistory`)** — `src/services/mspf.js`: Memperbaiki bug di mana titik rute masa lalu ditempeli live snapshot telemetri hari ini (`new Date()`). Menambahkan service `getDeviceMccsHistory` yang memanggil `GET /v2/device/{id}/data/history` dengan parameter `from` dan `to` kejadian. Menggunakan pencocokan nearest-neighbor timestamp ($\pm 120$ detik) via binary search. Titik rute kini memiliki `speed` (`kph`), `course` (`dir`), `ignition` (`addr_IGN`), `voltage` (`volt`/`addr_EB`), `odom`, dan sensor yang akurat dan unik per kejadian. | `src/services/mspf.js` |
+| ~now | **24-Hour Range Chunking untuk MCCS Data History** — `src/services/mspf.js`: Mengatasi limitasi server MSPF (maksimal 24 jam per query `/data/history`) dengan memecah request rentang multi-hari menjadi batch paralel 24 jam (mendukung rute playback hingga 7 hari). | `src/services/mspf.js` |
+| ~now | **Preservasi Full Attributes di `/api/reports/route`** — `src/routes/reports.js`: Menghapus logic yang me-reset `attributes: {}` bagi non-admin/customer. Baik Admin maupun Customer kini menerima atribut telemetri lengkap (bawaan provider & enriched). Custom attributes diaplikasikan via `enrichWithRules` (in-place tanpa menghapus atribut asli). | `src/routes/reports.js` |
+| ~now | **Hoisting Rule Lookup pada Route History** — `src/routes/reports.js`: Rule lookup dipindahkan ke luar per-point loop. Jika tidak ada aturan custom, langsung early exit (0 ms overhead & 0 obyek kloning). | `src/routes/reports.js` |
+| ~now | **Unit Tests Komprehensif** — `src/__tests__/mspf.test.js` & `src/__tests__/gateway.test.js`: Pengujian pencocokan telemetri historis MCCS, verifikasi variasi atribut per titik, penanganan toleransi waktu, dan fallback rute tanpa telemetri (total 275 test pass). | `src/__tests__/mspf.test.js`, `src/__tests__/gateway.test.js` |
+| ~now | **Pembaruan Dokumentasi** — `API_REFERENCE.md` & `PROGRESS.md`: Memperbarui penjelasan enrichment rute MSPF dan ceiling batasan API. | `API_REFERENCE.md`, `PROGRESS.md` |
+
+## 2026-09-17
+
+### Events Lifecycle Normalization (`openedAt`, `closedAt`, `eventTime`) & FoxLogger Alarms Integration
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **Normalisasi `openedAt` & `closedAt` pada MSPF** — `src/routes/reports.js`: Memperbaiki query multi-device MSPF yang sebelumnya tidak menyertakan field `openedAt` dan `closedAt`. Menyempurnakan semantik `eventTime` pada status `CLOSE` agar menggunakan waktu penutupan (`closedAt`) sehingga pengurutan descending mencerminkan kapan insiden selesai. | `src/routes/reports.js` |
+| ~now | **Standardisasi Siklus Hidup Event Traccar** — `src/routes/reports.js`: Menstandarkan kontrak data Traccar point-in-time ke unified schema: event `OPEN` (`openedAt: eventTime, closedAt: null`), event `CLOSE` (`openedAt: null, closedAt: eventTime`). | `src/routes/reports.js` |
+| ~now | **Integrasi FoxLogger Alarms di Laporan Event** — `src/routes/reports.js`: Menghubungkan alarm FoxLogger (`report-cut-power`) ke `GET /api/reports/events` (single-device & multi-device). Mengonversi timestamp naif WIB ke UTC ISO dan menghitung durasi `closedAt = openedAt + cr_durt`. | `src/routes/reports.js` |
+| ~now | **Penyeragaman Summary `open` & `closed` Counts** — `src/routes/reports.js`: Menyertakan statistik hitungan `open` dan `closed` pada response summary single-device dan multi-device. | `src/routes/reports.js` |
+| ~now | **Unit & Integration Tests** — `src/__tests__/gateway.test.js`: Menambahkan test cases komprehensif menguji `openedAt`, `closedAt`, dan `eventTime` untuk MSPF, Traccar, serta alarm FoxLogger single dan multi-device (total 271 test pass). | `src/__tests__/gateway.test.js` |
+| ~now | **Pembaruan Dokumentasi** — `API_REFERENCE.md`, `USER_GUIDE.md`, `PROGRESS.md`: Memperbarui contoh respons, panduan durasi insiden FE, dan tabel progress. | `API_REFERENCE.md`, `USER_GUIDE.md`, `PROGRESS.md` |
+
+### Events Optimization, Table Pagination, Short Caching & Multi-Device MSPF bcId Resolution
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **Validasi Rentang Tanggal & Default 7 Hari** — `src/routes/reports.js`: Menambahkan validasi `validateReportDateRange` di seluruh endpoint reports (`/events`, `/parking`, `/idle`, `/trips`, `/route`). Jika `from`/`to` tidak diisi pada `/events`, otomatis default ke rentang 7 hari terakhir (aman untuk UI tabel tanpa DatePicker). Batas maksimal rentang waktu dibatasi 31 hari (route playback max 7 hari). | `src/routes/reports.js` |
+| ~now | **In-Memory Pagination (`limit` & `offset`)** — `src/routes/reports.js`: Menambahkan dukungan `?limit=` (default: 50, max: 200) dan `?offset=` (default: 0) pada `GET /api/reports/events`. Output summary menyertakan `limit` dan `offset`. | `src/routes/reports.js` |
+| ~now | **In-Memory Short-Lived Cache (TTL 30 Detik)** — `src/routes/reports.js`: Meng-cache hasil query event upstream selama 30 detik untuk navigasi pagination instan (<5ms) dan mencegah spam request ke Traccar/MSPF. Mendukung bypass via query parameter `?refresh=true`. | `src/routes/reports.js` |
+| ~now | **Resolusi Dinamis MSPF bcId untuk Device Satuan** — `src/routes/reports.js`: Memperbaiki query multi-device MSPF yang sebelumnya hardcode `bcIds: [10000023]`. Sekarang mengumpulkan seluruh `bcId` unik secara dinamis dari cache device armada customer, dan menggabungkan event `OPEN` dan `CLOSE`. | `src/routes/reports.js` |
+| ~now | **Destructuring Limit & Offset di Positions** — `src/routes/positions.js`: Meneruskan parameter `limit` dan `offset` pada `GET /api/positions` ke pemanggilan `traccar.getPositions`. | `src/routes/positions.js` |
+| ~now | **Unit & Integration Tests** — `src/__tests__/gateway.test.js`: Menambahkan test suite baru mencakup default 7-day range, pagination limit/offset, validasi batas 31 hari, validasi urutan tanggal, in-memory caching & refresh bypass, route playback 7-day limit, dan dynamic MSPF multi-device bcIds (total 268 test pass). | `src/__tests__/gateway.test.js` |
+
+### Admin Event Level & Alert Configuration (Dynamic Upstream Discovery & Enrichment)
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **Migrasi Schema Tabel `event_configs`** — `migrations/20260917_create_event_configs.js`: Membuat tabel `event_configs` dengan kolom `source`, `event_key`, `external_id`, `event_type`, `original_name`, `custom_label`, `level`, `color`, `is_enabled`, dan constraint unik `UNIQUE(source, event_key)`. | `migrations/20260917_create_event_configs.js` |
+| ~now | **Discovery Service & In-Memory Config Cache** — `src/services/eventConfig.js`: Menggabungkan katalog event Traccar, Geofence zones, MSPF monitors (`GET /v4/monitors`), dan FoxLogger alarms ke dalam katalog terpadu dengan default fallback yang cerdas. Melakukan cache in-memory untuk lookup instan $O(1)$ saat event enrichment. | `src/services/eventConfig.js`, `src/services/mspf.js` |
+| ~now | **Admin Event Endpoints** — `src/routes/eventsAdmin.js` & `src/app.js`: Menyediakan endpoint `GET /api/admin/events/catalog` (discovery), `GET /api/admin/events/configs`, `PUT /api/admin/events/configs` (bulk upsert), dan `DELETE /api/admin/events/configs/:id` (reset ke default). | `src/routes/eventsAdmin.js`, `src/app.js` |
+| ~now | **Event Output Enrichment & Level Filter** — `src/routes/reports.js` & `src/routes/dashboard.js`: Menambahkan field `level` ('danger', 'warning', 'info', 'success') dan `color` di setiap item event. Mendukung penamaan kustom (`customLabel`), filtering via `?level=`, dan muting bila `is_enabled: false`. | `src/routes/reports.js`, `src/routes/dashboard.js` |
+| ~now | **Integration & Unit Tests** — `src/__tests__/eventConfigs.test.js`: Menambahkan 9 test komprehensif menguji discovery katalog, otorisasi admin (401/403), bulk update level/color/customLabel, filter `?level=`, mute event, dan reset config (total 261 test pass). | `src/__tests__/eventConfigs.test.js` |
+
+### Event & Dashboard Enrichment: Event Name, Type, Device Name & Type Filter
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **Enrichment Nama & Tipe Event di Reports (`GET /api/reports/events`)** — `src/routes/reports.js`: Menghilangkan `name: null` pada query multi-device. Menambahkan field `type` (mesin/raw) dan `name` (human-readable label) untuk seluruh event Traccar (`TRACCAR_EVENT_NAMES` + humanize fallback) dan MSPF (`monitorName`). Menambahkan field `deviceName` via in-memory cache lookup. Menambahkan dukungan filter query `?type=` di sisi server. | `src/routes/reports.js` |
+| ~now | **Enrichment Recent Events di Dashboard (`GET /api/dashboard`)** — `src/routes/dashboard.js`: Menghilangkan `name: null` pada event geofence dan memformat nama event dengan rapi. Menambahkan field `type` dan `deviceName` pada setiap item di array `recentEvents`. | `src/routes/dashboard.js` |
+| ~now | **Dokumentasi API & Progress** — `API_REFERENCE.md` & `PROGRESS.md`: Memperbarui dokumentasi kontrak response event dan parameter `?type=`, serta menandai backlog event types selesai. | `API_REFERENCE.md`, `PROGRESS.md` |
+| ~now | **Test Suite** — `src/__tests__/gateway.test.js`: Memperbarui tes multi-device events dan menambahkan tes verifikasi nama/tipe MSPF, filter `?type=`, serta `recentEvents` dashboard (total 252 test pass). | `src/__tests__/gateway.test.js` |
+
+## 2026-09-16
+
+### PostgreSQL BIGINT Device ID Support (Fix Error 22003 Out of Range)
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **Migrasi Schema Kolom `device_id` ke BIGINT** — `migrations/20260916_alter_device_id_to_bigint.js`: Mengubah kolom `device_id` pada tabel `device_metadata`, `device_groups`, dan `command_logs` menjadi `BIGINT` (64-bit) untuk PostgreSQL. Memperbaiki error `500 22003: value out of range for type integer` saat melakukan pagination atau query device FoxLogger dengan ID IMEI 15 digit (contoh: `780901703170270`) | `migrations/20260916_alter_device_id_to_bigint.js` |
+| ~now | **PostgreSQL BIGINT Type Parser** — `src/db/index.js` & `knexfile.js`: Menambahkan type parser driver `pg` untuk INT8 / BIGINT (OID 20) agar dikonversi otomatis ke `Number` (`parseInt(val, 10)`), menjaga konsistensi tipe integer antara SQLite dan PostgreSQL tanpa resiko precision loss di bawah `Number.MAX_SAFE_INTEGER` | `src/db/index.js`, `knexfile.js` |
+| ~now | **Toleransi Pencocokan ID & FoxLogger di Device Groups** — `src/routes/deviceGroups.js`: Memperbaiki lookup `deviceExists` dan `getDeviceName` agar mendukung fleksibilitas integer dan string `(d.id === deviceId || String(d.id) === String(deviceId))`, serta mengizinkan `source: 'foxlogger'` di `POST /api/admin/device-groups` dan fallback pemeriksaan ketersediaan perangkat FoxLogger | `src/routes/deviceGroups.js` |
+| ~now | **Dokumentasi API Reference** — `API_REFERENCE.md`: Menambahkan dokumentasi dukungan `source: 'foxlogger'` dan `deviceId` 64-bit pada endpoint `POST /api/admin/device-groups` dan `/batch` | `API_REFERENCE.md` |
+| ~now | **Test Suite** — Menambahkan unit & integration tests di `src/__tests__/deviceMetadata.test.js` dan `src/__tests__/gateway.test.js` untuk memverifikasi operasi insert, select, update, dan delete dengan device ID 15 digit serta assign perangkat FoxLogger ke custom group (total 250 test pass) | `src/__tests__/deviceMetadata.test.js`, `src/__tests__/gateway.test.js` |
+
+## 2026-09-14
+
+### WebSocket Disconnect Segregation (Session Revoked vs Account Disabled)
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **WebSocket Disconnect Event Segregation** — `src/websocket/index.js` & `src/routes/users.js`: membedakan event pemutusan koneksi WebSocket antara reset password / pencabutan sesi (`session-revoked`, `code: ERR_TOKEN_REVOKED`) dengan penonaktifan akun (`account-disabled`, `code: ERR_ACCOUNT_DISABLED`). Mencegah munculnya false alarm notifikasi "Akun Dinonaktifkan" di frontend saat admin hanya mengupdate password customer | `src/websocket/index.js`, `src/routes/users.js` |
+| ~now | **Test Suite** — 2 unit tests baru di `src/__tests__/statusPayload.test.js` memverifikasi payload kontrak event `session-revoked` dan `account-disabled` (total 246 test pass) | `src/__tests__/statusPayload.test.js` |
+
 ## 2026-09-11
 
 ### Live Group Session Continuity & Non-Disruptive Customer Group Assignment

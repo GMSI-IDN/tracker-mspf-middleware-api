@@ -12,6 +12,7 @@ const { buildSeries } = require('../utils/periodStats');
 const { applyRules, enrichWithRules, getDeviceRules } = require('../services/customAttributes');
 const { sanitizePositions, sanitizeReportItems } = require('../utils/sanitizer');
 const { isDeviceAllowedForGroups, getAllowedDeviceKeys } = require('../services/groupMembership');
+const eventConfig = require('../services/eventConfig');
 
 const router = express.Router();
 
@@ -19,23 +20,33 @@ function normalizeTraccarPosition(p) {
   return { ...p, source: 'traccar' };
 }
 
+function validateReportDateRange(from, to, maxDays = 31) {
+  if (!from || !to) return;
+  const fromMs = new Date(from).getTime();
+  const toMs = new Date(to).getTime();
+  if (isNaN(fromMs) || isNaN(toMs)) {
+    throw createError(400, 'Invalid date format for from or to', { code: 'ERR_VALIDATION' });
+  }
+  if (toMs < fromMs) {
+    throw createError(400, 'to must be after or equal to from', { code: 'ERR_VALIDATION' });
+  }
+  if (toMs - fromMs > maxDays * 86400000) {
+    throw createError(400, `Date range cannot exceed ${maxDays} days`, { code: 'ERR_VALIDATION' });
+  }
+}
+
+// ponytail: route report preserves full provider attributes for all roles; rules enrich in-place -> upgrade path: role-based attribute mask if tenant data isolation is needed
 async function applyCustomAttributes(positions, user) {
-  if (!user) return;
+  if (!user || !positions || positions.length === 0) return;
+  const firstPos = positions.find(p => p.deviceId);
+  if (!firstPos) return;
+  const rules = await getDeviceRules(firstPos.deviceId, firstPos.source);
+  if (!rules || rules.length === 0) return;
   for (let i = 0; i < positions.length; i++) {
     const pos = positions[i];
-    if (!pos.deviceId) continue;
-    const rules = await getDeviceRules(pos.deviceId, pos.source);
-    if (rules.length > 0) {
-      const cloned = { ...pos, attributes: { ...pos.attributes } };
-      if (user.role === 'admin') {
-        enrichWithRules(cloned, rules);
-      } else {
-        applyRules(cloned, rules);
-      }
-      positions[i] = cloned;
-    } else if (user.role !== 'admin') {
-      positions[i] = { ...pos, attributes: {} };
-    }
+    const cloned = { ...pos, attributes: { ...pos.attributes } };
+    enrichWithRules(cloned, rules);
+    positions[i] = cloned;
   }
 }
 
@@ -94,11 +105,12 @@ router.get('/route', async (req, res, next) => {
       if (!allowed) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
     }
 
-    if (devSource === 'mspf' && effectiveFrom && effectiveTo) {
+    if (effectiveFrom && effectiveTo) {
       const fromMs = new Date(effectiveFrom).getTime();
       const toMs = new Date(effectiveTo).getTime();
+      if (toMs < fromMs) throw createError(400, 'to must be after or equal to from', { code: 'ERR_VALIDATION' });
       if (toMs - fromMs > 7 * 24 * 3600 * 1000) {
-        throw createError(400, 'Date range max 7 days for MSPF devices', { code: 'ERR_VALIDATION' });
+        throw createError(400, devSource === 'mspf' ? 'Date range max 7 days for MSPF devices' : 'Date range cannot exceed 7 days for route playback', { code: 'ERR_VALIDATION' });
       }
     }
 
@@ -153,6 +165,7 @@ router.get('/parking', async (req, res, next) => {
     const { deviceId, group, from, to } = req.query;
     if (!deviceId) throw createError(400, 'deviceId is required', { code: 'ERR_VALIDATION' });
     if (!from) throw createError(400, 'from is required', { code: 'ERR_VALIDATION' });
+    validateReportDateRange(from, to, 31);
 
     const idNum = parseInt(deviceId, 10);
     let devSource = group ? deviceRouter.resolveGroup(group)?.source : null;
@@ -266,6 +279,7 @@ router.get('/idle', async (req, res, next) => {
     const { deviceId, group, from, to } = req.query;
     if (!deviceId) throw createError(400, 'deviceId is required', { code: 'ERR_VALIDATION' });
     if (!from) throw createError(400, 'from is required', { code: 'ERR_VALIDATION' });
+    validateReportDateRange(from, to, 31);
 
     const idNum = parseInt(deviceId, 10);
     let devSource = group ? deviceRouter.resolveGroup(group)?.source : null;
@@ -376,6 +390,7 @@ router.get('/trips', async (req, res, next) => {
     const { deviceId, group, from, to } = req.query;
     if (!deviceId) throw createError(400, 'deviceId is required', { code: 'ERR_VALIDATION' });
     if (!from) throw createError(400, 'from is required', { code: 'ERR_VALIDATION' });
+    validateReportDateRange(from, to, 31);
 
     const idNum = parseInt(deviceId, 10);
     let devSource = group ? deviceRouter.resolveGroup(group)?.source : null;
@@ -593,7 +608,7 @@ async function collectGroupSummaryItems(dgs, fromIso, toIso) {
 
 function resolveSummaryDeviceName(idNum, devSource) {
   const merged = cache.get('devices:merged') || [];
-  const d = merged.find(x => x.id === idNum && x.source === devSource);
+  const d = merged.find(x => (x.id === idNum || String(x.id) === String(idNum)) && (!devSource || x.source === devSource));
   return d?.name || undefined;
 }
 
@@ -1000,160 +1015,375 @@ const TRACCAR_EVENT_STATUS = {
 };
 
 const TRACCAR_EVENT_NAMES = {
-  ignitionOn: 'Ignition ON', ignitionOff: 'Ignition OFF',
-  deviceOnline: 'Device Online', deviceOffline: 'Device Offline',
-  deviceMoving: 'Device Moving', deviceStopped: 'Device Stopped',
-  alarm: 'Alarm', overspeed: 'Overspeed',
-  maintenance: 'Maintenance', commandResult: 'Command Result',
-  driverChanged: 'Driver Changed', textMessage: 'Text Message',
+  geofenceEnter: 'Geofence Enter',
+  geofenceExit: 'Geofence Exit',
+  ignitionOn: 'Ignition ON',
+  ignitionOff: 'Ignition OFF',
+  deviceOnline: 'Device Online',
+  deviceOffline: 'Device Offline',
+  deviceMoving: 'Device Moving',
+  deviceStopped: 'Device Stopped',
+  alarm: 'Alarm',
+  overspeed: 'Overspeed',
+  maintenance: 'Maintenance',
+  commandResult: 'Command Result',
+  driverChanged: 'Driver Changed',
+  textMessage: 'Text Message',
   deviceUnknown: 'Device Unknown',
 };
 
+function formatEventType(type) {
+  if (!type) return 'Unknown Event';
+  return TRACCAR_EVENT_NAMES[type] || type.replace(/([A-Z])/g, ' $1').trim().replace(/^./, s => s.toUpperCase());
+}
+
 router.get('/events', async (req, res, next) => {
   try {
-    const { deviceId, group, from, to, status, name } = req.query;
+    const { deviceId, group, from, to, status, name, type, level, limit, offset, refresh } = req.query;
+    validateReportDateRange(from, to, 31);
+    const effectiveFrom = from || new Date(Date.now() - 7 * 86400000).toISOString();
+    const effectiveTo = to || (from ? undefined : new Date().toISOString());
+    const offsetNum = Math.max(0, parseInt(offset, 10) || 0);
+    const limitNum = Math.min(200, Math.max(1, parseInt(limit, 10) || 50));
+
     const isAdmin = req.user.role === 'admin';
     const userGroups = req.user.groups || [];
+    await eventConfig.loadConfigCache();
+
+    // ponytail: in-memory events cache ceiling: multi-instance node cluster -> upgrade path: Redis cache if multi-instance scaled horizontally
+    const useCache = (process.env.NODE_ENV !== 'test' || req.query.cache === 'true') && refresh !== 'true';
+    const cacheUserKey = isAdmin ? 'admin' : (req.user.id || 'cust');
+    const cacheKey = `reports:events:${cacheUserKey}:${deviceId || 'multi'}:${effectiveFrom}:${effectiveTo || 'none'}`;
+    if (refresh === 'true') {
+      cache.del(cacheKey);
+    }
+
+    let events = useCache ? cache.get(cacheKey) : null;
+
+    if (!events) {
+      events = [];
+      if (deviceId) {
+        const idNum = parseInt(deviceId, 10);
+        let devSource = group ? deviceRouter.resolveGroup(group)?.source : null;
+        if (!devSource) devSource = deviceRouter.getSourceByDeviceId(idNum);
+        if (!devSource) devSource = deviceRouter.getSourceByDeviceId(deviceId);
+        if (!devSource) {
+          const [t, m, f] = await Promise.allSettled([
+            traccar.getDevices({ id: idNum }),
+            mspf.getDevice(idNum),
+            foxlogger.waitForInit(3000).then(() => foxlogger.getDevices()).then(d => d.data.find(x => x.uniqueId === req.query.deviceId || String(x.id) === req.query.deviceId)),
+          ]);
+          if (t.status === 'fulfilled' && t.value?.[0]) {
+            devSource = 'traccar';
+            deviceRouter.setSourceByDeviceId(idNum, 'traccar');
+          } else if (m.status === 'fulfilled' && m.value?.id) {
+            devSource = 'mspf';
+            deviceRouter.setSourceByDeviceId(idNum, 'mspf');
+          } else if (f.status === 'fulfilled' && f.value) {
+            devSource = 'foxlogger';
+            deviceRouter.setSourceByDeviceId(idNum, 'foxlogger');
+            deviceRouter.setSourceByDeviceId(deviceId, 'foxlogger');
+          } else throw createError(404, 'Device not found', { code: 'ERR_NOT_FOUND' });
+        }
+
+        if (!isAdmin) {
+          if (!userGroups.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+          const allowed = (await isDeviceAllowedForGroups(idNum, devSource, userGroups)) ||
+                          (await isDeviceAllowedForGroups(deviceId, devSource, userGroups));
+          if (!allowed) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
+        }
+
+        if (devSource === 'traccar') {
+          const [data, geoList] = await Promise.all([
+            traccar.getReportEvents({ deviceId: idNum, from: effectiveFrom, to: effectiveTo || undefined }),
+            Promise.resolve(traccar.getGeofences?.()).catch(() => []),
+          ]);
+          const geoMap = {};
+          for (const g of (geoList || [])) if (g?.id) geoMap[g.id] = g.name;
+
+          for (const e of data || []) {
+            const isGeo = (e.type === 'geofenceEnter' || e.type === 'geofenceExit');
+            const baseName = isGeo && e.geofenceId && geoMap[e.geofenceId] ? geoMap[e.geofenceId] : formatEventType(e.type);
+            const conf = eventConfig.resolveConfig('traccar', e.geofenceId ? `geofence:${e.geofenceId}` : e.type, e.geofenceId);
+            if (!conf.isEnabled) continue;
+            const evStatus = TRACCAR_EVENT_STATUS[e.type] || null;
+            const isoTime = toUtcIso(e.eventTime);
+            const isClosed = evStatus === 'CLOSE';
+            // ponytail: traccar discrete event lifecycle ceiling: traccar events are discrete log points without foreign keys between enter/exit -> upgrade path: stateful session correlation engine if paired duration is strictly required
+            events.push({
+              name: conf.customLabel || baseName,
+              type: e.type || null,
+              level: conf.level,
+              color: conf.color,
+              eventTime: isoTime,
+              status: evStatus,
+              deviceId: e.deviceId,
+              deviceName: resolveSummaryDeviceName(e.deviceId, 'traccar') || null,
+              source: 'traccar',
+              geofenceId: e.geofenceId || null,
+              positionId: e.positionId || null,
+              attributes: e.attributes || null,
+              openedAt: isClosed ? null : isoTime,
+              closedAt: isClosed ? isoTime : null,
+            });
+          }
+        } else if (devSource === 'foxlogger') {
+          const alarmList = await foxlogger.waitForInit(3000).then(() => foxlogger.getAlarmReports()).catch(() => []);
+          for (const item of (alarmList || [])) {
+            const devId = parseInt(item.cr_imei, 10);
+            const matchesDevice = (
+              devId === idNum ||
+              String(item.cr_imei) === String(deviceId) ||
+              item.cr_imei?.replace(/^0+/, '') === String(deviceId).replace(/^0+/, '')
+            );
+            if (!matchesDevice) continue;
+
+            const alarmName = item.cr_alm || item.cr_alrm || 'FoxLogger Alarm';
+            const conf = eventConfig.resolveConfig('foxlogger', `alarm:${alarmName}`);
+            if (!conf.isEnabled) continue;
+
+            const openTime = toUtcIso(item.cr_time, { timeZone: config.foxlogger.timezone });
+            if (!openTime) continue;
+            if (effectiveFrom && new Date(openTime) < new Date(effectiveFrom)) continue;
+            if (effectiveTo && new Date(openTime) > new Date(effectiveTo)) continue;
+
+            const durSec = parseInt(item.cr_durt, 10) || 0;
+            const closeTime = toUtcIso(new Date(new Date(openTime).getTime() + durSec * 1000));
+
+            // ponytail: foxlogger alarm duration ceiling: upstream cut-power reports store past alarms with duration in seconds -> upgrade path: live alarm stream webhook/mqtt if active open alarm state is required
+            events.push({
+              name: conf.customLabel || alarmName,
+              type: alarmName,
+              level: conf.level,
+              color: conf.color,
+              eventTime: closeTime || openTime,
+              status: 'CLOSE',
+              deviceId: devId,
+              deviceName: resolveSummaryDeviceName(devId, 'foxlogger') || item.cr_nopol || null,
+              source: 'foxlogger',
+              openedAt: openTime,
+              closedAt: closeTime || openTime,
+            });
+          }
+        } else {
+          const merged = cache.get('devices:merged') || [];
+          let bcId = null;
+          const d = merged.find(x => (x.id === idNum || String(x.id) === String(deviceId)) && x.source === 'mspf');
+          if (d) bcId = d.attributes?.bcId || (d.group ? parseInt(d.group.replace('mspf_', ''), 10) : null);
+          if (!bcId) {
+            const mspfDev = await mspf.getDevice(idNum).catch(() => null);
+            if (mspfDev?.bcId) bcId = mspfDev.bcId;
+          }
+
+          if (bcId) {
+            const [openRes, closedRes] = await Promise.allSettled([
+              mspf.getMspfEvents({ bcIds: [bcId], deviceId: idNum }),
+              mspf.getMspfClosedEvents({ bcId, deviceId: idNum, from: effectiveFrom, to: effectiveTo || undefined }),
+            ]);
+
+            const openEvents = openRes.status === 'fulfilled' ? (openRes.value || []) : [];
+            const closedEvents = closedRes.status === 'fulfilled' ? (closedRes.value || []) : [];
+
+            for (const e of [...openEvents, ...closedEvents]) {
+              const monitorName = e.monitorName || 'MSPF Event';
+              const conf = eventConfig.resolveConfig('mspf', e.monitorId ? `monitor:${e.monitorId}` : monitorName, e.monitorId);
+              if (!conf.isEnabled) continue;
+              const evStatus = e.status || (e.closedAt ? 'CLOSE' : 'OPEN');
+              const isClosed = (evStatus === 'CLOSE' || !!e.closedAt);
+              const openedAtIso = toUtcIso(e.openedAt) || null;
+              const closedAtIso = toUtcIso(e.closedAt) || null;
+              const eventTimeIso = toUtcIso(isClosed ? (e.closedAt || e.openedAt) : (e.openedAt || e.closedAt));
+
+              events.push({
+                name: conf.customLabel || monitorName,
+                type: monitorName,
+                level: conf.level,
+                color: conf.color,
+                eventTime: eventTimeIso,
+                status: evStatus,
+                deviceId: e.deviceId,
+                deviceName: resolveSummaryDeviceName(e.deviceId, 'mspf') || null,
+                source: 'mspf',
+                monitorId: e.monitorId || null,
+                monitorName: e.monitorName || null,
+                openedAt: openedAtIso,
+                closedAt: closedAtIso,
+              });
+            }
+          }
+        }
+      } else {
+        // ── Multi-device (no deviceId) ───────────────────────
+        const mergedDevices = cache.get('devices:merged') || [];
+        let mspfBcIds = [];
+        let allowedKeys = null;
+        if (!isAdmin) {
+          if (userGroups.length > 0) {
+            allowedKeys = await getAllowedDeviceKeys(userGroups);
+            for (const k of allowedKeys) {
+              if (k.startsWith('mspf:')) {
+                const devId = parseInt(k.slice(5), 10);
+                const dev = mergedDevices.find(d => d.id === devId && d.source === 'mspf');
+                const bc = dev?.attributes?.bcId || (dev?.group ? parseInt(dev.group.replace('mspf_', ''), 10) : null);
+                if (bc && !mspfBcIds.includes(bc)) mspfBcIds.push(bc);
+              }
+            }
+          }
+        } else {
+          for (const d of mergedDevices) {
+            if (d.source === 'mspf') {
+              const bc = d.attributes?.bcId || (d.group ? parseInt(d.group.replace('mspf_', ''), 10) : null);
+              if (bc && !mspfBcIds.includes(bc)) mspfBcIds.push(bc);
+            }
+          }
+        }
+        // ponytail: default bcId fallback ceiling: untracked MSPF devices without cache -> upgrade path: dynamic MSPF BC listing API
+        if (mspfBcIds.length === 0) mspfBcIds = [10000023];
+
+        // ponytail: static geofence fallback on multi-device events ceiling: multi-device reports show 'Geofence Enter/Exit' instead of zone name -> upgrade path: cached geofence dictionary or batch geofence lookup if multi-device needs specific zone names
+        const [traccarResult, mspfResult, foxResult, ...closedResults] = await Promise.allSettled([
+          traccar.getReportEvents({ from: effectiveFrom, to: effectiveTo || undefined }),
+          mspf.getMspfEvents({ bcIds: mspfBcIds }).catch(() => []),
+          foxlogger.waitForInit(3000).then(() => foxlogger.getAlarmReports()).catch(() => []),
+          ...mspfBcIds.map(bcId => Promise.resolve(mspf.getMspfClosedEvents?.({ bcId, from: effectiveFrom, to: effectiveTo || undefined })).catch(() => [])),
+        ]);
+
+        if (traccarResult.status === 'fulfilled' && Array.isArray(traccarResult.value)) {
+          for (const e of traccarResult.value) {
+            const conf = eventConfig.resolveConfig('traccar', e.geofenceId ? `geofence:${e.geofenceId}` : e.type, e.geofenceId);
+            if (!conf.isEnabled) continue;
+            const evStatus = TRACCAR_EVENT_STATUS[e.type] || null;
+            const isoTime = toUtcIso(e.eventTime);
+            const isClosed = evStatus === 'CLOSE';
+            // ponytail: traccar discrete event lifecycle ceiling: traccar events are discrete log points without foreign keys between enter/exit -> upgrade path: stateful session correlation engine if paired duration is strictly required
+            events.push({
+              name: conf.customLabel || formatEventType(e.type),
+              type: e.type || null,
+              level: conf.level,
+              color: conf.color,
+              eventTime: isoTime,
+              status: evStatus,
+              deviceId: e.deviceId,
+              deviceName: resolveSummaryDeviceName(e.deviceId, 'traccar') || null,
+              source: 'traccar',
+              geofenceId: e.geofenceId || null,
+              openedAt: isClosed ? null : isoTime,
+              closedAt: isClosed ? isoTime : null,
+            });
+          }
+        }
+
+        const mspfOpenEvents = (mspfResult.status === 'fulfilled' && Array.isArray(mspfResult.value)) ? mspfResult.value : [];
+        const mspfClosedEvents = [];
+        for (const cr of closedResults) {
+          if (cr.status === 'fulfilled' && Array.isArray(cr.value)) {
+            mspfClosedEvents.push(...cr.value);
+          }
+        }
+
+        for (const e of [...mspfOpenEvents, ...mspfClosedEvents]) {
+          const monitorName = e.monitorName || 'MSPF Event';
+          const conf = eventConfig.resolveConfig('mspf', e.monitorId ? `monitor:${e.monitorId}` : monitorName, e.monitorId);
+          if (!conf.isEnabled) continue;
+          const evStatus = e.status || (e.closedAt ? 'CLOSE' : 'OPEN');
+          const isClosed = (evStatus === 'CLOSE' || !!e.closedAt);
+          const openedAtIso = toUtcIso(e.openedAt) || null;
+          const closedAtIso = toUtcIso(e.closedAt) || null;
+          const eventTimeIso = toUtcIso(isClosed ? (e.closedAt || e.openedAt) : (e.openedAt || e.closedAt));
+
+          events.push({
+            name: conf.customLabel || monitorName,
+            type: monitorName,
+            level: conf.level,
+            color: conf.color,
+            eventTime: eventTimeIso,
+            status: evStatus,
+            deviceId: e.deviceId,
+            deviceName: resolveSummaryDeviceName(e.deviceId, 'mspf') || null,
+            source: 'mspf',
+            monitorId: e.monitorId || null,
+            monitorName: e.monitorName || null,
+            openedAt: openedAtIso,
+            closedAt: closedAtIso,
+          });
+        }
+
+        if (foxResult.status === 'fulfilled' && Array.isArray(foxResult.value)) {
+          for (const item of foxResult.value) {
+            const alarmName = item.cr_alm || item.cr_alrm || 'FoxLogger Alarm';
+            const conf = eventConfig.resolveConfig('foxlogger', `alarm:${alarmName}`);
+            if (!conf.isEnabled) continue;
+
+            const openTime = toUtcIso(item.cr_time, { timeZone: config.foxlogger.timezone });
+            if (!openTime) continue;
+            if (effectiveFrom && new Date(openTime) < new Date(effectiveFrom)) continue;
+            if (effectiveTo && new Date(openTime) > new Date(effectiveTo)) continue;
+
+            const durSec = parseInt(item.cr_durt, 10) || 0;
+            const closeTime = toUtcIso(new Date(new Date(openTime).getTime() + durSec * 1000));
+            const devId = parseInt(item.cr_imei, 10);
+
+            // ponytail: foxlogger alarm duration ceiling: upstream cut-power reports store past alarms with duration in seconds -> upgrade path: live alarm stream webhook/mqtt if active open alarm state is required
+            events.push({
+              name: conf.customLabel || alarmName,
+              type: alarmName,
+              level: conf.level,
+              color: conf.color,
+              eventTime: closeTime || openTime,
+              status: 'CLOSE',
+              deviceId: devId,
+              deviceName: resolveSummaryDeviceName(devId, 'foxlogger') || item.cr_nopol || null,
+              source: 'foxlogger',
+              openedAt: openTime,
+              closedAt: closeTime || openTime,
+            });
+          }
+        }
+
+        if (!isAdmin) {
+          if (userGroups.length === 0) {
+            events = [];
+          } else {
+            if (!allowedKeys) allowedKeys = await getAllowedDeviceKeys(userGroups);
+            events = events.filter(e => allowedKeys.has(`${e.source}:${e.deviceId}`) || (e.source === 'foxlogger' && allowedKeys.has(`${e.source}:0${e.deviceId}`)));
+          }
+        }
+      }
+
+      if (useCache) cache.set(cacheKey, events, 30);
+    }
+
+    let filtered = [...events];
+    if (status) filtered = filtered.filter(e => e.status === status.toUpperCase());
+    if (name) filtered = filtered.filter(e => e.name && e.name.toLowerCase().includes(name.toLowerCase()));
+    if (type) filtered = filtered.filter(e => e.type && e.type.toLowerCase().includes(type.toLowerCase()));
+    if (level) filtered = filtered.filter(e => e.level && e.level.toLowerCase() === level.toLowerCase());
+    filtered.sort((a, b) => new Date(b.eventTime) - new Date(a.eventTime));
+
+    // ponytail: in-memory pagination ceiling: upstream provider returns >20k events -> upgrade path: upstream pagination if provider supports it
+    const paged = filtered.slice(offsetNum, offsetNum + limitNum);
+    const sanitized = isAdmin ? paged : sanitizeReportItems(paged, isAdmin);
+    const openCount = filtered.filter(e => e.status === 'OPEN').length;
+    const closedCount = filtered.filter(e => e.status === 'CLOSE').length;
 
     if (deviceId) {
       const idNum = parseInt(deviceId, 10);
       let devSource = group ? deviceRouter.resolveGroup(group)?.source : null;
       if (!devSource) devSource = deviceRouter.getSourceByDeviceId(idNum);
-      if (!devSource) {
-        const [t, m, f] = await Promise.allSettled([
-          traccar.getDevices({ id: idNum }),
-          mspf.getDevice(idNum),
-          foxlogger.waitForInit(3000).then(() => foxlogger.getDevices()).then(d => d.data.find(x => x.uniqueId === req.query.deviceId || String(x.id) === req.query.deviceId)),
-        ]);
-        if (t.status === 'fulfilled' && t.value?.[0]) {
-          devSource = 'traccar';
-          deviceRouter.setSourceByDeviceId(idNum, 'traccar');
-        } else if (m.status === 'fulfilled' && m.value?.id) {
-          devSource = 'mspf';
-          deviceRouter.setSourceByDeviceId(idNum, 'mspf');
-        } else if (f.status === 'fulfilled' && f.value) {
-          devSource = 'foxlogger';
-          deviceRouter.setSourceByDeviceId(idNum, 'foxlogger');
-        } else throw createError(404, 'Device not found', { code: 'ERR_NOT_FOUND' });
-      }
-
-      if (!isAdmin) {
-        if (!userGroups.length) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
-        const allowed = await isDeviceAllowedForGroups(idNum, devSource, userGroups);
-        if (!allowed) throw createError(403, 'Forbidden', { code: 'ERR_FORBIDDEN' });
-      }
-
-      let events = [];
-      if (devSource === 'traccar') {
-        const data = await traccar.getReportEvents({ deviceId: idNum, from, to: to || undefined });
-        const geoList = await traccar.getGeofences();
-        const geoMap = {};
-        for (const g of geoList) geoMap[g.id] = g.name;
-
-        for (const e of data || []) {
-          const isGeo = (e.type === 'geofenceEnter' || e.type === 'geofenceExit');
-          events.push({
-            name: isGeo && e.geofenceId ? (geoMap[e.geofenceId] || null) : (TRACCAR_EVENT_NAMES[e.type] || null),
-            eventTime: toUtcIso(e.eventTime),
-            status: TRACCAR_EVENT_STATUS[e.type] || null,
-            deviceId: e.deviceId,
-            source: 'traccar',
-            geofenceId: e.geofenceId || null,
-            positionId: e.positionId || null,
-            attributes: e.attributes || null,
-          });
-        }
-      } else {
-        const merged = cache.get('devices:merged');
-        let bcId = null;
-        if (merged) {
-          const d = merged.find(x => x.id === idNum && x.source === 'mspf');
-          if (d?.group) bcId = parseInt(d.group.replace('mspf_', ''), 10);
-        }
-
-        if (bcId) {
-          const [openRes, closedRes] = await Promise.allSettled([
-            mspf.getMspfEvents({ bcIds: [bcId], deviceId: idNum }),
-            mspf.getMspfClosedEvents({ bcId, deviceId: idNum, from, to: to || undefined }),
-          ]);
-
-          const openEvents = openRes.status === 'fulfilled' ? openRes.value : [];
-          const closedEvents = closedRes.status === 'fulfilled' ? closedRes.value : [];
-
-          for (const e of [...openEvents, ...closedEvents]) {
-            events.push({
-              name: e.monitorName || null,
-              eventTime: toUtcIso(e.openedAt || e.closedAt),
-              status: e.status || 'OPEN',
-              deviceId: e.deviceId,
-              source: 'mspf',
-              monitorId: e.monitorId || null,
-              monitorName: e.monitorName || null,
-              openedAt: toUtcIso(e.openedAt) || null,
-              closedAt: toUtcIso(e.closedAt) || null,
-            });
-          }
-        }
-      }
-
-      if (status) events = events.filter(e => e.status === status.toUpperCase());
-      if (name) events = events.filter(e => e.name && e.name.toLowerCase().includes(name.toLowerCase()));
-      events.sort((a, b) => new Date(b.eventTime) - new Date(a.eventTime));
-
-      const openCount = events.filter(e => e.status === 'OPEN').length;
-      const closedCount = events.filter(e => e.status === 'CLOSE').length;
-
       return res.json({
-        deviceId: idNum, source: devSource,
-        period: { from, to: to || new Date().toISOString() },
-        events,
-        summary: { total: events.length, open: openCount, closed: closedCount },
+        deviceId: idNum,
+        deviceName: resolveSummaryDeviceName(idNum, devSource) || null,
+        source: devSource,
+        period: { from: effectiveFrom, to: effectiveTo || new Date().toISOString() },
+        events: sanitized,
+        summary: { total: filtered.length, open: openCount, closed: closedCount, offset: offsetNum, limit: limitNum },
       });
     }
 
-    // ── Multi-device (no deviceId) ───────────────────────
-    const [traccarResult, mspfResult] = await Promise.allSettled([
-      traccar.getReportEvents({ from, to: to || undefined }),
-      mspf.getMspfEvents({ bcIds: [10000023] }).catch(() => []),
-    ]);
-
-    let events = [];
-    if (traccarResult.status === 'fulfilled') {
-      for (const e of traccarResult.value) {
-        events.push({
-          name: null, eventTime: toUtcIso(e.eventTime),
-          status: TRACCAR_EVENT_STATUS[e.type] || null,
-          deviceId: e.deviceId, source: 'traccar',
-          geofenceId: e.geofenceId || null,
-        });
-      }
-    }
-    if (mspfResult.status === 'fulfilled') {
-      for (const e of mspfResult.value) {
-        events.push({
-          name: null, eventTime: toUtcIso(e.openedAt || e.closedAt),
-          status: e.status || null, deviceId: e.deviceId, source: 'mspf',
-          monitorId: e.monitorId || null,
-        });
-      }
-    }
-
-    if (!isAdmin) {
-      if (userGroups.length === 0) { events = []; }
-      else {
-        const allowedKeys = await getAllowedDeviceKeys(userGroups);
-        events = events.filter(e => allowedKeys.has(`${e.source}:${e.deviceId}`));
-      }
-    }
-
-    if (status) events = events.filter(e => e.status === status.toUpperCase());
-    if (name) events = events.filter(e => e.name && e.name.toLowerCase().includes(name.toLowerCase()));
-    events.sort((a, b) => new Date(b.eventTime) - new Date(a.eventTime));
-
-    res.json({
-      period: { from, to: to || new Date().toISOString() },
-      events: isAdmin ? events : sanitizeReportItems(events, isAdmin),
-      summary: { total: events.length },
+    return res.json({
+      period: { from: effectiveFrom, to: effectiveTo || new Date().toISOString() },
+      events: sanitized,
+      summary: { total: filtered.length, open: openCount, closed: closedCount, offset: offsetNum, limit: limitNum },
     });
   } catch (err) {
     next(err);
