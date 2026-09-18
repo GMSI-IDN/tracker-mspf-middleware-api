@@ -140,14 +140,6 @@ jobs:
             cd "$DEPLOY_PATH"
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
             docker pull "$IMAGE:$IMAGE_TAG"
-            docker run --rm \
-              -e PORT -e NODE_ENV -e DB_DRIVER -e DB_PATH -e JWT_SECRET -e JWT_EXPIRY \
-              -e DB_HOST -e DB_PORT -e DB_NAME -e DB_USER -e DB_PASS \
-              -e TRACCAR_URL -e TRACCAR_USERNAME -e TRACCAR_PASSWORD \
-              -e MSPF_URL -e MSPF_CLIENT_ID -e MSPF_CLIENT_SECRET -e MSPF_TOKEN_URL \
-              -e CACHE_DEVICE_TTL -e MCCS_CACHE_TTL \
-              -v "$DEPLOY_PATH/data:/app/data" \
-              "$IMAGE:$IMAGE_TAG" node src/scripts/migrate.js
             docker compose -p middleware-$IMAGE_TAG up -d --remove-orphans
             docker image prune -f
             docker logout ghcr.io
