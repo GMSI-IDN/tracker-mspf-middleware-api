@@ -4,6 +4,8 @@ const mspf = require('../services/mspf');
 const cache = require('../services/cache');
 const db = require('../db');
 const { toUtcIso } = require('../utils/timestamp');
+const { getAllowedDeviceKeys } = require('../services/groupMembership');
+const eventConfig = require('../services/eventConfig');
 
 const router = express.Router();
 
@@ -41,6 +43,24 @@ function summariseRunningStatus(devices, allowedDevices) {
   return counts;
 }
 
+const TRACCAR_EVENT_NAMES = {
+  geofenceEnter: 'Geofence Enter',
+  geofenceExit: 'Geofence Exit',
+  ignitionOn: 'Ignition ON',
+  ignitionOff: 'Ignition OFF',
+  deviceOnline: 'Device Online',
+  deviceOffline: 'Device Offline',
+  deviceMoving: 'Device Moving',
+  deviceStopped: 'Device Stopped',
+  alarm: 'Alarm',
+  overspeed: 'Overspeed',
+  maintenance: 'Maintenance',
+  commandResult: 'Command Result',
+  driverChanged: 'Driver Changed',
+  textMessage: 'Text Message',
+  deviceUnknown: 'Device Unknown',
+};
+
 router.get('/', async (req, res, next) => {
   try {
     const { from, to } = req.query;
@@ -53,8 +73,7 @@ router.get('/', async (req, res, next) => {
       if (userGroups.length === 0) {
         allowedDevices = new Set();
       } else {
-        const dgs = await db('device_groups').whereIn('group_id', userGroups).select('device_id', 'source');
-        allowedDevices = new Set(dgs.map(d => `${d.source}:${d.device_id}`));
+        allowedDevices = await getAllowedDeviceKeys(userGroups);
       }
     }
 
@@ -98,17 +117,26 @@ router.get('/', async (req, res, next) => {
 
     let recentEvents = [];
     try {
+      await eventConfig.loadConfigCache();
       const eventFrom = from || new Date(Date.now() - 7 * 86400000).toISOString();
       const eventTo = to || new Date().toISOString();
       const data = await traccar.getReportEvents({ from: eventFrom, to: eventTo });
       for (const e of (data || [])) {
         if (allowedDevices && !allowedDevices.has(`traccar:${e.deviceId}`)) continue;
+        const dev = devices.find(d => (d.id === e.deviceId || String(d.id) === String(e.deviceId)) && d.source === 'traccar');
+        const eventName = TRACCAR_EVENT_NAMES[e.type] || (e.type ? e.type.replace(/([A-Z])/g, ' $1').trim().replace(/^./, s => s.toUpperCase()) : 'Unknown Event');
+        const conf = eventConfig.resolveConfig('traccar', e.geofenceId ? `geofence:${e.geofenceId}` : e.type, e.geofenceId);
+        if (!conf.isEnabled) continue;
         recentEvents.push({
-          name: e.type === 'geofenceEnter' || e.type === 'geofenceExit' ? null : e.type.replace(/([A-Z])/g, ' $1').trim().replace(/^./, s => s.toUpperCase()),
+          name: conf.customLabel || eventName,
+          type: e.type || null,
+          level: conf.level,
+          color: conf.color,
           eventTime: toUtcIso(e.eventTime),
           status: null,
           deviceId: e.deviceId,
-          source: 'traccar',
+          deviceName: dev?.name || null,
+          ...(isAdmin ? { source: 'traccar' } : {}),
         });
         if (recentEvents.length >= 10) break;
       }

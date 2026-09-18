@@ -5,18 +5,23 @@ const db = require('../db');
 const cache = require('../services/cache');
 const traccar = require('../services/traccar');
 const mspf = require('../services/mspf');
+const foxlogger = require('../services/foxlogger');
 const validate = require('../middleware/validate');
 
 async function deviceExists(deviceId, source) {
   const merged = cache.get('devices:merged');
   if (merged) {
-    const found = merged.find(d => d.id === deviceId && d.source === source);
+    const found = merged.find(d => (d.id === deviceId || String(d.id) === String(deviceId)) && d.source === source);
     if (found) return true;
   }
   try {
     if (source === 'traccar') {
       const data = await traccar.getDevices({ id: deviceId });
       return data && data.length > 0;
+    }
+    if (source === 'foxlogger') {
+      const data = await foxlogger.getDevices();
+      return (data?.data || []).some(d => d.id === deviceId || String(d.id) === String(deviceId) || d.uniqueId === String(deviceId));
     }
     await mspf.getDevice(deviceId);
     return true;
@@ -40,7 +45,7 @@ async function validateDevicesExist(rows) {
 
 function getDeviceName(deviceId, source) {
   const merged = require('../services/cache').get('devices:merged') || [];
-  const dev = merged.find(d => d.id === deviceId && d.source === source);
+  const dev = merged.find(d => (d.id === deviceId || String(d.id) === String(deviceId)) && d.source === source);
   return dev?.name || `${source}:${deviceId}`;
 }
 
@@ -68,7 +73,7 @@ router.get('/', async (req, res, next) => {
 
 router.post('/',
   body('deviceId').notEmpty().withMessage('deviceId is required'),
-  body('source').isIn(['traccar', 'mspf']).withMessage('source must be traccar or mspf'),
+  body('source').isIn(['traccar', 'mspf', 'foxlogger']).withMessage('source must be traccar, mspf, or foxlogger'),
   body('groupId').isInt().withMessage('groupId must be an integer'),
   validate,
   async (req, res, next) => {

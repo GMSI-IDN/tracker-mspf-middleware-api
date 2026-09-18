@@ -163,6 +163,7 @@ async function getBatchMccsData(deviceIds, statusMap = {}) {
   const now = Date.now();
   const ids = [...new Set(deviceIds.filter(Boolean))];
   const activeIds = ids.filter(id => {
+    if (ids.length === 1) return true;
     const s = statusMap[id];
     if (!s?.lastCommunicatedAt) return false;
     return (now - new Date(s.lastCommunicatedAt).getTime()) < 30 * 24 * 3600 * 1000;
@@ -218,25 +219,33 @@ function normalizeMccsToAttributes(mccsRecord) {
 
 // ── Enrich positions ─────────────────────────────────────
 
+// ponytail: single-device route directly fetches single status; batch positions use list paging -> upgrade path: streaming position enricher
 async function enrichPositions(positions) {
   if (!positions || positions.length === 0) return positions;
   const deviceIds = [...new Set(positions.map(p => p.deviceId).filter(Boolean))];
 
-  let statusResult = null;
-  if (deviceIds.length <= 200) {
-    statusResult = await getDeviceStatusList({ limit: 200 });
-  } else {
-    let all = []; let start = undefined;
-    do {
-      const res = await getApi().get('/v3/devices/status', { params: { limit: 200, start } });
-      all.push(...(res.data?.data || []));
-      start = res.data?.next;
-    } while (start);
-    statusResult = { data: all };
-  }
   const statusMap = {};
-  if (statusResult?.data) {
-    for (const s of statusResult.data) statusMap[s.deviceId] = s;
+  if (deviceIds.length === 1) {
+    try {
+      const single = await getDeviceStatus(deviceIds[0]);
+      if (single) statusMap[deviceIds[0]] = single;
+    } catch { }
+  } else {
+    let statusResult = null;
+    if (deviceIds.length <= 200) {
+      statusResult = await getDeviceStatusList({ limit: 200 });
+    } else {
+      let all = []; let start = undefined;
+      do {
+        const res = await getApi().get('/v3/devices/status', { params: { limit: 200, start } });
+        all.push(...(res.data?.data || []));
+        start = res.data?.next;
+      } while (start);
+      statusResult = { data: all };
+    }
+    if (statusResult?.data) {
+      for (const s of statusResult.data) statusMap[s.deviceId] = s;
+    }
   }
 
   let mccsMap = {};
@@ -432,10 +441,173 @@ async function getPositions(params = {}) {
   return enrichPositions(all);
 }
 
+// ── Historical MCCS & Route Enrichment ─────────────────────
+
+// ponytail: chunk MCCS history by 24h slices due to MSPF constraint -> upgrade path: chunked streaming worker
+async function getDeviceMccsHistory(deviceId, params = {}) {
+  if (!deviceId) return [];
+  const fromMs = params.from ? new Date(params.from).getTime() : 0;
+  const toMs = params.to ? new Date(params.to).getTime() : 0;
+
+  if (!fromMs || !toMs || toMs <= fromMs) {
+    try {
+      const res = await getApi().get(`/v2/device/${deviceId}/data/history`, {
+        params: params.from || params.to ? { from: params.from, to: params.to } : {},
+        timeout: 10000,
+      });
+      return res.data?.data || [];
+    } catch {
+      return [];
+    }
+  }
+
+  const ONE_DAY_MS = 24 * 3600 * 1000;
+  const slices = [];
+  let curStart = fromMs;
+  while (curStart < toMs) {
+    const curEnd = Math.min(curStart + ONE_DAY_MS, toMs);
+    slices.push({
+      from: new Date(curStart).toISOString(),
+      to: new Date(curEnd).toISOString(),
+    });
+    curStart = curEnd;
+  }
+
+  const results = await Promise.allSettled(
+    slices.map(slice =>
+      getApi().get(`/v2/device/${deviceId}/data/history`, {
+        params: { from: slice.from, to: slice.to },
+        timeout: 10000,
+      }).then(res => res.data?.data || [])
+    )
+  );
+
+  const all = [];
+  for (const r of results) {
+    if (r.status === 'fulfilled' && Array.isArray(r.value)) {
+      all.push(...r.value);
+    }
+  }
+  return all;
+}
+
+function getMccsTimestamp(item) {
+  if (!item) return 0;
+  if (item.createdAt) {
+    const t = new Date(item.createdAt).getTime();
+    if (!Number.isNaN(t) && t > 0) return t;
+  }
+  const d = item.data ?? item;
+  if (d?.ts) {
+    return d.ts * 1000;
+  }
+  if (item.insDtm) {
+    const t = new Date(item.insDtm).getTime();
+    if (!Number.isNaN(t) && t > 0) return t;
+  }
+  return 0;
+}
+
+// ponytail: nearest-neighbor timestamp match (window +-120s) -> upgrade path: spatial-temporal spline interpolation
+function findClosestMccsRecord(sortedMccs, targetTime, maxToleranceMs = 120000) {
+  if (!sortedMccs || sortedMccs.length === 0) return null;
+  let low = 0;
+  let high = sortedMccs.length - 1;
+
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    const diff = sortedMccs[mid].time - targetTime;
+    if (diff === 0) return sortedMccs[mid].item;
+    if (diff < 0) low = mid + 1;
+    else high = mid - 1;
+  }
+
+  let best = null;
+  let bestDiff = Infinity;
+  for (let i = Math.max(0, high - 1); i <= Math.min(sortedMccs.length - 1, low + 1); i++) {
+    const diff = Math.abs(sortedMccs[i].time - targetTime);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = sortedMccs[i].item;
+    }
+  }
+
+  return bestDiff <= maxToleranceMs ? best : null;
+}
+
+function enrichRouteWithMccsHistory(positions, mccsHistory = [], status = null) {
+  if (!positions || positions.length === 0) return positions;
+
+  const sortedMccs = (mccsHistory || [])
+    .map(item => ({ time: getMccsTimestamp(item), item }))
+    .filter(x => x.time > 0)
+    .sort((a, b) => a.time - b.time);
+
+  const statusTags = status?.tags || {};
+
+  return positions.map(p => {
+    const pTime = new Date(p.deviceTime || 0).getTime();
+    const matchedMccs = findClosestMccsRecord(sortedMccs, pTime, 120000);
+
+    if (!matchedMccs) {
+      return {
+        ...p,
+        attributes: {
+          ...p.attributes,
+          ...statusTags,
+        },
+      };
+    }
+
+    const d = matchedMccs.data ?? matchedMccs;
+    const mccsAttrs = normalizeMccsToAttributes(matchedMccs);
+    const speed = d?.kph !== undefined ? parseFloat(d.kph) : (p.speed || 0);
+    const course = d?.dir !== undefined ? parseFloat(d.dir) : (p.course || 0);
+    const altitude = d?.alt !== undefined ? parseFloat(d.alt) : (p.altitude || 0);
+
+    let ignition = undefined;
+    if (d?.addr?.IGN !== undefined) {
+      ignition = d.addr.IGN === 1;
+    } else if (d?.gpio !== undefined) {
+      ignition = (d.gpio & 1) === 1;
+    }
+
+    const voltage = d?.volt !== undefined ? d.volt : (d?.addr?.EB !== undefined ? d.addr.EB : status?.voltage);
+    const running = calcRunningStatus(ignition, speed, p.deviceTime);
+    const serverTime = matchedMccs.insDtm ? toUtcIso(matchedMccs.insDtm) || p.serverTime : p.serverTime;
+
+    return {
+      ...p,
+      serverTime,
+      speed,
+      course,
+      altitude,
+      attributes: {
+        ...p.attributes,
+        ...statusTags,
+        ...(ignition !== undefined ? { ignition } : {}),
+        ...(voltage !== undefined ? { voltage } : {}),
+        ...(d?.sats !== undefined ? { sats: d.sats } : {}),
+        ...(running ? { running } : {}),
+        ...mccsAttrs,
+      },
+    };
+  });
+}
+
 async function getDeviceRoute(deviceId, params = {}) {
-  const res = await getApi().get(`/v3/devices/${deviceId}/route`, { params });
-  const positions = (res.data.data || []).map((p) => normalizePosition(deviceId, p));
-  return enrichPositions(positions.reverse());
+  const [routeRes, mccsHistory, statusRes] = await Promise.allSettled([
+    getApi().get(`/v3/devices/${deviceId}/route`, { params }),
+    getDeviceMccsHistory(deviceId, { from: params.from, to: params.to }),
+    getDeviceStatus(deviceId),
+  ]);
+
+  const rawPositions = routeRes.status === 'fulfilled' ? (routeRes.value.data?.data || []) : [];
+  const positions = rawPositions.map((p) => normalizePosition(deviceId, p)).reverse();
+  const mccsData = mccsHistory.status === 'fulfilled' ? (mccsHistory.value || []) : [];
+  const status = statusRes.status === 'fulfilled' ? statusRes.value : null;
+
+  return enrichRouteWithMccsHistory(positions, mccsData, status);
 }
 
 async function getDeviceStatus(deviceId) {
@@ -549,10 +721,16 @@ async function getMspfClosedEvents(params = {}) {
   return res.data?.data || res.data || [];
 }
 
+async function getMonitors(params = {}) {
+  const res = await getApi().get('/v4/monitors', { params });
+  return res.data?.data || res.data || [];
+}
+
 module.exports = {
   init, waitForInit, getApi, normalizeDevice, normalizePosition, enrichDevice,
   getDevices, searchDevices, getDevice, getBcList, getBc,
   getPositions, getDeviceRoute,
+  getDeviceMccsHistory, enrichRouteWithMccsHistory,
   getDeviceStatus, getDeviceStatusList,
   activateDevice, getCommandHistory,
   getDeviceParking, getDeviceParkingAll,
@@ -562,4 +740,5 @@ module.exports = {
   getBcStatsReports,
   getMspfEvents,
   getMspfClosedEvents,
+  getMonitors,
 };

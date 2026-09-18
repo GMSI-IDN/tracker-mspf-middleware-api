@@ -1,4 +1,5 @@
 const request = require('supertest');
+const bcrypt = require('bcryptjs');
 
 jest.mock('../services/traccar', () => ({
   getDevices: jest.fn(),
@@ -70,6 +71,12 @@ jest.mock('../services/autoSync', () => ({
 
 jest.mock('../services/customAttributes', () => ({
   applyRules: jest.fn((device, rules) => device),
+  enrichWithRules: jest.fn((device, rules) => {
+    for (const r of rules || []) {
+      if (r.mode === 'compute') device.attributes[r.name] = 12.5;
+    }
+    return device;
+  }),
   computeFormula: jest.fn(),
   getDeviceRules: jest.fn(() => Promise.resolve([])),
   buildDeviceRulesCache: jest.fn(() => Promise.resolve()),
@@ -78,6 +85,7 @@ jest.mock('../services/customAttributes', () => ({
 const traccar = require('../services/traccar');
 const mspf = require('../services/mspf');
 const foxlogger = require('../services/foxlogger');
+const customAttributes = require('../services/customAttributes');
 const db = require('../db');
 const { startOfDayIso } = require('../utils/timestamp');
 
@@ -86,6 +94,8 @@ const app = require('../app');
 jest.setTimeout(30000);
 beforeAll(async () => {
   await db.waitForMigration();
+  await db('groups').where('name', 'route_test_group').delete();
+  await db('users').where('username', 'route_cust').delete();
 });
 
 describe('Health', () => {
@@ -114,6 +124,10 @@ describe('Health', () => {
 });
 
 describe('Authentication', () => {
+  beforeAll(async () => {
+    await db('users').where({ username: 'admin' }).update({ timezone: null });
+  });
+
   test('POST /api/auth/login with valid credentials returns token', async () => {
     const res = await request(app)
       .post('/api/auth/login')
@@ -156,6 +170,138 @@ describe('Authentication', () => {
     const res = await request(app).get('/api/auth/me');
     expect(res.status).toBe(401);
   });
+
+  test('POST /api/auth/login with email returns token', async () => {
+    await db('users').where({ username: 'admin' }).update({
+      email: 'admin@system.local',
+      first_name: 'Admin',
+      last_name: 'System',
+    });
+
+    const res = await request(app)
+      .post('/api/auth/login')
+      .send({ email: 'admin@system.local', password: 'admin123' });
+    expect(res.status).toBe(200);
+    expect(res.body.token).toBeDefined();
+    expect(res.body.user.email).toBe('admin@system.local');
+    expect(res.body.user.firstName).toBe('Admin');
+    expect(res.body.user.lastName).toBe('System');
+  });
+
+  test('POST /api/auth/login allows case-insensitive email', async () => {
+    const res = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'ADMIN@SYSTEM.LOCAL', password: 'admin123' });
+    expect(res.status).toBe(200);
+    expect(res.body.user.email).toBe('admin@system.local');
+  });
+
+  test('PUT /api/auth/me updates self profile (name, timezone)', async () => {
+    await db('users').where({ username: 'self_profile_user' }).delete();
+    const hash = bcrypt.hashSync('pass123', 10);
+    await db('users').insert({
+      username: 'self_profile_user',
+      email: 'self@example.com',
+      first_name: 'Original',
+      last_name: 'Name',
+      password_hash: hash,
+      role: 'customer',
+      groups: '[]',
+      timezone: 'Asia/Jakarta',
+    });
+
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'self_profile_user', password: 'pass123' });
+    const token = login.body.token;
+
+    const res = await request(app)
+      .put('/api/auth/me')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        firstName: 'Super',
+        lastName: 'User',
+        timezone: 'Asia/Makassar',
+      });
+    expect(res.status).toBe(200);
+    expect(res.body.firstName).toBe('Super');
+    expect(res.body.lastName).toBe('User');
+    expect(res.body.timezone).toBe('Asia/Makassar');
+    expect(res.body.token).toBeDefined();
+
+    await db('users').where({ username: 'self_profile_user' }).delete();
+  });
+
+  test('PUT /api/auth/me updates password when confirmPassword matches', async () => {
+    await db('users').where({ username: 'pwd_test' }).delete();
+    const hash = bcrypt.hashSync('oldpass123', 10);
+    await db('users').insert({
+      username: 'pwd_test',
+      email: 'pwd_test@example.com',
+      first_name: 'Pwd',
+      last_name: 'Test',
+      password_hash: hash,
+      role: 'customer',
+      groups: '[]',
+      timezone: 'Asia/Jakarta',
+    });
+
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'pwd_test', password: 'oldpass123' });
+    const token = login.body.token;
+
+    // Fail if confirmPassword missing
+    const noConfirm = await request(app)
+      .put('/api/auth/me')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ password: 'newpass123' });
+    expect(noConfirm.status).toBe(400);
+    expect(noConfirm.body.code).toBe('ERR_VALIDATION');
+
+    // Fail if confirmPassword doesn't match
+    const mismatch = await request(app)
+      .put('/api/auth/me')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ password: 'newpass123', confirmPassword: 'different123' });
+    expect(mismatch.status).toBe(400);
+    expect(mismatch.body.code).toBe('ERR_VALIDATION');
+
+    // Succeed with matching confirmation
+    const success = await request(app)
+      .put('/api/auth/me')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ password: 'newpass123', confirmPassword: 'newpass123' });
+    expect(success.status).toBe(200);
+
+    // Verify login with new password works
+    const newLogin = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'pwd_test', password: 'newpass123' });
+    expect(newLogin.status).toBe(200);
+  });
+
+  test('PUT /api/auth/me ignores role and groups alteration', async () => {
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'pwd_test', password: 'newpass123' });
+    const token = login.body.token;
+
+    const res = await request(app)
+      .put('/api/auth/me')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ role: 'admin', groups: [1, 2, 3] });
+    expect(res.status).toBe(200);
+    expect(res.body.role).toBe('customer');
+    expect(res.body.groups).toEqual([]);
+
+    await db('users').where({ username: 'pwd_test' }).delete();
+  });
+
+  test('PUT /api/auth/me without token returns 401', async () => {
+    const res = await request(app).put('/api/auth/me').send({ firstName: 'Anon' });
+    expect(res.status).toBe(401);
+  });
 });
 
 describe('User Management', () => {
@@ -188,7 +334,17 @@ describe('User Management', () => {
     const create = await request(app)
       .post('/api/users')
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ username: 'test_customer', password: 'pass123', role: 'customer', groups: [], timezone: 'Asia/Jakarta' });
+      .send({
+        username: 'test_customer',
+        email: 'test_customer@example.com',
+        firstName: 'Test',
+        lastName: 'Customer',
+        password: 'pass123',
+        confirmPassword: 'pass123',
+        role: 'customer',
+        groups: [],
+        timezone: 'Asia/Jakarta',
+      });
     expect([201, 409]).toContain(create.status);
 
     // Login as customer
@@ -235,7 +391,16 @@ describe('User Management', () => {
     const res = await request(app)
       .post('/api/users')
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ username: 'tz_missing', password: 'pass123', role: 'customer', groups: [] });
+      .send({
+        username: 'tz_missing',
+        email: 'tz_missing@example.com',
+        firstName: 'TZ',
+        lastName: 'Missing',
+        password: 'pass123',
+        confirmPassword: 'pass123',
+        role: 'customer',
+        groups: [],
+      });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('ERR_VALIDATION');
     expect(res.body.error).toContain('Timezone is required');
@@ -245,7 +410,17 @@ describe('User Management', () => {
     const res = await request(app)
       .post('/api/users')
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ username: 'tz_invalid', password: 'pass123', role: 'customer', groups: [], timezone: 'Not/AZone' });
+      .send({
+        username: 'tz_invalid',
+        email: 'tz_invalid@example.com',
+        firstName: 'TZ',
+        lastName: 'Invalid',
+        password: 'pass123',
+        confirmPassword: 'pass123',
+        role: 'customer',
+        groups: [],
+        timezone: 'Not/AZone',
+      });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('ERR_VALIDATION');
   });
@@ -255,9 +430,22 @@ describe('User Management', () => {
     const res = await request(app)
       .post('/api/users')
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ username: 'tz_ok', password: 'pass123', role: 'customer', groups: [], timezone: 'Asia/Jakarta' });
+      .send({
+        username: 'tz_ok',
+        email: 'tz_ok@example.com',
+        firstName: 'TZ',
+        lastName: 'Ok',
+        password: 'pass123',
+        confirmPassword: 'pass123',
+        role: 'customer',
+        groups: [],
+        timezone: 'Asia/Jakarta',
+      });
     expect(res.status).toBe(201);
     expect(res.body.timezone).toBe('Asia/Jakarta');
+    expect(res.body.email).toBe('tz_ok@example.com');
+    expect(res.body.firstName).toBe('TZ');
+    expect(res.body.lastName).toBe('Ok');
   });
 
   test('PUT /api/users/:id updates timezone', async () => {
@@ -290,6 +478,121 @@ describe('User Management', () => {
     expect(res.body.code).toBe('ERR_VALIDATION');
   });
 
+  test('POST /api/users fails when email, names, or confirmPassword missing', async () => {
+    const noEmail = await request(app)
+      .post('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        username: 'inc_1',
+        firstName: 'A',
+        lastName: 'B',
+        password: 'pass123',
+        confirmPassword: 'pass123',
+        timezone: 'Asia/Jakarta',
+      });
+    expect(noEmail.status).toBe(400);
+
+    const noName = await request(app)
+      .post('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        username: 'inc_2',
+        email: 'inc_2@example.com',
+        password: 'pass123',
+        confirmPassword: 'pass123',
+        timezone: 'Asia/Jakarta',
+      });
+    expect(noName.status).toBe(400);
+
+    const noConfirm = await request(app)
+      .post('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        username: 'inc_3',
+        email: 'inc_3@example.com',
+        firstName: 'A',
+        lastName: 'B',
+        password: 'pass123',
+        timezone: 'Asia/Jakarta',
+      });
+    expect(noConfirm.status).toBe(400);
+
+    const pwdMismatch = await request(app)
+      .post('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        username: 'inc_4',
+        email: 'inc_4@example.com',
+        firstName: 'A',
+        lastName: 'B',
+        password: 'pass123',
+        confirmPassword: 'mismatch',
+        timezone: 'Asia/Jakarta',
+      });
+    expect(pwdMismatch.status).toBe(400);
+  });
+
+  test('POST /api/users fails on duplicate email', async () => {
+    await db('users').where({ username: 'dup_email_1' }).delete();
+    await db('users').where({ username: 'dup_email_2' }).delete();
+
+    await request(app)
+      .post('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        username: 'dup_email_1',
+        email: 'duplicate@example.com',
+        firstName: 'Dup',
+        lastName: 'One',
+        password: 'pass123',
+        confirmPassword: 'pass123',
+        timezone: 'Asia/Jakarta',
+      });
+
+    const res = await request(app)
+      .post('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        username: 'dup_email_2',
+        email: 'duplicate@example.com',
+        firstName: 'Dup',
+        lastName: 'Two',
+        password: 'pass123',
+        confirmPassword: 'pass123',
+        timezone: 'Asia/Jakarta',
+      });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('ERR_CONFLICT');
+  });
+
+  test('PUT /api/users/:id updates password with confirmPassword', async () => {
+    const users = await request(app)
+      .get('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`);
+    const tzUser = users.body.find(u => u.username === 'tz_ok');
+
+    // Without confirm
+    const fail = await request(app)
+      .put(`/api/users/${tzUser.id}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ password: 'brandnewpass' });
+    expect(fail.status).toBe(400);
+
+    // With confirm
+    const success = await request(app)
+      .put(`/api/users/${tzUser.id}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        firstName: 'NewTZ',
+        lastName: 'NewOk',
+        password: 'brandnewpass',
+        confirmPassword: 'brandnewpass',
+      });
+    expect(success.status).toBe(200);
+    expect(success.body.firstName).toBe('NewTZ');
+    expect(success.body.lastName).toBe('NewOk');
+  });
+
   test('GET /api/auth/me includes timezone fallback for legacy users', async () => {
     const login = await request(app)
       .post('/api/auth/login')
@@ -301,6 +604,111 @@ describe('User Management', () => {
       .set('Authorization', `Bearer ${login.body.token}`);
     expect(res.status).toBe(200);
     expect(res.body.timezone).toBe('Asia/Jakarta');
+  });
+
+  test('POST /api/users creates user with isActive: false and login is rejected', async () => {
+    await db('users').where({ username: 'disabled_user' }).delete();
+    const create = await request(app)
+      .post('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        username: 'disabled_user',
+        email: 'disabled@example.com',
+        firstName: 'Disabled',
+        lastName: 'User',
+        password: 'pass123',
+        confirmPassword: 'pass123',
+        role: 'customer',
+        groups: [],
+        timezone: 'Asia/Jakarta',
+        isActive: false,
+      });
+    expect(create.status).toBe(201);
+    expect(create.body.isActive).toBe(false);
+
+    // Login must fail with 403 ERR_ACCOUNT_DISABLED
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'disabled_user', password: 'pass123' });
+    expect(login.status).toBe(403);
+    expect(login.body.code).toBe('ERR_ACCOUNT_DISABLED');
+  });
+
+  test('Admin disables active user -> existing token immediately revoked', async () => {
+    await db('users').where({ username: 'to_be_disabled' }).delete();
+    const create = await request(app)
+      .post('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        username: 'to_be_disabled',
+        email: 'tobedisabled@example.com',
+        firstName: 'To',
+        lastName: 'Disable',
+        password: 'pass123',
+        confirmPassword: 'pass123',
+        role: 'customer',
+        groups: [],
+        timezone: 'Asia/Jakarta',
+        isActive: true,
+      });
+    const userId = create.body.id;
+
+    // Login and get token
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'to_be_disabled', password: 'pass123' });
+    expect(login.status).toBe(200);
+    const userToken = login.body.token;
+
+    // Verify token works
+    const check1 = await request(app)
+      .get('/api/auth/me')
+      .set('Authorization', `Bearer ${userToken}`);
+    expect(check1.status).toBe(200);
+
+    // Admin disables this user
+    const disableRes = await request(app)
+      .put(`/api/users/${userId}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ isActive: false });
+    expect(disableRes.status).toBe(200);
+    expect(disableRes.body.isActive).toBe(false);
+
+    // Existing token must immediately return 403 ERR_ACCOUNT_DISABLED
+    const check2 = await request(app)
+      .get('/api/auth/me')
+      .set('Authorization', `Bearer ${userToken}`);
+    expect(check2.status).toBe(403);
+    expect(check2.body.code).toBe('ERR_ACCOUNT_DISABLED');
+
+    // Admin re-enables user
+    const enableRes = await request(app)
+      .put(`/api/users/${userId}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ isActive: true });
+    expect(enableRes.status).toBe(200);
+    expect(enableRes.body.isActive).toBe(true);
+
+    // Old token prior to disable is still revoked because token_version was incremented
+    const checkOldToken = await request(app)
+      .get('/api/auth/me')
+      .set('Authorization', `Bearer ${userToken}`);
+    expect(checkOldToken.status).toBe(401);
+    expect(checkOldToken.body.code).toBe('ERR_TOKEN_REVOKED');
+
+    // But user can login afresh and get new working token
+    const loginNew = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'to_be_disabled', password: 'pass123' });
+    expect(loginNew.status).toBe(200);
+    const newToken = loginNew.body.token;
+
+    const checkNewToken = await request(app)
+      .get('/api/auth/me')
+      .set('Authorization', `Bearer ${newToken}`);
+    expect(checkNewToken.status).toBe(200);
+
+    await db('users').where({ username: 'to_be_disabled' }).delete();
   });
 });
 
@@ -394,7 +802,17 @@ describe('Device Metadata', () => {
     await request(app)
       .post('/api/users')
       .set('Authorization', `Bearer ${token}`)
-      .send({ username: 'meta_customer', password: 'pass123', role: 'customer', groups: [groupId], timezone: 'Asia/Jakarta' });
+      .send({
+        username: 'meta_customer',
+        email: 'meta_customer@example.com',
+        firstName: 'Meta',
+        lastName: 'Customer',
+        password: 'pass123',
+        confirmPassword: 'pass123',
+        role: 'customer',
+        groups: [groupId],
+        timezone: 'Asia/Jakarta',
+      });
     const custLogin = await request(app)
       .post('/api/auth/login')
       .send({ username: 'meta_customer', password: 'pass123' });
@@ -540,6 +958,19 @@ describe('Device Metadata', () => {
       .set('Authorization', `Bearer ${token}`);
     expect(res.status).toBe(400);
   });
+
+  test('PUT and GET metadata for 15-digit deviceId (FoxLogger IMEI)', async () => {
+    const foxId = 780901703170270;
+    await db('device_metadata').where({ device_id: foxId, source: 'foxlogger' }).delete();
+    const putRes = await request(app)
+      .put(`/api/devices/${foxId}/metadata`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ source: 'foxlogger', metadata: { plat: 'B 1234 XYZ' } });
+    expect(putRes.status).toBe(200);
+    expect(putRes.body.metadata.plat).toBe('B 1234 XYZ');
+
+    await db('device_metadata').where({ device_id: foxId, source: 'foxlogger' }).delete();
+  });
 });
 
 describe('Rate Limiting', () => {
@@ -603,6 +1034,33 @@ describe('Admin Custom Groups', () => {
     }
   });
 
+  test('POST /api/admin/device-groups assigns a FoxLogger device with 15-digit IMEI', async () => {
+    const groupRes = await request(app)
+      .get('/api/admin/groups')
+      .set('Authorization', `Bearer ${token}`);
+    const gId = groupRes.body.groups.find(g => g.name === 'test_group')?.id;
+    if (!gId) return;
+
+    const foxDeviceId = 780901703170270;
+    const cache = require('../services/cache');
+    cache.set('devices:merged', [
+      { id: foxDeviceId, name: 'Fox 780901703170270', source: 'foxlogger' }
+    ], 60);
+
+    await db('device_groups').where({ device_id: foxDeviceId, source: 'foxlogger' }).delete();
+
+    const res = await request(app)
+      .post('/api/admin/device-groups')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ deviceId: foxDeviceId, source: 'foxlogger', groupId: gId });
+
+    expect(res.status).toBe(201);
+    expect(Number(res.body.deviceId)).toBe(foxDeviceId);
+    expect(res.body.source).toBe('foxlogger');
+
+    await db('device_groups').where({ device_id: foxDeviceId, source: 'foxlogger' }).delete();
+  });
+
   test('DELETE /api/admin/groups/:id removes group', async () => {
     const group = await request(app)
       .get('/api/admin/groups')
@@ -626,7 +1084,17 @@ describe('Admin Custom Groups', () => {
     await request(app)
       .post('/api/users')
       .set('Authorization', `Bearer ${token}`)
-      .send({ username: 'cust_test', password: 'pass123', role: 'customer', groups: [], timezone: 'Asia/Jakarta' });
+      .send({
+        username: 'cust_test',
+        email: 'cust_test@example.com',
+        firstName: 'Cust',
+        lastName: 'Test',
+        password: 'pass123',
+        confirmPassword: 'pass123',
+        role: 'customer',
+        groups: [],
+        timezone: 'Asia/Jakarta',
+      });
     const login = await request(app)
       .post('/api/auth/login')
       .send({ username: 'cust_test', password: 'pass123' });
@@ -1406,6 +1874,159 @@ describe('Summary Time-Series Group', () => {
   });
 });
 
+describe('Top Distance (24h) Reports', () => {
+  let token;
+  let customerToken;
+  let testGroupId;
+  const testDevId = 888801;
+
+  beforeAll(async () => {
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'admin', password: 'admin123' });
+    token = login.body.token;
+
+    const grp = await request(app)
+      .post('/api/admin/groups')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'top_km_group' });
+    testGroupId = grp.body.id;
+
+    await db('device_groups').insert({
+      device_id: testDevId,
+      source: 'traccar',
+      group_id: testGroupId,
+    });
+
+    await db('users').where({ username: 'top_km_customer' }).delete();
+    await request(app)
+      .post('/api/users')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        username: 'top_km_customer',
+        email: 'topkm@example.com',
+        firstName: 'Top',
+        lastName: 'KM',
+        password: 'pass123',
+        confirmPassword: 'pass123',
+        role: 'customer',
+        groups: [testGroupId],
+        timezone: 'Asia/Jakarta',
+      });
+
+    const custLogin = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'top_km_customer', password: 'pass123' });
+    customerToken = custLogin.body.token;
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mspf.getBcStatsReports.mockResolvedValue([]);
+  });
+
+  afterAll(async () => {
+    await db('users').where({ username: 'top_km_customer' }).delete();
+    await db('device_groups').where({ device_id: testDevId, source: 'traccar' }).delete();
+    await db('groups').where({ id: testGroupId }).delete();
+  });
+
+  test('GET /api/reports/top-distance without token returns 401', async () => {
+    const res = await request(app).get('/api/reports/top-distance');
+    expect(res.status).toBe(401);
+  });
+
+  test('GET /api/reports/top-distance returns ranked top devices for admin', async () => {
+    traccar.getReportSummary.mockResolvedValue([
+      { deviceId: testDevId, deviceName: 'Traccar Truck 1', distance: 150.2, duration: 3600 },
+      { deviceId: 888802, deviceName: 'Traccar Truck 2', distance: 280.8, duration: 7200 },
+    ]);
+    mspf.getStatsSummary.mockResolvedValue({
+      data: [{ deviceId: 777701, totalMileage: 320.5, totalDrivingTime: 9000 }],
+    });
+
+    const res = await request(app)
+      .get('/api/reports/top-distance?refresh=true')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.period.hours).toBe(24);
+    expect(Array.isArray(res.body.topDevices)).toBe(true);
+    expect(res.body.topDevices.length).toBeGreaterThanOrEqual(3);
+
+    const top = res.body.topDevices;
+    expect(top[0].rank).toBe(1);
+    expect(top[0].distance).toBeGreaterThanOrEqual(top[1].distance);
+    expect(top[1].distance).toBeGreaterThanOrEqual(top[2].distance);
+
+    expect(top[0].deviceId).toBe(777701);
+    expect(top[0].distance).toBe(320.5);
+    expect(top[1].deviceId).toBe(888802);
+    expect(top[1].distance).toBe(280.8);
+    expect(top[2].deviceId).toBe(testDevId);
+    expect(top[2].distance).toBe(150.2);
+  });
+
+  test('GET /api/reports/top-distance with limit=2 limits result count', async () => {
+    const res = await request(app)
+      .get('/api/reports/top-distance?limit=2')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.topDevices.length).toBe(2);
+    expect(res.body.topDevices[0].rank).toBe(1);
+    expect(res.body.topDevices[1].rank).toBe(2);
+  });
+
+  test('GET /api/reports/top-mileage is an alias and returns the same structure', async () => {
+    const res = await request(app)
+      .get('/api/reports/top-mileage')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.topDevices).toBeDefined();
+    expect(res.body.period.hours).toBe(24);
+  });
+
+  test('GET /api/reports/top-distance filters to customer assigned devices only', async () => {
+    const res = await request(app)
+      .get('/api/reports/top-distance')
+      .set('Authorization', `Bearer ${customerToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.topDevices.length).toBe(1);
+    expect(res.body.topDevices[0].deviceId).toBe(testDevId);
+    expect(res.body.topDevices[0].rank).toBe(1);
+  });
+
+  test('GET /api/reports/top-distance with invalid group returns 404', async () => {
+    const res = await request(app)
+      .get('/api/reports/top-distance?group=999999')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('ERR_NOT_FOUND');
+  });
+
+  test('GET /api/reports/top-distance with unassigned group for customer returns 403', async () => {
+    // Create another group unassigned to customer
+    const grp = await request(app)
+      .post('/api/admin/groups')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'unassigned_top_km_grp' });
+    const unassignedId = grp.body.id;
+
+    const res = await request(app)
+      .get(`/api/reports/top-distance?group=${unassignedId}`)
+      .set('Authorization', `Bearer ${customerToken}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('ERR_FORBIDDEN');
+
+    await db('groups').where({ id: unassignedId }).delete();
+  });
+});
+
 describe('Event Reports', () => {
   let token;
   const traccarDeviceId = 999999;
@@ -1426,7 +2047,7 @@ describe('Event Reports', () => {
     expect(res.status).toBe(401);
   });
 
-  test('GET /api/reports/events returns Traccar multi-device events (no enrich)', async () => {
+  test('GET /api/reports/events returns Traccar multi-device events with names and types', async () => {
     traccar.getReportEvents.mockResolvedValue([
       { id: 1, type: 'geofenceEnter', eventTime: '2026-06-15T10:00:00Z', deviceId: 2, geofenceId: 5 },
       { id: 2, type: 'ignitionOn', eventTime: '2026-06-15T11:00:00Z', deviceId: 3 },
@@ -1439,8 +2060,12 @@ describe('Event Reports', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.events.length).toBe(2);
-    expect(res.body.events[0].name).toBeNull();
+    expect(res.body.events[0].name).toBe('Ignition ON');
+    expect(res.body.events[0].type).toBe('ignitionOn');
     expect(res.body.events[0].status).toBe('OPEN');
+    expect(res.body.events[1].name).toBe('Geofence Enter');
+    expect(res.body.events[1].type).toBe('geofenceEnter');
+    expect(res.body.events[1].status).toBe('OPEN');
     expect(res.body.summary.total).toBe(2);
   });
 
@@ -1461,14 +2086,16 @@ describe('Event Reports', () => {
     expect(res.status).toBe(200);
     expect(res.body.events.length).toBe(2);
     expect(res.body.events[0].name).toBe('Ignition ON');
+    expect(res.body.events[0].type).toBe('ignitionOn');
     expect(res.body.events[0].status).toBe('OPEN');
     expect(res.body.events[1].name).toBe('Gudang A');
+    expect(res.body.events[1].type).toBe('geofenceEnter');
     expect(res.body.events[1].status).toBe('OPEN');
     expect(res.body.events[1].geofenceId).toBe(5);
     expect(res.body.summary.total).toBe(2);
   });
 
-  test('GET /api/reports/events filters by status and name', async () => {
+  test('GET /api/reports/events filters by status, name, and type', async () => {
     traccar.getDevices.mockResolvedValue([{ id: traccarDeviceId, name: 'Test', uniqueId: 'test', status: 'online', groupId: 5 }]);
     traccar.getReportEvents.mockResolvedValue([
       { id: 1, type: 'geofenceEnter', eventTime: '2026-06-15T10:00:00Z', deviceId: traccarDeviceId, geofenceId: 5 },
@@ -1484,6 +2111,265 @@ describe('Event Reports', () => {
     expect(res.body.events.length).toBe(1);
     expect(res.body.events[0].status).toBe('OPEN');
     expect(res.body.summary.total).toBe(1);
+
+    const resType = await request(app)
+      .get(`/api/reports/events?deviceId=${traccarDeviceId}&from=2026-06-01T00:00:00Z&type=geofenceExit`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(resType.status).toBe(200);
+    expect(resType.body.events.length).toBe(1);
+    expect(resType.body.events[0].type).toBe('geofenceExit');
+  });
+
+  test('GET /api/reports/events returns MSPF events with monitorName as name and type', async () => {
+    traccar.getReportEvents.mockResolvedValue([]);
+    mspf.getMspfEvents.mockResolvedValue([
+      { id: 101, monitorName: 'Speed Limit Alert', openedAt: '2026-06-15T14:00:00Z', status: 'OPEN', deviceId: 50 },
+    ]);
+
+    const res = await request(app)
+      .get('/api/reports/events?from=2026-06-01T00:00:00Z')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.events.length).toBe(1);
+    expect(res.body.events[0].name).toBe('Speed Limit Alert');
+    expect(res.body.events[0].type).toBe('Speed Limit Alert');
+    expect(res.body.events[0].status).toBe('OPEN');
+  });
+
+  test('GET /api/reports/events without from or to defaults to last 7 days window', async () => {
+    traccar.getReportEvents.mockResolvedValue([
+      { id: 101, type: 'ignitionOn', eventTime: new Date().toISOString(), deviceId: 2 },
+    ]);
+    mspf.getMspfEvents.mockResolvedValue([]);
+
+    const res = await request(app)
+      .get('/api/reports/events')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.events.length).toBe(1);
+    expect(res.body.period.from).toBeDefined();
+    expect(res.body.period.to).toBeDefined();
+    const diffDays = (new Date(res.body.period.to).getTime() - new Date(res.body.period.from).getTime()) / 86400000;
+    expect(Math.round(diffDays)).toBe(7);
+  });
+
+  test('GET /api/reports/events supports limit and offset pagination', async () => {
+    traccar.getReportEvents.mockResolvedValue([
+      { id: 1, type: 'ignitionOn', eventTime: '2026-06-15T10:00:00Z', deviceId: 2 },
+      { id: 2, type: 'ignitionOff', eventTime: '2026-06-15T11:00:00Z', deviceId: 2 },
+      { id: 3, type: 'deviceMoving', eventTime: '2026-06-15T12:00:00Z', deviceId: 2 },
+    ]);
+    mspf.getMspfEvents.mockResolvedValue([]);
+
+    const resPage1 = await request(app)
+      .get('/api/reports/events?from=2026-06-01T00:00:00Z&limit=2&offset=0')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(resPage1.status).toBe(200);
+    expect(resPage1.body.events.length).toBe(2);
+    expect(resPage1.body.summary.total).toBe(3);
+    expect(resPage1.body.summary.limit).toBe(2);
+    expect(resPage1.body.summary.offset).toBe(0);
+
+    const resPage2 = await request(app)
+      .get('/api/reports/events?from=2026-06-01T00:00:00Z&limit=2&offset=2')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(resPage2.status).toBe(200);
+    expect(resPage2.body.events.length).toBe(1);
+    expect(resPage2.body.summary.total).toBe(3);
+    expect(resPage2.body.summary.limit).toBe(2);
+    expect(resPage2.body.summary.offset).toBe(2);
+  });
+
+  test('GET /api/reports/events rejects date range exceeding 31 days with 400', async () => {
+    const res = await request(app)
+      .get('/api/reports/events?from=2026-01-01T00:00:00Z&to=2026-03-01T00:00:00Z')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('Date range cannot exceed 31 days');
+  });
+
+  test('GET /api/reports/events rejects to earlier than from with 400', async () => {
+    const res = await request(app)
+      .get('/api/reports/events?from=2026-06-30T00:00:00Z&to=2026-06-01T00:00:00Z')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('to must be after or equal to from');
+  });
+
+  test('GET /api/reports/events caches response when cache=true and bypasses on refresh=true', async () => {
+    traccar.getReportEvents.mockResolvedValue([
+      { id: 1, type: 'ignitionOn', eventTime: '2026-06-15T10:00:00Z', deviceId: 2 },
+    ]);
+    mspf.getMspfEvents.mockResolvedValue([]);
+
+    const res1 = await request(app)
+      .get('/api/reports/events?from=2026-06-10T00:00:00Z&to=2026-06-20T00:00:00Z&cache=true')
+      .set('Authorization', `Bearer ${token}`);
+    expect(res1.status).toBe(200);
+    expect(traccar.getReportEvents).toHaveBeenCalledTimes(1);
+
+    const res2 = await request(app)
+      .get('/api/reports/events?from=2026-06-10T00:00:00Z&to=2026-06-20T00:00:00Z&cache=true')
+      .set('Authorization', `Bearer ${token}`);
+    expect(res2.status).toBe(200);
+    expect(traccar.getReportEvents).toHaveBeenCalledTimes(1);
+
+    const res3 = await request(app)
+      .get('/api/reports/events?from=2026-06-10T00:00:00Z&to=2026-06-20T00:00:00Z&cache=true&refresh=true')
+      .set('Authorization', `Bearer ${token}`);
+    expect(res3.status).toBe(200);
+    expect(traccar.getReportEvents).toHaveBeenCalledTimes(2);
+  });
+
+  test('GET /api/reports/events dynamically gathers MSPF events across custom bcIds for individual devices', async () => {
+    const cache = require('../services/cache');
+    cache.set('devices:merged', [
+      { id: 9911, name: 'MSPF Custom Unit', source: 'mspf', group: 'mspf_55', attributes: { bcId: 55 } },
+    ]);
+    traccar.getReportEvents.mockResolvedValue([]);
+    mspf.getMspfEvents.mockResolvedValue([
+      { id: 501, monitorName: 'Custom BC Alert', openedAt: '2026-06-15T08:00:00Z', status: 'OPEN', deviceId: 9911 },
+    ]);
+    mspf.getMspfClosedEvents.mockResolvedValue([
+      { id: 502, monitorName: 'Custom BC Closed Alert', closedAt: '2026-06-15T09:00:00Z', status: 'CLOSE', deviceId: 9911 },
+    ]);
+
+    const res = await request(app)
+      .get('/api/reports/events?from=2026-06-01T00:00:00Z')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(mspf.getMspfEvents).toHaveBeenCalledWith(expect.objectContaining({ bcIds: expect.arrayContaining([55]) }));
+    expect(res.body.events.some(e => e.deviceId === 9911 && e.status === 'OPEN')).toBe(true);
+    expect(res.body.events.some(e => e.deviceId === 9911 && e.status === 'CLOSE')).toBe(true);
+  });
+
+  test('GET /api/reports/events returns accurate openedAt, closedAt, and eventTime for MSPF and Traccar', async () => {
+    traccar.getReportEvents.mockResolvedValue([
+      { id: 1, type: 'ignitionOn', eventTime: '2026-06-15T10:00:00Z', deviceId: 2 },
+      { id: 2, type: 'geofenceExit', eventTime: '2026-06-15T11:30:00Z', deviceId: 2 },
+    ]);
+    mspf.getMspfEvents.mockResolvedValue([
+      { id: 101, monitorName: 'Overspeed Alert', openedAt: '2026-06-15T08:00:00Z', status: 'OPEN', deviceId: 20 },
+    ]);
+    mspf.getMspfClosedEvents.mockResolvedValue([
+      { id: 102, monitorName: 'Door Open Alert', openedAt: '2026-06-15T08:15:00Z', closedAt: '2026-06-15T08:45:00Z', status: 'CLOSE', deviceId: 20 },
+    ]);
+
+    const res = await request(app)
+      .get('/api/reports/events?from=2026-06-01T00:00:00Z')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+
+    // Traccar OPEN event
+    const igOn = res.body.events.find(e => e.type === 'ignitionOn');
+    expect(igOn).toBeDefined();
+    expect(igOn.status).toBe('OPEN');
+    expect(igOn.openedAt).toBe('2026-06-15T10:00:00.000Z');
+    expect(igOn.closedAt).toBeNull();
+    expect(igOn.eventTime).toBe('2026-06-15T10:00:00.000Z');
+
+    // Traccar CLOSE event
+    const geoExit = res.body.events.find(e => e.type === 'geofenceExit');
+    expect(geoExit).toBeDefined();
+    expect(geoExit.status).toBe('CLOSE');
+    expect(geoExit.openedAt).toBeNull();
+    expect(geoExit.closedAt).toBe('2026-06-15T11:30:00.000Z');
+    expect(geoExit.eventTime).toBe('2026-06-15T11:30:00.000Z');
+
+    // MSPF OPEN event
+    const mspfOpen = res.body.events.find(e => e.name === 'Overspeed Alert');
+    expect(mspfOpen).toBeDefined();
+    expect(mspfOpen.status).toBe('OPEN');
+    expect(mspfOpen.openedAt).toBe('2026-06-15T08:00:00.000Z');
+    expect(mspfOpen.closedAt).toBeNull();
+    expect(mspfOpen.eventTime).toBe('2026-06-15T08:00:00.000Z');
+
+    // MSPF CLOSE event (has both openedAt and closedAt, eventTime is closedAt)
+    const mspfClose = res.body.events.find(e => e.name === 'Door Open Alert');
+    expect(mspfClose).toBeDefined();
+    expect(mspfClose.status).toBe('CLOSE');
+    expect(mspfClose.openedAt).toBe('2026-06-15T08:15:00.000Z');
+    expect(mspfClose.closedAt).toBe('2026-06-15T08:45:00.000Z');
+    expect(mspfClose.eventTime).toBe('2026-06-15T08:45:00.000Z');
+
+    // Summary has open and closed count
+    expect(res.body.summary.open).toBe(2);
+    expect(res.body.summary.closed).toBe(2);
+  });
+
+  test('GET /api/reports/events returns FoxLogger alarms with openedAt, closedAt, and status CLOSE', async () => {
+    traccar.getReportEvents.mockResolvedValue([]);
+    mspf.getMspfEvents.mockResolvedValue([]);
+    mspf.getMspfClosedEvents.mockResolvedValue([]);
+    foxlogger.getAlarmReports.mockResolvedValue([
+      {
+        cr_alm: 'Power Cut Alarm',
+        cr_time: '2026-06-15 15:08:40',
+        cr_durt: 120,
+        cr_imei: '0869066060196830',
+        cr_nopol: 'B 1234 FOX',
+      },
+    ]);
+
+    const res = await request(app)
+      .get('/api/reports/events?from=2026-06-01T00:00:00Z')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    const foxEv = res.body.events.find(e => e.type === 'Power Cut Alarm');
+    expect(foxEv).toBeDefined();
+    expect(foxEv.status).toBe('CLOSE');
+    expect(foxEv.openedAt).toBe('2026-06-15T08:08:40.000Z'); // 15:08:40 WIB - 7h = 08:08:40Z
+    expect(foxEv.closedAt).toBe('2026-06-15T08:10:40.000Z'); // +120s
+    expect(foxEv.eventTime).toBe('2026-06-15T08:10:40.000Z');
+    expect(foxEv.deviceId).toBe(869066060196830);
+  });
+
+  test('GET /api/reports/events for single FoxLogger device returns filtered alarms', async () => {
+    const foxId = 869066060196830;
+    traccar.getDevices.mockResolvedValue([]);
+    mspf.getDevice.mockResolvedValue(null);
+    foxlogger.getDevices.mockResolvedValue({
+      data: [{ id: foxId, uniqueId: '0869066060196830', name: 'Fox Vehicle' }],
+      total: 1,
+      next: null,
+    });
+    foxlogger.getAlarmReports.mockResolvedValue([
+      {
+        cr_alm: 'Power Cut Alarm',
+        cr_time: '2026-06-15 15:08:40',
+        cr_durt: 60,
+        cr_imei: '0869066060196830',
+        cr_nopol: 'B 1234 FOX',
+      },
+      {
+        cr_alm: 'Power Cut Alarm',
+        cr_time: '2026-06-15 15:08:40',
+        cr_durt: 60,
+        cr_imei: '0999999999999999',
+        cr_nopol: 'B 9999 OTHER',
+      },
+    ]);
+
+    const res = await request(app)
+      .get(`/api/reports/events?deviceId=${foxId}&from=2026-06-01T00:00:00Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.deviceId).toBe(foxId);
+    expect(res.body.events.length).toBe(1);
+    expect(res.body.events[0].deviceId).toBe(foxId);
+    expect(res.body.events[0].openedAt).toBe('2026-06-15T08:08:40.000Z');
+    expect(res.body.events[0].closedAt).toBe('2026-06-15T08:09:40.000Z');
   });
 });
 
@@ -1510,6 +2396,15 @@ describe('Route Reports (playback)', () => {
       .set('Authorization', `Bearer ${token}`);
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('ERR_VALIDATION');
+  });
+
+  test('GET /api/reports/route rejects date range exceeding 7 days with 400', async () => {
+    traccar.getDevices.mockResolvedValue([{ id: traccarDeviceId, name: 'Test Traccar', uniqueId: 'test', status: 'online', groupId: 5 }]);
+    const res = await request(app)
+      .get(`/api/reports/route?deviceId=${traccarDeviceId}&from=2026-06-01T00:00:00Z&to=2026-06-15T00:00:00Z`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('Date range');
   });
 
   test('GET /api/reports/route without token returns 401', async () => {
@@ -1606,6 +2501,73 @@ describe('Route Reports (playback)', () => {
     expect([...times].sort((a, b) => a - b)).toEqual(times);
     expect(res.body[0].deviceTime).toBe('2026-07-28T07:00:00Z');
   });
+
+  test('GET /api/reports/route preserves full attributes for customer and enriches custom rules', async () => {
+    let groupId;
+    try {
+      await db('users').where({ username: 'route_cust' }).delete();
+      await db('custom_attribute_rules').where({ name: 'calc_voltage' }).delete();
+      await db('device_groups').where({ device_id: traccarDeviceId, source: 'traccar' }).delete();
+      await db('groups').where({ name: 'route_test_group' }).delete();
+
+      const [grp] = await db('groups').insert({ name: 'route_test_group' }).returning('id');
+      groupId = typeof grp === 'object' ? grp.id : grp;
+
+      await db('device_groups').insert({ device_id: traccarDeviceId, source: 'traccar', group_id: groupId });
+      await db('custom_attribute_rules').insert({
+        group_id: groupId,
+        name: 'calc_voltage',
+        source_field: 'power',
+        mode: 'compute',
+        formula: 'value * 1.0',
+        priority: 1,
+        enabled: true,
+      });
+
+      await request(app)
+        .post('/api/users')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          username: 'route_cust',
+          email: 'route_cust@example.com',
+          firstName: 'Route',
+          lastName: 'Cust',
+          password: 'pass123',
+          confirmPassword: 'pass123',
+          role: 'customer',
+          groups: [groupId],
+          timezone: 'Asia/Jakarta',
+        });
+
+      const loginRes = await request(app)
+        .post('/api/auth/login')
+        .send({ username: 'route_cust', password: 'pass123' });
+      const custToken = loginRes.body.token;
+
+      traccar.getDevices.mockResolvedValue([{ id: traccarDeviceId, name: 'Test Traccar', uniqueId: 'test', status: 'online', groupId: 5 }]);
+      traccar.getReportRoute.mockResolvedValue([
+        { id: 1, deviceId: traccarDeviceId, latitude: -6.0, longitude: 106.7, speed: 20, deviceTime: '2026-06-15T10:00:00Z', attributes: { ignition: true, power: 12.5, motion: true } },
+      ]);
+      customAttributes.getDeviceRules.mockResolvedValueOnce([{ name: 'calc_voltage', mode: 'compute' }]);
+
+      const res = await request(app)
+        .get(`/api/reports/route?deviceId=${traccarDeviceId}&from=2026-06-15T00:00:00Z&to=2026-06-15T23:59:59Z`)
+        .set('Authorization', `Bearer ${custToken}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.length).toBe(1);
+      expect(res.body[0].attributes).toBeDefined();
+      expect(res.body[0].attributes.ignition).toBe(true);
+      expect(res.body[0].attributes.power).toBe(12.5);
+      expect(res.body[0].attributes.motion).toBe(true);
+      expect(res.body[0].attributes.calc_voltage).toBe(12.5);
+    } finally {
+      await db('users').where({ username: 'route_cust' }).delete();
+      await db('custom_attribute_rules').where({ name: 'calc_voltage' }).delete();
+      await db('device_groups').where({ device_id: traccarDeviceId, source: 'traccar' }).delete();
+      if (groupId) await db('groups').where({ id: groupId }).delete();
+    }
+  });
 });
 
 describe('Dashboard', () => {
@@ -1666,6 +2628,30 @@ describe('Dashboard', () => {
     expect(res.body.summary.totalFuel).toBe(30);
     expect(res.body.summary.totalEngineHours).toBe(10);
     expect(res.body.summary.totalDrivingHours).toBeDefined();
+  });
+
+  test('GET /api/dashboard returns recentEvents with name, type, and deviceName', async () => {
+    const cache = require('../services/cache');
+    cache.set('devices:merged', [
+      { id: 10, name: 'Truck Alpha', source: 'traccar', status: 'online', running: 'RUN' },
+    ], 120);
+
+    traccar.getReportEvents.mockResolvedValue([
+      { id: 1, type: 'ignitionOn', eventTime: '2026-06-15T10:00:00Z', deviceId: 10 },
+      { id: 2, type: 'geofenceEnter', eventTime: '2026-06-15T09:00:00Z', deviceId: 10 },
+    ]);
+
+    const res = await request(app)
+      .get('/api/dashboard')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.recentEvents.length).toBe(2);
+    expect(res.body.recentEvents[0].name).toBe('Ignition ON');
+    expect(res.body.recentEvents[0].type).toBe('ignitionOn');
+    expect(res.body.recentEvents[0].deviceName).toBe('Truck Alpha');
+    expect(res.body.recentEvents[1].name).toBe('Geofence Enter');
+    expect(res.body.recentEvents[1].type).toBe('geofenceEnter');
   });
 
   test('GET /api/dashboard without token returns 401', async () => {

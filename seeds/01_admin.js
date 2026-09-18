@@ -6,6 +6,9 @@ exports.seed = async function (knex) {
 
   await knex('users').insert({
     username: 'admin',
+    email: 'admin@system.local',
+    first_name: 'Admin',
+    last_name: 'System',
     password_hash: bcrypt.hashSync('admin123', 10),
     role: 'admin',
     groups: '[]',

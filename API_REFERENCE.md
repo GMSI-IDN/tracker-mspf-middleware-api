@@ -4,6 +4,10 @@ Base URL: `http://localhost:3000`
 
 > **Response Convention:** Semua response Gateway menggunakan **camelCase** (kecuali field dari Traccar/MSPF yang langsung dipass-through tanpa transformasi).
 >
+> **Role-Based Vendor Tag Masking (White-Label):**
+> - **Role `admin`:** Respons API dan WebSocket menyertakan field `source` (`'traccar'`, `'mspf'`, `'foxlogger'`) dan vendor `group` (contoh `'traccar_5'`) untuk grouping di Admin FE, diagnostik, dan sync mapping.
+> - **Role `customer`:** Field `source` dan vendor `group` otomatis **dihilangkan (stripped)** di seluruh endpoint (`devices`, `positions`, `commands`, `reports`, `dashboard`) dan WebSocket. Customer hanya berinteraksi dengan identitas unit dan `customGroups` miliknya tanpa kebocoran nama vendor pihak ketiga.
+>
 > **Timestamp Convention:** Semua field timestamp yang dikeluarkan Gateway adalah **UTC ISO 8601** (format `YYYY-MM-DDTHH:mm:ss.sssZ`). Data sumber dinormalisasi:
 > - **Traccar:** sudah UTC (ISO `Z`), diteruskan apa adanya.
 > - **MSPF:** `timestamp` (unix seconds) / `insDtm` / `createdAt` / `lastCommunicatedAt` → UTC ISO.
@@ -25,13 +29,20 @@ Authorization: Bearer <token>
 
 ### POST /api/auth/login
 
-Login dengan username dan password. Token berlaku 8 jam (default).
+Login dengan username atau email, beserta password. Token berlaku 8 jam (default). Sistem otomatis mengenali apakah input berupa username atau email.
 
 **Request:**
 ```json
 {
   "username": "admin",
   "password": "admin123"
+}
+```
+*Atau menggunakan email:*
+```json
+{
+  "email": "customer@example.com",
+  "password": "password123"
 }
 ```
 
@@ -42,8 +53,14 @@ Login dengan username dan password. Token berlaku 8 jam (default).
   "user": {
     "id": 1,
     "username": "admin",
+    "email": "admin@system.local",
+    "firstName": "Admin",
+    "lastName": "System",
     "role": "admin",
-  "groups": [1, 5]
+    "isActive": true,
+    "tokenVersion": 1,
+    "groups": [1, 5],
+    "timezone": "Asia/Jakarta"
   },
   "expiresIn": "8h"
 }
@@ -52,6 +69,11 @@ Login dengan username dan password. Token berlaku 8 jam (default).
 **Response 401:**
 ```json
 { "error": "Invalid credentials", "code": "ERR_UNAUTHORIZED", "requestId": "req-xxx", "timestamp": "..." }
+```
+
+**Response 403 (Akun Dinonaktifkan):**
+```json
+{ "error": "Account has been disabled. Please contact administrator", "code": "ERR_ACCOUNT_DISABLED", "requestId": "req-xxx", "timestamp": "..." }
 ```
 
 ---
@@ -65,8 +87,62 @@ Mengembalikan profile user yang sedang login.
 {
   "id": 1,
   "username": "admin",
+  "email": "admin@system.local",
+  "firstName": "Admin",
+  "lastName": "System",
   "role": "admin",
-  "groups": ["traccar_5", "mspf_3"]
+  "isActive": true,
+  "tokenVersion": 1,
+  "groups": [1, 5],
+  "timezone": "Asia/Jakarta"
+}
+```
+
+**Response 401 / 403 (Session Revocation / Account Disabled):**
+- Jika akun dinonaktifkan: `403 ERR_ACCOUNT_DISABLED`
+- Jika token telah dicabut (misal password diubah / admin reset sesi): `401 ERR_TOKEN_REVOKED` ("Session has been terminated or revoked")
+
+---
+
+### PUT /api/auth/me
+
+Update profil user yang sedang login (Self-Profile Update). Dapat dipanggil oleh semua role (`customer` maupun `admin`).
+User hanya diizinkan memperbarui data profil personal: **nama, timezone, dan password**. Field `role` dan `groups` tidak dapat dimodifikasi di endpoint ini.
+
+Semua field opsional. Jika field `password` dikirim, maka `confirmPassword` wajib dikirim dan harus bernilai identik.
+
+**Request:**
+```json
+{
+  "firstName": "John",
+  "lastName": "Doe",
+  "timezone": "Asia/Makassar",
+  "password": "newpassword123",
+  "confirmPassword": "newpassword123"
+}
+```
+
+*(Atau tanpa ubah password)*
+```json
+{
+  "firstName": "John",
+  "lastName": "Doe",
+  "timezone": "Asia/Makassar"
+}
+```
+
+**Response 200:**
+```json
+{
+  "id": 2,
+  "username": "rental",
+  "email": "rental@example.com",
+  "firstName": "John",
+  "lastName": "Doe",
+  "role": "customer",
+  "groups": [1, 5],
+  "timezone": "Asia/Makassar",
+  "token": "eyJhbGciOiJIUzI1NiIs..."
 }
 ```
 
@@ -117,6 +193,12 @@ Untuk admin, semua device. Untuk customer, hanya device di Group/BC yang di-assi
 | `offset` | integer | 0 | Offset untuk pagination |
 | `limit` | integer | 50 | Jumlah data per halaman (max 200) |
 
+> **Catatan Custom Groups & Deduplikasi:**
+> - Parameter `group` menerima ID custom group integer (contoh: `?group=1`).
+> - Satu custom group dapat memuat kendaraan dari berbagai aturan sinkronisasi (multi-sync rules) dan penambahan manual.
+> - Perangkat hasil group sync terhubung secara dinamis (tidak di-insert ke `device_groups` manual). Hanya perangkat manual yang dapat dihapus per-unit via `DELETE /api/admin/device-groups/:id`. Jika aturan sync dihapus, seluruh perangkat dari sync group tersebut langsung hilang seketika.
+> - Jika user level customer memiliki beberapa custom group yang memuat kendaraan yang sama, daftar kendaraan **dijamin hanya menampilkan kendaraan tersebut sebanyak 1 kali (ter-deduplikasi)**, dan atribut `customGroups` akan mencantumkan semua grup terkait.
+
 **Response 200:**
 ```json
 {
@@ -133,6 +215,12 @@ Untuk admin, semua device. Untuk customer, hanya device di Group/BC yang di-assi
       "customGroups": [
         { "id": 1, "name": "tim_logistik" }
       ],
+      "engineControl": {
+        "desired": "ACTIVE",
+        "state": "ACTIVE",
+        "isApplied": true,
+        "lastAppliedAt": "2026-05-15T10:00:30Z"
+      },
       "lastUpdate": "2026-05-15T10:00:30Z",
       "attributes": {},
       "metadata": {},
@@ -150,6 +238,12 @@ Untuk admin, semua device. Untuk customer, hanya device di Group/BC yang di-assi
       "customGroups": [
         { "id": 1, "name": "tim_logistik" }
       ],
+      "engineControl": {
+        "desired": "ACTIVE",
+        "state": "ACTIVE",
+        "isApplied": true,
+        "lastAppliedAt": "2026-06-18T04:05:12Z"
+      },
       "lastUpdate": "2026-06-18T04:05:12Z",
       "attributes": {
         "VIN": "BACKUP",
@@ -173,6 +267,7 @@ Untuk admin, semua device. Untuk customer, hanya device di Group/BC yang di-assi
       "source": "foxlogger",
       "group": null,
       "customGroups": [],
+      "engineControl": null,
       "lastUpdate": "2026-07-28T07:47:11.000Z",
       "attributes": {
         "imei": "0780901703170270",
@@ -334,7 +429,7 @@ Mengembalikan posisi terbaru. Sama dengan `/api/positions` tanpa filter deviceId
 Mengembalikan riwayat posisi device dalam range waktu tertentu. Format mengikuti Traccar API.
 
 > Gateway otomatis mendeteksi sumber device (Traccar/MSPF/FoxLogger) melalui cache. Jika belum ada di cache, Gateway akan probing langsung ke semua backend untuk menemukan device-nya.
-> **Access control:** Admin mendapat enriched data + custom attributes (rename/compute). Customer hanya mendapat custom attributes sesuai aturan grup device-nya.
+> **Access control:** Baik Admin maupun Customer mendapatkan data posisi dengan `attributes` lengkap (bawaan provider/enriched) agar playback rute berfungsi optimal. Jika grup memiliki Custom Attribute Rules, atribut tersebut otomatis ditambahkan/dihitung (*enrich in-place*). Pada response Customer, field internal `source` disanitasi.
 >
 > **⚠️ Limitasi MSPF:** Range `from` dan `to` maksimal **7 hari**. Jika lebih, return `ERR_VALIDATION`.
 >
@@ -351,6 +446,8 @@ Mengembalikan riwayat posisi device dalam range waktu tertentu. Format mengikuti
 | `group` | string | - | Group/BC ID |
 | `from` | string | - | ISO 8601 — awal range (default: 00:00 hari ini, zona user) |
 | `to` | string | - | ISO 8601 — akhir range (default: waktu request) |
+
+> **Enrichment MSPF:** Titik koordinat dari `/v3/devices/{deviceId}/route` dicocokkan dengan telemetri historis asli dari `/v2/device/{deviceId}/data/history` pada rentang waktu kejadian (nearest-neighbor timestamp $\pm 120$ detik), BUKAN snapshot live hari ini. Nilai `speed` (`kph`), `course` (`dir`), `ignition` (`addr_IGN`), `voltage` (`volt`), `odom`, dan sensor lainnya merefleksikan kondisi aktual kendaraan di tiap titik riwayat. Jika rentang waktu melebihi 24 jam, Gateway otomatis memecah (*chunk*) query MCCS history ke MSPF per jendela 24 jam secara paralel (maksimal 7 hari).
 
 **Response 200 (admin — MSPF device enriched + custom attributes):**
 ```json
@@ -402,7 +499,7 @@ Mengembalikan riwayat posisi device dalam range waktu tertentu. Format mengikuti
 
 > **Enrichment FoxLogger:** `course` diisi dari `/report-rollback` (`dir`) dan `attributes.nopol` (plat nomor) dari endpoint yang sama, dicocokkan per waktu dengan `/report-history`. Jika tidak ada kecocokan rollback, `course` tetap 0 dan `nopol` tidak ada.
 
-**Response 200 (customer — hanya custom attributes):**
+**Response 200 (customer — full attributes + custom attributes, source disanitasi):**
 ```json
 [
   {
@@ -410,11 +507,18 @@ Mengembalikan riwayat posisi device dalam range waktu tertentu. Format mengikuti
     "latitude": -7.323517,
     "longitude": 112.740992,
     "speed": 0,
-    "source": "mspf",
+    "course": 0,
+    "deviceTime": "2026-06-18T04:05:12Z",
     "attributes": {
-      "EB": 13.44,
-      "AD": 0.017,
-      "AD computet": 0.034
+      "ignition": true,
+      "voltage": 13.59,
+      "sats": 16,
+      "rssi": -57,
+      "running": "IDLING",
+      "kph": 0,
+      "odom": 17.388,
+      "gpio": 1,
+      "calc_voltage": 13.59
     }
   }
 ]
@@ -822,15 +926,75 @@ Dengan param `granularity`, endpoint mengembalikan **breakdown summary per perio
 
 ---
 
+### GET /api/reports/top-distance
+
+Mengembalikan daftar peringkat armada dengan jarak tempuh (kilometer) tertinggi dalam **24 jam terakhir** (Leaderboard Top KM). Endpoint ini memiliki alias URL: **`GET /api/reports/top-mileage`**.
+
+> **Strategi Master Cache (Zero Server Overhead):**
+> Data 24 jam dihitung secara agregasi borongan lintas server (Traccar, MSPF per-BC, FoxLogger) dan disimpan ke dalam **Master In-Memory Cache (TTL 30 menit / 1800 detik)**.
+> Panggilan dari FE langsung disajikan dari RAM Gateway (< 2ms) tanpa membebani server upstream.
+>
+> **Access Control (RBAC):**
+> - **Admin:** Menampilkan ranking dari seluruh armada yang terhubung di sistem.
+> - **Customer:** Otomatis dibatasi hanya meranking armada yang di-assign ke custom groups miliknya (`device_groups`).
+
+**Query Parameters:**
+
+| Parameter | Tipe | Default | Deskripsi |
+|-----------|------|---------|-----------|
+| `limit` | integer | `10` | Jumlah maksimal armada peringkat teratas yang ingin diambil (1 - 100) |
+| `group` | integer | - | Opsional: filter ranking hanya di dalam custom group ID tertentu |
+| `refresh` | boolean | `false` | Opsional: bypass/invalidate master cache dan kalkulasi ulang data terbaru |
+
+**Response 200:**
+```json
+{
+  "period": {
+    "from": "2026-09-08T14:30:00.000Z",
+    "to": "2026-09-09T14:30:00.000Z",
+    "hours": 24
+  },
+  "totalDevicesEvaluated": 12,
+  "topDevices": [
+    {
+      "rank": 1,
+      "deviceId": 10385015,
+      "name": "B2265PKV - TRIAL TYPE T",
+      "source": "mspf",
+      "distance": 67.7,
+      "duration": 6597
+    },
+    {
+      "rank": 2,
+      "deviceId": 888802,
+      "name": "Traccar Truck 2",
+      "source": "traccar",
+      "distance": 45.2,
+      "duration": 4800
+    },
+    {
+      "rank": 3,
+      "deviceId": 780901703170270,
+      "name": "FoxLogger Unit 1",
+      "source": "foxlogger",
+      "distance": 25.6,
+      "duration": 2100
+    }
+  ]
+}
+```
+
+---
+
 ### GET /api/reports/events
 
 Mengembalikan riwayat event device dalam range waktu tertentu. Mendukung Traccar (event built-in) dan MSPF (monitor-based events).
 
-> **Traccar:** Event dari `/api/reports/events` — type built-in (`geofenceEnter`, `ignitionOn`, dll). Status `OPEN`/`CLOSE` did derive dari type. Nama geofence di-enrich dari `GET /geofences` (single device).
-> **MSPF:** Event dari `/v4/events` + `/v4/closed-events` — `monitorName` sebagai type, native `openedAt`/`closedAt`.
+> **Traccar:** Event dari `/api/reports/events` — type built-in (`geofenceEnter`, `ignitionOn`, dll). Status `OPEN`/`CLOSE` di-derive dari type. Nama geofence di-enrich dari `GET /geofences` (single device) atau fallback ke label readable (multi-device).
+> **MSPF:** Event dari `/v4/events` + `/v4/closed-events` — `monitorName` sebagai name & type, native `openedAt`/`closedAt`.
 >
-> **Multi-device:** Cepat, tanpa enrich nama. **Single device:** Lengkap dengan nama event & device.
-> **Access control:** Admin semua, customer hanya device di group assign-nya.
+> **Multi-device:** Cepat, menyertakan `name`, `type`, dan `deviceName`. **Single device:** Lengkap dengan nama geofence hasil enrich & info device.
+> **Access control:** Admin semua, customer hanya device di group assign-nya (field `source` dibersihkan).
 
 **Query Parameters:**
 
@@ -838,35 +1002,59 @@ Mengembalikan riwayat event device dalam range waktu tertentu. Mendukung Traccar
 |-----------|------|-------|-----------|
 | `deviceId` | integer | - | Single device (enriched) |
 | `group` | integer | - | Filter by custom group ID |
-| `from` | string | ✅ | ISO 8601 — awal range |
-| `to` | string | - | ISO 8601 — akhir range |
+| `from` | string | - | ISO 8601 — awal range (default: 7 hari terakhir jika tidak diisi) |
+| `to` | string | - | ISO 8601 — akhir range (default: waktu sekarang jika `from` tidak diisi; rentang `from`..`to` maksimal 31 hari) |
 | `status` | string | - | Filter: `OPEN` atau `CLOSE` |
-| `name` | string | - | Cari event berdasarkan nama |
+| `name` | string | - | Cari event berdasarkan nama (case-insensitive substring) |
+| `type` | string | - | Filter tipe event (misal: `ignitionOn`, `geofenceEnter`, monitorName MSPF) |
+| `level` | string | - | Filter tingkat keparahan: `danger`, `warning`, `info`, atau `success` |
+| `limit` | integer | - | Jumlah data per halaman (default: 50, max: 200) |
+| `offset` | integer | - | Offset pagination (default: 0) |
+| `refresh` | boolean | - | Set `true` untuk bypass in-memory short cache (TTL 30 detik) |
+
+> **Catatan Optimasi & Proteksi:**
+> - Jika `from` dan `to` dikosongkan, backend secara otomatis mengambil **7 hari terakhir** (sangat ramah untuk UI tabel tanpa DatePicker wajib).
+> - Validasi rentang tanggal (`to - from`) dibatasi maksimal **31 hari** untuk mencegah server overload.
+> - Data event di-cache di memori selama 30 detik untuk navigasi pagination instan (<5ms). Gunakan `?refresh=true` untuk memuat data live terbaru.
+> - Multi-device query untuk MSPF secara otomatis mendeteksi seluruh `bcId` dari armada customer secara dinamis (mendukung mobil satuan hasil custom group), serta menggabungkan status event `OPEN` dan `CLOSE`.
 
 **Response 200 — single device (Traccar):**
 ```json
 {
   "deviceId": 2,
+  "deviceName": "Truck Alpha",
   "source": "traccar",
   "period": { "from": "...", "to": "..." },
   "events": [
     {
       "name": "Gudang A",
+      "type": "geofenceEnter",
+      "level": "warning",
+      "color": "#F59E0B",
       "eventTime": "2026-06-15T10:00:00Z",
       "status": "OPEN",
+      "openedAt": "2026-06-15T10:00:00Z",
+      "closedAt": null,
       "deviceId": 2,
+      "deviceName": "Truck Alpha",
       "source": "traccar",
       "geofenceId": 5
     },
     {
       "name": "Ignition ON",
+      "type": "ignitionOn",
+      "level": "success",
+      "color": "#10B981",
       "eventTime": "2026-06-15T11:00:00Z",
       "status": "OPEN",
+      "openedAt": "2026-06-15T11:00:00Z",
+      "closedAt": null,
       "deviceId": 2,
+      "deviceName": "Truck Alpha",
       "source": "traccar"
     }
   ],
-  "summary": { "total": 2, "open": 2, "closed": 0 }
+  "summary": { "total": 2, "open": 2, "closed": 0, "offset": 0, "limit": 50 }
 }
 ```
 
@@ -874,21 +1062,26 @@ Mengembalikan riwayat event device dalam range waktu tertentu. Mendukung Traccar
 ```json
 {
   "deviceId": 10258579,
+  "deviceName": "Fleet 1",
   "source": "mspf",
   "period": { "from": "...", "to": "..." },
   "events": [
     {
       "name": "Voltage Alert",
+      "type": "Voltage Alert",
+      "level": "danger",
+      "color": "#EF4444",
       "eventTime": "2026-06-15T12:00:00Z",
       "status": "OPEN",
       "deviceId": 10258579,
+      "deviceName": "Fleet 1",
       "source": "mspf",
       "monitorId": 3,
       "openedAt": "2026-06-15T12:00:00Z",
       "closedAt": null
     }
   ],
-  "summary": { "total": 1, "open": 1, "closed": 0 }
+  "summary": { "total": 1, "open": 1, "closed": 0, "offset": 0, "limit": 50 }
 }
 ```
 
@@ -897,39 +1090,133 @@ Mengembalikan riwayat event device dalam range waktu tertentu. Mendukung Traccar
 {
   "period": { "from": "...", "to": "..." },
   "events": [
-    { "name": null, "eventTime": "2026-06-15T10:00:00Z", "status": "OPEN", "deviceId": 2, "source": "traccar" }
+    {
+      "name": "Ignition ON",
+      "type": "ignitionOn",
+      "level": "success",
+      "color": "#10B981",
+      "eventTime": "2026-06-15T10:00:00Z",
+      "status": "OPEN",
+      "openedAt": "2026-06-15T10:00:00Z",
+      "closedAt": null,
+      "deviceId": 2,
+      "deviceName": "Truck Alpha",
+      "source": "traccar"
+    }
   ],
-  "summary": { "total": 1 }
+  "summary": { "total": 1, "open": 1, "closed": 0, "offset": 0, "limit": 50 }
 }
 ```
+
+#### Panduan & Semantik Khusus Frontend (FE Guide)
+
+1. **Semantik Status `OPEN` vs `CLOSE`:**
+   - **`status: "OPEN"` (Insiden Aktif / Ongoing Alert):** Menandakan kejadian yang **saat ini masih berlangsung atau belum diselesaikan/direset**. 
+     - *Contoh:* Event *"Out pool pondok cabe"* dengan `openedAt: "2026-03-25"` dan `closedAt: null` berarti unit kendaraan keluar dari pool pada 25 Maret dan **hingga detik ini belum tercatat kembali masuk ke pool**.
+     - Event `OPEN` sengaja dipertahankan muncul di tabel agar tim operasional **tetap menyadari adanya unit atau peringatan yang belum tuntas**, meskipun kejadian awalnya sudah lewat beberapa minggu/bulan lalu.
+   - **`status: "CLOSE"` (Riwayat Selesai / Resolved):** Menandakan event yang sudah tuntas (misal kendaraan sudah kembali ke pool, overspeed sudah berakhir, atau mesin sudah dimatikan). Event `CLOSE` diambil sesuai jendela filter tanggal `from`..`to`.
+
+2. **Rekomendasi Visualisasi di Tabel FE:**
+   - **Badge Status:**
+     - Jika `status === 'OPEN'`: Beri badge **`AKTIF / ONGOING`** (warna sesuai `event.color` atau highlight cerah).
+     - Jika `status === 'CLOSE'`: Beri badge **`SELESAI / RESOLVED`** (warna netral/abu-abu).
+   - **Keterangan Waktu:**
+     - Untuk event `OPEN`: Tampilkan waktu mulai dan durasi berjalan, contoh: *"Sejak 25 Mar 2026 (176 hari lalu)"*.
+     - Untuk event `CLOSE`: Tampilkan durasi kejadian (`closedAt - openedAt`).
+
+3. **On-Demand Location & Route Investigation (Peta Insiden):**
+   - **Tabel Event tidak menyediakan koordinat lat/lon langsung** untuk mencegah beban query $N+1$ dan menjaga response time tabel tetap instan (<50ms).
+   - Saat user menekan tombol **"Lihat di Peta" / "Investigasi Insiden"** pada baris event tertentu, FE memanggil endpoint rute dengan buffer waktu:
+     ```http
+     GET /api/reports/route?deviceId={deviceId}&from={fromIso}&to={toIso}
+     ```
+     - **Event Berdurasi (ada `openedAt` & `closedAt`):**
+       `from = openedAt - 2 menit`, `to = (closedAt || sekarang) + 2 menit`.
+     - **Event Sesaat (hanya `eventTime`):**
+       `from = eventTime - 2 menit`, `to = eventTime + 2 menit`.
+     - Titik koordinat GPS yang didapat di-render sebagai garis lintasan pendek di peta, dan letakkan Pin Marker Merah pada titik terdekat dengan waktu insiden.
 
 ---
 
 ## 5. Commands
 
+### Kontrol Hak Akses & Safety Interlock
+
+Perintah mematikan mesin kendaraan (`engineStop`, `deactivate`, atau `desiredStatus: INACTIVE`) dilindungi oleh 3 lapis pengamanan:
+1. **Device Access Boundary:** Pengguna non-admin wajib memiliki perangkat di dalam salah satu `groups` miliknya. Jika tidak -> `403 ERR_FORBIDDEN`.
+2. **Capability Check (`canCutEngine`):** Pengguna customer wajib memiliki izin `permissions.canCutEngine === true`. Admin otomatis bypass. Jika customer tidak berizin -> `403 ERR_FORBIDDEN`.
+3. **Safety Confirmation & Notice Flow:** Perintah mematikan mesin mewajibkan parameter `"confirm": true`. Jika dikirim tanpa konfirmasi, server mengembalikan status `422 WARN_CONFIRMATION_REQUIRED` tanpa mengeksekusi perintah.
+4. **Debounce (Anti-Spam):** Jeda 5 detik per perangkat diberlakukan untuk mencegah penekanan tombol ganda (`429 ERR_RATE_LIMIT`).
+5. **Audit Logging:** Seluruh riwayat pengiriman perintah (sukses, gagal, maupun ditolak) dicatat secara persisten ke database tabel `command_logs`.
+
+---
+
 ### POST /api/commands
 
-Mengirim perintah ke device. Gateway otomatis routing ke backend yang tepat (Traccar atau MSPF).
+Mengirim perintah ke device. Gateway secara cerdas melakukan routing dan **terjemahan otomatis dua arah (Unified Command Translation)**:
+- Perintah hidupkan mesin (`engineResume`, `activate`) $\rightarrow$ otomatis dikirim sebagai `engineResume` ke Traccar dan `desiredStatus: 'ACTIVE'` ke MSPF.
+- Perintah matikan mesin (`engineStop`, `deactivate`) $\rightarrow$ otomatis dikirim sebagai `engineStop` ke Traccar dan `desiredStatus: 'INACTIVE'` ke MSPF.
+- FE cukup mengirim perintah standar yang seragam (`type: "engineResume"` / `type: "engineStop"`) untuk semua jenis kendaraan tanpa perlu membedakan vendor backend.
+- Perangkat FoxLogger tidak mendukung pengiriman remote command (`400 ERR_NOT_SUPPORTED`).
 
-**Request:**
+**Request Body:**
+- `deviceId` (wajib, integer/string): ID perangkat target
+- `type` (wajib, string): Tipe perintah (`engineStop`, `engineResume`, `activate`, `deactivate`, dll.)
+- `data` (opsional, object): Parameter payload tambahan untuk Traccar
+- `source` (opsional, string): `traccar` atau `mspf`
+- `group` (opsional, string): prefix group ID jika spesifik
+- `confirm` (opsional boolean): Wajib bernilai `true` untuk perintah mematikan mesin (`engineStop` / `deactivate`)
+- `reason` (opsional string): Catatan atau alasan eksekusi (tersimpan dalam audit log)
+
+**Request Contoh (Mematikan Mesin):**
 ```json
 {
-  "deviceId": 2,
+  "deviceId": 1001,
   "type": "engineStop",
-  "data": {},
-  "group": "traccar_5",
+  "confirm": true,
+  "reason": "Kendaraan diduga dicuri",
   "source": "traccar"
 }
 ```
 
-**Response 200:**
+**Response 200 (Sukses):**
 ```json
 {
   "success": true,
   "message": "Command sent",
-  "deviceId": 2,
+  "deviceId": 1001,
   "commandType": "engineStop",
-  "source": "traccar"
+  "source": "traccar",
+  "engineControl": {
+    "desired": "INACTIVE",
+    "state": "DEACTIVATING",
+    "isApplied": false,
+    "lastAppliedAt": null
+  },
+  "data": { "id": 101, "type": "engineStop" }
+}
+```
+*(Catatan: field `source` hanya tampil untuk role `admin`)*
+
+**Response 422 (Konfirmasi Diperlukan):**
+Jika `confirm` belum diset `true` pada perintah cut engine:
+```json
+{
+  "success": false,
+  "code": "WARN_CONFIRMATION_REQUIRED",
+  "requiresConfirmation": true,
+  "message": "Confirmation required: Stopping vehicle engine carries safety risks. Set confirm: true to proceed.",
+  "safetyNotice": "Kendaraan hanya dapat dimatikan saat kondisi aman. Pastikan konfirmasi disetujui.",
+  "deviceId": 1001,
+  "commandType": "engineStop"
+}
+```
+
+**Response 403 (Izin Kurang):**
+```json
+{
+  "error": "Forbidden: You do not have permission to stop vehicle engine",
+  "code": "ERR_FORBIDDEN"
 }
 ```
 
@@ -937,52 +1224,117 @@ Mengirim perintah ke device. Gateway otomatis routing ke backend yang tepat (Tra
 
 ### GET /api/commands/types/:deviceId
 
-Mengembalikan daftar tipe command yang didukung oleh device.
+Mengembalikan daftar tipe command yang didukung oleh device. Jika customer tidak memiliki izin `canCutEngine: true`, tipe perintah mematikan mesin (`engineStop`, `deactivate`) otomatis difilter keluar agar UI tidak menampilkan tombol yang tidak berhak diakses.
 
 **Query Parameters:** `source`, `group`
 
-**Response 200 (Traccar):**
+**Response 200 (Customer berizin / Admin):**
 ```json
 {
-  "types": ["engineStop", "engineResume", "positionPeriodic", ...],
+  "types": ["engineStop", "engineResume", "positionPeriodic"],
   "source": "traccar"
 }
 ```
 
-**Response 200 (MSPF):**
+**Response 200 (Customer tanpa canCutEngine):**
 ```json
 {
-  "types": ["activate", "deactivate"],
-  "source": "mspf"
+  "types": ["engineResume", "positionPeriodic"],
+  "source": "traccar"
 }
 ```
 
 ---
 
-### PUT /api/devices/:id/activation
+### PUT /api/commands/:deviceId/activation
 
 Unified activation endpoint — berfungsi untuk Traccar dan MSPF.
 
-**Request:**
+**Request Body:**
+- `desiredStatus` (wajib, string): `"ACTIVE"` atau `"INACTIVE"`
+- `source` (opsional, string): `traccar` atau `mspf`
+- `group` (opsional, string)
+- `confirm` (opsional boolean): Wajib `true` jika `desiredStatus: "INACTIVE"`
+- `reason` (opsional string): Catatan/alasan eksekusi yang dicatat ke audit log
+
+| Status | Traccar | MSPF | Syarat Keamanan |
+|--------|---------|------|-----------------|
+| `ACTIVE` | Kirim `engineResume` | Activation → ACTIVE | Normal |
+| `INACTIVE` | Kirim `engineStop` | Activation → INACTIVE | Wajib `canCutEngine: true` & `confirm: true` |
+
+**Request Contoh:**
 ```json
 {
-  "desiredStatus": "ACTIVE",
-  "source": "mspf"
+  "desiredStatus": "INACTIVE",
+  "confirm": true,
+  "reason": "Penarikan unit tertunggak",
+  "source": "traccar"
 }
 ```
-
-| Status | Traccar | MSPF |
-|--------|---------|------|
-| `ACTIVE` | Kirim `engineResume` | Activation → ACTIVE |
-| `INACTIVE` | Kirim `engineStop` | Activation → INACTIVE |
 
 **Response 200:**
 ```json
 {
   "success": true,
-  "deviceId": 10258579,
-  "desiredStatus": "ACTIVE",
-  "source": "mspf"
+  "deviceId": 1001,
+  "desiredStatus": "INACTIVE",
+  "commandType": "engineStop",
+  "source": "traccar",
+  "engineControl": {
+    "desired": "INACTIVE",
+    "state": "DEACTIVATING",
+    "isApplied": false,
+    "lastAppliedAt": null
+  },
+  "data": { ... }
+}
+```
+*(Catatan: field `source` hanya tampil untuk role `admin`)*
+
+---
+
+### GET /api/commands/logs
+
+Melihat riwayat audit log seluruh pengiriman perintah.
+- **Admin:** Melihat riwayat seluruh armada atau filter bebas.
+- **Customer:** Otomatis dibatasi hanya untuk perangkat yang berada di dalam `groups` miliknya.
+
+**Query Parameters:**
+- `deviceId` (opsional integer): Filter berdasarkan ID perangkat
+- `source` (opsional string): `traccar` | `mspf`
+- `userId` (opsional integer, admin only): Filter berdasarkan user pelaksana
+- `status` (opsional string): `SUCCESS` | `FAILED` | `REJECTED`
+- `commandType` (opsional string): Contoh `engineStop`, `ACTIVE`, dll.
+- `from` (opsional ISO string): Filter tanggal awal
+- `to` (opsional ISO string): Filter tanggal akhir
+- `offset` (opsional integer, default 0)
+- `limit` (opsional integer, default 50, max 200)
+
+**Response 200:**
+```json
+{
+  "logs": [
+    {
+      "id": 1,
+      "userId": 2,
+      "username": "budi_s",
+      "role": "customer",
+      "deviceId": 1001,
+      "deviceName": null,
+      "source": "traccar",
+      "commandType": "engineStop",
+      "payload": {},
+      "confirmed": true,
+      "reason": "Kendaraan keluar rute",
+      "status": "SUCCESS",
+      "errorMessage": null,
+      "ipAddress": "127.0.0.1",
+      "createdAt": "2026-09-10T04:12:00.000Z"
+    }
+  ],
+  "total": 1,
+  "offset": 0,
+  "limit": 50
 }
 ```
 
@@ -1097,22 +1449,79 @@ Authorization: Bearer <token>
 
 Mengembalikan daftar semua user.
 
+**Response 200:**
+```json
+[
+  {
+    "id": 1,
+    "username": "admin",
+    "email": "admin@system.local",
+    "firstName": "Admin",
+    "lastName": "System",
+    "role": "admin",
+    "isActive": true,
+    "tokenVersion": 1,
+    "groups": [1, 5],
+    "timezone": "Asia/Jakarta",
+    "permissions": { "canCutEngine": true },
+    "createdAt": "2026-06-17T00:00:00.000Z"
+  }
+]
+```
+
 ### GET /api/users/:id
 
 Mengembalikan detail user.
 
+**Response 200:**
+```json
+{
+  "id": 2,
+  "username": "customer@company.com",
+  "email": "customer@company.com",
+  "firstName": "Budi",
+  "lastName": "Santoso",
+  "role": "customer",
+  "isActive": true,
+  "tokenVersion": 1,
+  "groups": [1, 5],
+  "timezone": "Asia/Jakarta",
+  "permissions": { "canCutEngine": false },
+  "createdAt": "2026-06-17T00:00:00.000Z"
+}
+```
+
 ### POST /api/users
 
-Membuat user baru. **`timezone` wajib** dan harus timezone IANA yang valid (contoh: `Asia/Jakarta`, `Asia/Tokyo`, `UTC`).
+Membuat user baru. **Semua field berikut wajib diisi**:
+- `username`: username unik
+- `email`: email unik dan format valid
+- `firstName`: nama depan
+- `lastName`: nama belakang
+- `password`: password minimal 6 karakter
+- `confirmPassword`: konfirmasi password (wajib identik dengan `password`)
+- `timezone`: timezone IANA valid (contoh: `Asia/Jakarta`, `Asia/Tokyo`, `UTC`)
+- `role`: opsional (default: `customer`)
+- `groups`: opsional array integer custom group ID (default: `[]`)
+- `isActive`: opsional boolean (default: `true`)
+- `permissions`: opsional object capability (default: `{"canCutEngine": false}`)
 
 **Request:**
 ```json
 {
-  "username": "customer@company.com",
+  "username": "budi_s",
+  "email": "budi@company.com",
+  "firstName": "Budi",
+  "lastName": "Santoso",
   "password": "pass123",
+  "confirmPassword": "pass123",
   "role": "customer",
   "groups": [1, 5],
-  "timezone": "Asia/Jakarta"
+  "timezone": "Asia/Jakarta",
+  "isActive": true,
+  "permissions": {
+    "canCutEngine": false
+  }
 }
 ```
 
@@ -1120,25 +1529,54 @@ Membuat user baru. **`timezone` wajib** dan harus timezone IANA yang valid (cont
 ```json
 {
   "id": 2,
-  "username": "customer@company.com",
+  "username": "budi_s",
+  "email": "budi@company.com",
+  "firstName": "Budi",
+  "lastName": "Santoso",
   "role": "customer",
   "groups": [1, 5],
-  "timezone": "Asia/Jakarta"
+  "timezone": "Asia/Jakarta",
+  "isActive": true,
+  "tokenVersion": 1,
+  "permissions": {
+    "canCutEngine": false
+  }
 }
 ```
 
 ### PUT /api/users/:id
 
-Update data user. Semua field opsional — kirim hanya field yang ingin diubah. `timezone` opsional, namun bila dikirim harus IANA yang valid.
+Update data user oleh Admin. Semua field opsional — kirim hanya field yang ingin diubah:
+- `username` (opsional, jika diubah harus unik)
+- `email` (opsional, jika diubah harus format email valid dan unik)
+- `firstName` / `lastName` (opsional)
+- `password` (opsional, minimal 6 karakter) $\rightarrow$ **jika field password diisi, maka field `confirmPassword` wajib diisi dan harus cocok**. Mengubah password otomatis mencabut seluruh sesi token aktif user (`tokenVersion` naik).
+- `isActive`: boolean (`true` / `false`). **Jika di-set `false` (disabled)**, user otomatis tidak bisa login, seluruh sesi token JWT aktif langsung hangus seketika, dan koneksi WebSocket user langsung diputus paksa.
+- `groups` (array integer ID) $\rightarrow$ Menambah atau mengurangi grup **tidak akan me-logout user**. Gateway menyelesaikan keanggotaan grup secara live di `authMiddleware`, sehingga kendaraan dari grup baru langsung terlihat pada sesi yang sedang berjalan.
+- `permissions`: object capability, contoh: `{"canCutEngine": true}`. Mengubah nilai permissions secara riil otomatis mencabut sesi token lama agar izin baru diterapkan.
+- `role` (`admin` / `customer`)
+- `timezone` (IANA timezone valid)
 
-**Request:**
+**Request (Disable User):**
 ```json
 {
-  "username": "customer@company.com",
+  "isActive": false
+}
+```
+
+**Request (Update Profil & Password):**
+```json
+{
+  "username": "budi_baru",
+  "email": "budi_baru@company.com",
+  "firstName": "Budi",
+  "lastName": "Pratama",
   "password": "newpass123",
+  "confirmPassword": "newpass123",
   "role": "customer",
   "groups": [1, 5, 3],
-  "timezone": "Asia/Tokyo"
+  "timezone": "Asia/Tokyo",
+  "isActive": true
 }
 ```
 
@@ -1146,10 +1584,16 @@ Update data user. Semua field opsional — kirim hanya field yang ingin diubah. 
 ```json
 {
   "id": 2,
-  "username": "customer@company.com",
+  "username": "budi_baru",
+  "email": "budi_baru@company.com",
+  "firstName": "Budi",
+  "lastName": "Pratama",
   "role": "customer",
   "groups": [1, 5, 3],
-  "timezone": "Asia/Tokyo"
+  "timezone": "Asia/Tokyo",
+  "isActive": true,
+  "tokenVersion": 2,
+  "createdAt": "2026-06-17T00:00:00.000Z"
 }
 ```
 
@@ -1246,6 +1690,7 @@ Assign 1 device ke grup.
   "groupId": 1
 }
 ```
+> `source` mendukung `"traccar"`, `"mspf"`, atau `"foxlogger"`. `deviceId` mendukung angka integer 64-bit / IMEI 15 digit (contoh: `780901703170270`).
 
 **Response 201:**
 ```json
@@ -1268,7 +1713,8 @@ Assign banyak device sekaligus ke 1 grup.
   "groupId": 1,
   "devices": [
     { "deviceId": 2, "source": "traccar" },
-    { "deviceId": 10258579, "source": "mspf" }
+    { "deviceId": 10258579, "source": "mspf" },
+    { "deviceId": 780901703170270, "source": "foxlogger" }
   ]
 }
 ```
@@ -1368,6 +1814,128 @@ Mengembalikan daftar semua field yang tersedia dari device cache, untuk dropdown
     { "name": "adc1", "type": "number", "sources": ["traccar"] },
     { "name": "mobilityNo", "type": "string", "sources": ["mspf"] }
   ]
+}
+```
+
+---
+
+### Event & Alert Level Configuration (Admin)
+
+Middleware menyediakan katalog event terpadu dari Traccar, MSPF Monitors, dan FoxLogger Alarms, serta mengizinkan Admin mengklasifikasikan tingkat keparahan (*severity level*), warna (*color*), dan alias kustom (*customLabel*).
+
+#### GET /api/admin/events/catalog
+
+Menarik katalog seluruh event, geofence, monitor MSPF, dan alarm FoxLogger yang tersedia dari upstream, beserta status konfigurasinya saat ini.
+
+**Response 200:**
+```json
+{
+  "catalog": [
+    {
+      "source": "traccar",
+      "eventKey": "overspeed",
+      "externalId": null,
+      "eventType": "overspeed",
+      "originalName": "Overspeed",
+      "customLabel": "Kecepatan Melebihi Batas",
+      "level": "danger",
+      "color": "#DC2626",
+      "isEnabled": true,
+      "configured": true
+    },
+    {
+      "source": "mspf",
+      "eventKey": "monitor:5001",
+      "externalId": 5001,
+      "eventType": "monitor",
+      "originalName": "MSPF Speed Limit 80",
+      "customLabel": null,
+      "level": "warning",
+      "color": "#F59E0B",
+      "isEnabled": true,
+      "configured": false
+    }
+  ],
+  "total": 2
+}
+```
+
+#### GET /api/admin/events/configs
+
+Mengambil daftar aturan event yang sudah tersimpan di database gateway.
+
+**Response 200:**
+```json
+{
+  "configs": [
+    {
+      "id": 1,
+      "source": "traccar",
+      "event_key": "overspeed",
+      "external_id": null,
+      "event_type": "overspeed",
+      "original_name": "Overspeed",
+      "custom_label": "Kecepatan Melebihi Batas",
+      "level": "danger",
+      "color": "#DC2626",
+      "is_enabled": true
+    }
+  ],
+  "total": 1
+}
+```
+
+#### PUT /api/admin/events/configs
+
+Menyimpan atau memperbarui konfigurasi level, warna, nama kustom, dan status aktif untuk satu atau banyak event secara batch.
+
+**Request Body:**
+```json
+{
+  "configs": [
+    {
+      "source": "traccar",
+      "eventKey": "overspeed",
+      "eventType": "overspeed",
+      "originalName": "Overspeed",
+      "customLabel": "Kecepatan Melebihi Batas",
+      "level": "danger",
+      "color": "#DC2626",
+      "isEnabled": true
+    },
+    {
+      "source": "mspf",
+      "eventKey": "monitor:5001",
+      "externalId": 5001,
+      "eventType": "monitor",
+      "originalName": "MSPF Speed Limit 80",
+      "customLabel": "Radar Tol 80 KMH",
+      "level": "warning",
+      "color": "#F59E0B",
+      "isEnabled": true
+    }
+  ]
+}
+```
+
+**Response 200:**
+```json
+{
+  "success": true,
+  "updatedCount": 2,
+  "configs": [...]
+}
+```
+
+#### DELETE /api/admin/events/configs/:id
+
+Mereset konfigurasi event kembali ke pengaturan default bawaan middleware.
+
+**Response 200:**
+```json
+{
+  "success": true,
+  "message": "Event config reset to default"
 }
 ```
 
@@ -1592,9 +2160,16 @@ Berisi **status koneksi device** + **status device (running)**. Field `status` d
   "ignition": null,
   "voltage": null,
   "internalBattery": null,
-  "batteryLevel": null
+  "batteryLevel": null,
+  "engineControl": {
+    "desired": "INACTIVE",
+    "state": "INACTIVE",
+    "isApplied": true,
+    "lastAppliedAt": "2026-06-18T04:05:12Z"
+  }
 }
 ```
+*(Catatan: field `source` hanya tampil pada socket milik role `admin`)*
 
 **Running status (status device):**
 | Status | Ignition | Speed | Last Update | Keterangan |
@@ -1623,6 +2198,26 @@ Dikirim sebagai konfirmasi eksekusi command.
   "source": "traccar"
 }
 ```
+
+#### `session-revoked` & `account-disabled`
+
+Dikirim sebelum server memutus koneksi socket pengguna (`socket.disconnect(true)`):
+- **`session-revoked`**: Dipancarkan ketika password pengguna diubah atau permission diubah oleh administrator. Sesi lama dicabut dan pengguna diarahkan login kembali.
+  ```json
+  {
+    "event": "session-revoked",
+    "message": "Session has been revoked due to password or permission update",
+    "code": "ERR_TOKEN_REVOKED"
+  }
+  ```
+- **`account-disabled`**: Dipancarkan ketika status akun pengguna diubah menjadi nonaktif (`isActive: false`) oleh administrator.
+  ```json
+  {
+    "event": "account-disabled",
+    "message": "Account has been disabled by administrator",
+    "code": "ERR_ACCOUNT_DISABLED"
+  }
+  ```
 
 ---
 

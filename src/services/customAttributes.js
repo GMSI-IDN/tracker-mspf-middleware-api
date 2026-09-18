@@ -9,25 +9,42 @@ let cacheBuilt = 0;
 
 async function buildDeviceRulesCache() {
   try {
-    const groups = await db('device_groups').select('device_id', 'source', 'group_id');
+    const manualGroups = await db('device_groups').select('device_id', 'source', 'group_id');
     const rules = await db('custom_attribute_rules').where({ enabled: true }).orderBy('priority');
+    const syncRules = await db('group_sync_rules').select('middleware_group_id', 'source', 'source_group_id');
 
     deviceRulesCache = {};
-    for (const dg of groups) {
+
+    function addRuleToDevice(key, rule) {
+      if (!deviceRulesCache[key]) deviceRulesCache[key] = [];
+      if (!deviceRulesCache[key].some(r => r.name === rule.name)) {
+        deviceRulesCache[key].push(rule);
+      }
+    }
+
+    // A. Manual additions
+    for (const dg of manualGroups) {
       const key = `${dg.source}:${dg.device_id}`;
-      const deviceRules = rules.filter(r => r.group_id === dg.group_id);
-      if (deviceRules.length > 0) {
-        if (!deviceRulesCache[key]) deviceRulesCache[key] = [];
-        // dedup by name — higher priority wins
-        const seen = new Set();
-        for (const r of deviceRules) {
-          if (!seen.has(r.name)) {
-            seen.add(r.name);
-            deviceRulesCache[key].push(r);
+      const matchingRules = rules.filter(r => r.group_id === dg.group_id);
+      for (const r of matchingRules) addRuleToDevice(key, r);
+    }
+
+    // B. Dynamic sync rules
+    if (syncRules.length > 0) {
+      const cache = require('./cache');
+      const allDevices = cache.get('devices:merged') || [];
+      const { deviceMatchesSyncRule } = require('./groupMembership');
+      for (const d of allDevices) {
+        const key = `${d.source}:${d.id}`;
+        for (const sRule of syncRules) {
+          if (deviceMatchesSyncRule(d, sRule)) {
+            const matchingRules = rules.filter(r => r.group_id === sRule.middleware_group_id);
+            for (const r of matchingRules) addRuleToDevice(key, r);
           }
         }
       }
     }
+
     cacheBuilt = Date.now();
   } catch {}
 }

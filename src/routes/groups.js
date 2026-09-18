@@ -1,6 +1,7 @@
 const express = require('express');
 const createError = require('http-errors');
 const db = require('../db');
+const { getAllowedDeviceKeys } = require('../services/groupMembership');
 
 const router = express.Router();
 
@@ -10,14 +11,18 @@ router.get('/', async (req, res, next) => {
     const isAdmin = req.user.role === 'admin';
 
     const customGroups = await db('groups').select('*');
-    const groups = customGroups
-      .filter(g => isAdmin || userGroups.includes(g.id))
-      .map(g => ({
-        id: g.id, name: g.name,
+    const accessible = customGroups.filter(g => isAdmin || userGroups.includes(g.id));
+
+    const groups = await Promise.all(accessible.map(async (g) => {
+      const keys = await getAllowedDeviceKeys([g.id]);
+      return {
+        id: g.id,
+        name: g.name,
         description: g.description,
         source: 'custom',
-        deviceCount: 0,
-      }));
+        deviceCount: keys.size,
+      };
+    }));
 
     res.json({ groups });
   } catch (err) {
