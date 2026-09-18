@@ -307,4 +307,11 @@ describe('Role-Based Upstream Vendor Sanitization (Admin vs Customer)', () => {
       expect(res.body.summaries[0].source).toBeUndefined();
     });
   });
+
+  afterAll(async () => {
+    await db('command_logs').where({ device_id: 8881 }).delete();
+    await db('device_groups').where({ group_id: testGroupId }).delete();
+    await db('groups').where({ id: testGroupId }).delete();
+    await db('users').where({ username: 'cust_sanitizer' }).delete();
+  });
 });

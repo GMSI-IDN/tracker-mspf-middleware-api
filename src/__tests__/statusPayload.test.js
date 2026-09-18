@@ -1,7 +1,8 @@
 process.env.RUN_MIGRATIONS = 'false';
 
 const cache = require('../services/cache');
-const { buildStatusPayload } = require('../websocket/index');
+const http = require('http');
+const { buildStatusPayload, disconnectUserSockets, setupWebSocket, getIO } = require('../websocket/index');
 
 describe('buildStatusPayload — device-status contract', () => {
   beforeEach(() => {
@@ -52,5 +53,70 @@ describe('buildStatusPayload — device-status contract', () => {
     ], 120);
     const payload = buildStatusPayload({ deviceId: 2, source: 'mspf', status: 'online', lastUpdate: undefined });
     expect(payload.lastUpdate).toBe('2026-06-18T04:05:12Z');
+  });
+});
+
+describe('disconnectUserSockets contract', () => {
+  let server;
+
+  beforeAll(() => {
+    server = http.createServer();
+    setupWebSocket(server);
+  });
+
+  afterAll((done) => {
+    if (server && server.listening) {
+      server.close(done);
+    } else {
+      done();
+    }
+  });
+
+  test('emits session-revoked event with ERR_TOKEN_REVOKED code when password or session is revoked', () => {
+    const io = getIO();
+    let emitted = null;
+    let disconnected = false;
+    const mockSocket = {
+      user: { id: 77 },
+      emit: (evt, data) => { emitted = { evt, data }; },
+      disconnect: (arg) => { disconnected = arg; },
+    };
+    io.sockets.sockets.set('s_revoked', mockSocket);
+
+    disconnectUserSockets(77, 'session-revoked', 'Session revoked for test');
+
+    expect(emitted).toEqual({
+      evt: 'session-revoked',
+      data: {
+        event: 'session-revoked',
+        message: 'Session revoked for test',
+        code: 'ERR_TOKEN_REVOKED',
+      },
+    });
+    expect(disconnected).toBe(true);
+  });
+
+  test('emits account-disabled event with ERR_ACCOUNT_DISABLED code when account is disabled', () => {
+    const io = getIO();
+    let emitted = null;
+    let disconnected = false;
+    const mockSocket = {
+      user: { id: 88 },
+      emit: (evt, data) => { emitted = { evt, data }; },
+      disconnect: (arg) => { disconnected = arg; },
+    };
+    io.sockets.sockets.set('s_disabled', mockSocket);
+
+    disconnectUserSockets(88, 'account-disabled', 'Account disabled for test');
+
+    expect(emitted).toEqual({
+      evt: 'account-disabled',
+      data: {
+        event: 'account-disabled',
+        message: 'Account disabled for test',
+        code: 'ERR_ACCOUNT_DISABLED',
+      },
+    });
+    expect(disconnected).toBe(true);
   });
 });

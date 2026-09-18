@@ -71,6 +71,12 @@ jest.mock('../services/autoSync', () => ({
 
 jest.mock('../services/customAttributes', () => ({
   applyRules: jest.fn((device, rules) => device),
+  enrichWithRules: jest.fn((device, rules) => {
+    for (const r of rules || []) {
+      if (r.mode === 'compute') device.attributes[r.name] = 12.5;
+    }
+    return device;
+  }),
   computeFormula: jest.fn(),
   getDeviceRules: jest.fn(() => Promise.resolve([])),
   buildDeviceRulesCache: jest.fn(() => Promise.resolve()),
@@ -79,6 +85,7 @@ jest.mock('../services/customAttributes', () => ({
 const traccar = require('../services/traccar');
 const mspf = require('../services/mspf');
 const foxlogger = require('../services/foxlogger');
+const customAttributes = require('../services/customAttributes');
 const db = require('../db');
 const { startOfDayIso } = require('../utils/timestamp');
 
@@ -87,6 +94,8 @@ const app = require('../app');
 jest.setTimeout(30000);
 beforeAll(async () => {
   await db.waitForMigration();
+  await db('groups').where('name', 'route_test_group').delete();
+  await db('users').where('username', 'route_cust').delete();
 });
 
 describe('Health', () => {
@@ -949,6 +958,19 @@ describe('Device Metadata', () => {
       .set('Authorization', `Bearer ${token}`);
     expect(res.status).toBe(400);
   });
+
+  test('PUT and GET metadata for 15-digit deviceId (FoxLogger IMEI)', async () => {
+    const foxId = 780901703170270;
+    await db('device_metadata').where({ device_id: foxId, source: 'foxlogger' }).delete();
+    const putRes = await request(app)
+      .put(`/api/devices/${foxId}/metadata`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ source: 'foxlogger', metadata: { plat: 'B 1234 XYZ' } });
+    expect(putRes.status).toBe(200);
+    expect(putRes.body.metadata.plat).toBe('B 1234 XYZ');
+
+    await db('device_metadata').where({ device_id: foxId, source: 'foxlogger' }).delete();
+  });
 });
 
 describe('Rate Limiting', () => {
@@ -1010,6 +1032,33 @@ describe('Admin Custom Groups', () => {
     if (res.body.deviceGroups.length > 0) {
       expect(res.body.deviceGroups[0]).toHaveProperty('device_name');
     }
+  });
+
+  test('POST /api/admin/device-groups assigns a FoxLogger device with 15-digit IMEI', async () => {
+    const groupRes = await request(app)
+      .get('/api/admin/groups')
+      .set('Authorization', `Bearer ${token}`);
+    const gId = groupRes.body.groups.find(g => g.name === 'test_group')?.id;
+    if (!gId) return;
+
+    const foxDeviceId = 780901703170270;
+    const cache = require('../services/cache');
+    cache.set('devices:merged', [
+      { id: foxDeviceId, name: 'Fox 780901703170270', source: 'foxlogger' }
+    ], 60);
+
+    await db('device_groups').where({ device_id: foxDeviceId, source: 'foxlogger' }).delete();
+
+    const res = await request(app)
+      .post('/api/admin/device-groups')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ deviceId: foxDeviceId, source: 'foxlogger', groupId: gId });
+
+    expect(res.status).toBe(201);
+    expect(Number(res.body.deviceId)).toBe(foxDeviceId);
+    expect(res.body.source).toBe('foxlogger');
+
+    await db('device_groups').where({ device_id: foxDeviceId, source: 'foxlogger' }).delete();
   });
 
   test('DELETE /api/admin/groups/:id removes group', async () => {
@@ -1998,7 +2047,7 @@ describe('Event Reports', () => {
     expect(res.status).toBe(401);
   });
 
-  test('GET /api/reports/events returns Traccar multi-device events (no enrich)', async () => {
+  test('GET /api/reports/events returns Traccar multi-device events with names and types', async () => {
     traccar.getReportEvents.mockResolvedValue([
       { id: 1, type: 'geofenceEnter', eventTime: '2026-06-15T10:00:00Z', deviceId: 2, geofenceId: 5 },
       { id: 2, type: 'ignitionOn', eventTime: '2026-06-15T11:00:00Z', deviceId: 3 },
@@ -2011,8 +2060,12 @@ describe('Event Reports', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.events.length).toBe(2);
-    expect(res.body.events[0].name).toBeNull();
+    expect(res.body.events[0].name).toBe('Ignition ON');
+    expect(res.body.events[0].type).toBe('ignitionOn');
     expect(res.body.events[0].status).toBe('OPEN');
+    expect(res.body.events[1].name).toBe('Geofence Enter');
+    expect(res.body.events[1].type).toBe('geofenceEnter');
+    expect(res.body.events[1].status).toBe('OPEN');
     expect(res.body.summary.total).toBe(2);
   });
 
@@ -2033,14 +2086,16 @@ describe('Event Reports', () => {
     expect(res.status).toBe(200);
     expect(res.body.events.length).toBe(2);
     expect(res.body.events[0].name).toBe('Ignition ON');
+    expect(res.body.events[0].type).toBe('ignitionOn');
     expect(res.body.events[0].status).toBe('OPEN');
     expect(res.body.events[1].name).toBe('Gudang A');
+    expect(res.body.events[1].type).toBe('geofenceEnter');
     expect(res.body.events[1].status).toBe('OPEN');
     expect(res.body.events[1].geofenceId).toBe(5);
     expect(res.body.summary.total).toBe(2);
   });
 
-  test('GET /api/reports/events filters by status and name', async () => {
+  test('GET /api/reports/events filters by status, name, and type', async () => {
     traccar.getDevices.mockResolvedValue([{ id: traccarDeviceId, name: 'Test', uniqueId: 'test', status: 'online', groupId: 5 }]);
     traccar.getReportEvents.mockResolvedValue([
       { id: 1, type: 'geofenceEnter', eventTime: '2026-06-15T10:00:00Z', deviceId: traccarDeviceId, geofenceId: 5 },
@@ -2056,6 +2111,265 @@ describe('Event Reports', () => {
     expect(res.body.events.length).toBe(1);
     expect(res.body.events[0].status).toBe('OPEN');
     expect(res.body.summary.total).toBe(1);
+
+    const resType = await request(app)
+      .get(`/api/reports/events?deviceId=${traccarDeviceId}&from=2026-06-01T00:00:00Z&type=geofenceExit`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(resType.status).toBe(200);
+    expect(resType.body.events.length).toBe(1);
+    expect(resType.body.events[0].type).toBe('geofenceExit');
+  });
+
+  test('GET /api/reports/events returns MSPF events with monitorName as name and type', async () => {
+    traccar.getReportEvents.mockResolvedValue([]);
+    mspf.getMspfEvents.mockResolvedValue([
+      { id: 101, monitorName: 'Speed Limit Alert', openedAt: '2026-06-15T14:00:00Z', status: 'OPEN', deviceId: 50 },
+    ]);
+
+    const res = await request(app)
+      .get('/api/reports/events?from=2026-06-01T00:00:00Z')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.events.length).toBe(1);
+    expect(res.body.events[0].name).toBe('Speed Limit Alert');
+    expect(res.body.events[0].type).toBe('Speed Limit Alert');
+    expect(res.body.events[0].status).toBe('OPEN');
+  });
+
+  test('GET /api/reports/events without from or to defaults to last 7 days window', async () => {
+    traccar.getReportEvents.mockResolvedValue([
+      { id: 101, type: 'ignitionOn', eventTime: new Date().toISOString(), deviceId: 2 },
+    ]);
+    mspf.getMspfEvents.mockResolvedValue([]);
+
+    const res = await request(app)
+      .get('/api/reports/events')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.events.length).toBe(1);
+    expect(res.body.period.from).toBeDefined();
+    expect(res.body.period.to).toBeDefined();
+    const diffDays = (new Date(res.body.period.to).getTime() - new Date(res.body.period.from).getTime()) / 86400000;
+    expect(Math.round(diffDays)).toBe(7);
+  });
+
+  test('GET /api/reports/events supports limit and offset pagination', async () => {
+    traccar.getReportEvents.mockResolvedValue([
+      { id: 1, type: 'ignitionOn', eventTime: '2026-06-15T10:00:00Z', deviceId: 2 },
+      { id: 2, type: 'ignitionOff', eventTime: '2026-06-15T11:00:00Z', deviceId: 2 },
+      { id: 3, type: 'deviceMoving', eventTime: '2026-06-15T12:00:00Z', deviceId: 2 },
+    ]);
+    mspf.getMspfEvents.mockResolvedValue([]);
+
+    const resPage1 = await request(app)
+      .get('/api/reports/events?from=2026-06-01T00:00:00Z&limit=2&offset=0')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(resPage1.status).toBe(200);
+    expect(resPage1.body.events.length).toBe(2);
+    expect(resPage1.body.summary.total).toBe(3);
+    expect(resPage1.body.summary.limit).toBe(2);
+    expect(resPage1.body.summary.offset).toBe(0);
+
+    const resPage2 = await request(app)
+      .get('/api/reports/events?from=2026-06-01T00:00:00Z&limit=2&offset=2')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(resPage2.status).toBe(200);
+    expect(resPage2.body.events.length).toBe(1);
+    expect(resPage2.body.summary.total).toBe(3);
+    expect(resPage2.body.summary.limit).toBe(2);
+    expect(resPage2.body.summary.offset).toBe(2);
+  });
+
+  test('GET /api/reports/events rejects date range exceeding 31 days with 400', async () => {
+    const res = await request(app)
+      .get('/api/reports/events?from=2026-01-01T00:00:00Z&to=2026-03-01T00:00:00Z')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('Date range cannot exceed 31 days');
+  });
+
+  test('GET /api/reports/events rejects to earlier than from with 400', async () => {
+    const res = await request(app)
+      .get('/api/reports/events?from=2026-06-30T00:00:00Z&to=2026-06-01T00:00:00Z')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('to must be after or equal to from');
+  });
+
+  test('GET /api/reports/events caches response when cache=true and bypasses on refresh=true', async () => {
+    traccar.getReportEvents.mockResolvedValue([
+      { id: 1, type: 'ignitionOn', eventTime: '2026-06-15T10:00:00Z', deviceId: 2 },
+    ]);
+    mspf.getMspfEvents.mockResolvedValue([]);
+
+    const res1 = await request(app)
+      .get('/api/reports/events?from=2026-06-10T00:00:00Z&to=2026-06-20T00:00:00Z&cache=true')
+      .set('Authorization', `Bearer ${token}`);
+    expect(res1.status).toBe(200);
+    expect(traccar.getReportEvents).toHaveBeenCalledTimes(1);
+
+    const res2 = await request(app)
+      .get('/api/reports/events?from=2026-06-10T00:00:00Z&to=2026-06-20T00:00:00Z&cache=true')
+      .set('Authorization', `Bearer ${token}`);
+    expect(res2.status).toBe(200);
+    expect(traccar.getReportEvents).toHaveBeenCalledTimes(1);
+
+    const res3 = await request(app)
+      .get('/api/reports/events?from=2026-06-10T00:00:00Z&to=2026-06-20T00:00:00Z&cache=true&refresh=true')
+      .set('Authorization', `Bearer ${token}`);
+    expect(res3.status).toBe(200);
+    expect(traccar.getReportEvents).toHaveBeenCalledTimes(2);
+  });
+
+  test('GET /api/reports/events dynamically gathers MSPF events across custom bcIds for individual devices', async () => {
+    const cache = require('../services/cache');
+    cache.set('devices:merged', [
+      { id: 9911, name: 'MSPF Custom Unit', source: 'mspf', group: 'mspf_55', attributes: { bcId: 55 } },
+    ]);
+    traccar.getReportEvents.mockResolvedValue([]);
+    mspf.getMspfEvents.mockResolvedValue([
+      { id: 501, monitorName: 'Custom BC Alert', openedAt: '2026-06-15T08:00:00Z', status: 'OPEN', deviceId: 9911 },
+    ]);
+    mspf.getMspfClosedEvents.mockResolvedValue([
+      { id: 502, monitorName: 'Custom BC Closed Alert', closedAt: '2026-06-15T09:00:00Z', status: 'CLOSE', deviceId: 9911 },
+    ]);
+
+    const res = await request(app)
+      .get('/api/reports/events?from=2026-06-01T00:00:00Z')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(mspf.getMspfEvents).toHaveBeenCalledWith(expect.objectContaining({ bcIds: expect.arrayContaining([55]) }));
+    expect(res.body.events.some(e => e.deviceId === 9911 && e.status === 'OPEN')).toBe(true);
+    expect(res.body.events.some(e => e.deviceId === 9911 && e.status === 'CLOSE')).toBe(true);
+  });
+
+  test('GET /api/reports/events returns accurate openedAt, closedAt, and eventTime for MSPF and Traccar', async () => {
+    traccar.getReportEvents.mockResolvedValue([
+      { id: 1, type: 'ignitionOn', eventTime: '2026-06-15T10:00:00Z', deviceId: 2 },
+      { id: 2, type: 'geofenceExit', eventTime: '2026-06-15T11:30:00Z', deviceId: 2 },
+    ]);
+    mspf.getMspfEvents.mockResolvedValue([
+      { id: 101, monitorName: 'Overspeed Alert', openedAt: '2026-06-15T08:00:00Z', status: 'OPEN', deviceId: 20 },
+    ]);
+    mspf.getMspfClosedEvents.mockResolvedValue([
+      { id: 102, monitorName: 'Door Open Alert', openedAt: '2026-06-15T08:15:00Z', closedAt: '2026-06-15T08:45:00Z', status: 'CLOSE', deviceId: 20 },
+    ]);
+
+    const res = await request(app)
+      .get('/api/reports/events?from=2026-06-01T00:00:00Z')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+
+    // Traccar OPEN event
+    const igOn = res.body.events.find(e => e.type === 'ignitionOn');
+    expect(igOn).toBeDefined();
+    expect(igOn.status).toBe('OPEN');
+    expect(igOn.openedAt).toBe('2026-06-15T10:00:00.000Z');
+    expect(igOn.closedAt).toBeNull();
+    expect(igOn.eventTime).toBe('2026-06-15T10:00:00.000Z');
+
+    // Traccar CLOSE event
+    const geoExit = res.body.events.find(e => e.type === 'geofenceExit');
+    expect(geoExit).toBeDefined();
+    expect(geoExit.status).toBe('CLOSE');
+    expect(geoExit.openedAt).toBeNull();
+    expect(geoExit.closedAt).toBe('2026-06-15T11:30:00.000Z');
+    expect(geoExit.eventTime).toBe('2026-06-15T11:30:00.000Z');
+
+    // MSPF OPEN event
+    const mspfOpen = res.body.events.find(e => e.name === 'Overspeed Alert');
+    expect(mspfOpen).toBeDefined();
+    expect(mspfOpen.status).toBe('OPEN');
+    expect(mspfOpen.openedAt).toBe('2026-06-15T08:00:00.000Z');
+    expect(mspfOpen.closedAt).toBeNull();
+    expect(mspfOpen.eventTime).toBe('2026-06-15T08:00:00.000Z');
+
+    // MSPF CLOSE event (has both openedAt and closedAt, eventTime is closedAt)
+    const mspfClose = res.body.events.find(e => e.name === 'Door Open Alert');
+    expect(mspfClose).toBeDefined();
+    expect(mspfClose.status).toBe('CLOSE');
+    expect(mspfClose.openedAt).toBe('2026-06-15T08:15:00.000Z');
+    expect(mspfClose.closedAt).toBe('2026-06-15T08:45:00.000Z');
+    expect(mspfClose.eventTime).toBe('2026-06-15T08:45:00.000Z');
+
+    // Summary has open and closed count
+    expect(res.body.summary.open).toBe(2);
+    expect(res.body.summary.closed).toBe(2);
+  });
+
+  test('GET /api/reports/events returns FoxLogger alarms with openedAt, closedAt, and status CLOSE', async () => {
+    traccar.getReportEvents.mockResolvedValue([]);
+    mspf.getMspfEvents.mockResolvedValue([]);
+    mspf.getMspfClosedEvents.mockResolvedValue([]);
+    foxlogger.getAlarmReports.mockResolvedValue([
+      {
+        cr_alm: 'Power Cut Alarm',
+        cr_time: '2026-06-15 15:08:40',
+        cr_durt: 120,
+        cr_imei: '0869066060196830',
+        cr_nopol: 'B 1234 FOX',
+      },
+    ]);
+
+    const res = await request(app)
+      .get('/api/reports/events?from=2026-06-01T00:00:00Z')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    const foxEv = res.body.events.find(e => e.type === 'Power Cut Alarm');
+    expect(foxEv).toBeDefined();
+    expect(foxEv.status).toBe('CLOSE');
+    expect(foxEv.openedAt).toBe('2026-06-15T08:08:40.000Z'); // 15:08:40 WIB - 7h = 08:08:40Z
+    expect(foxEv.closedAt).toBe('2026-06-15T08:10:40.000Z'); // +120s
+    expect(foxEv.eventTime).toBe('2026-06-15T08:10:40.000Z');
+    expect(foxEv.deviceId).toBe(869066060196830);
+  });
+
+  test('GET /api/reports/events for single FoxLogger device returns filtered alarms', async () => {
+    const foxId = 869066060196830;
+    traccar.getDevices.mockResolvedValue([]);
+    mspf.getDevice.mockResolvedValue(null);
+    foxlogger.getDevices.mockResolvedValue({
+      data: [{ id: foxId, uniqueId: '0869066060196830', name: 'Fox Vehicle' }],
+      total: 1,
+      next: null,
+    });
+    foxlogger.getAlarmReports.mockResolvedValue([
+      {
+        cr_alm: 'Power Cut Alarm',
+        cr_time: '2026-06-15 15:08:40',
+        cr_durt: 60,
+        cr_imei: '0869066060196830',
+        cr_nopol: 'B 1234 FOX',
+      },
+      {
+        cr_alm: 'Power Cut Alarm',
+        cr_time: '2026-06-15 15:08:40',
+        cr_durt: 60,
+        cr_imei: '0999999999999999',
+        cr_nopol: 'B 9999 OTHER',
+      },
+    ]);
+
+    const res = await request(app)
+      .get(`/api/reports/events?deviceId=${foxId}&from=2026-06-01T00:00:00Z`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.deviceId).toBe(foxId);
+    expect(res.body.events.length).toBe(1);
+    expect(res.body.events[0].deviceId).toBe(foxId);
+    expect(res.body.events[0].openedAt).toBe('2026-06-15T08:08:40.000Z');
+    expect(res.body.events[0].closedAt).toBe('2026-06-15T08:09:40.000Z');
   });
 });
 
@@ -2082,6 +2396,15 @@ describe('Route Reports (playback)', () => {
       .set('Authorization', `Bearer ${token}`);
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('ERR_VALIDATION');
+  });
+
+  test('GET /api/reports/route rejects date range exceeding 7 days with 400', async () => {
+    traccar.getDevices.mockResolvedValue([{ id: traccarDeviceId, name: 'Test Traccar', uniqueId: 'test', status: 'online', groupId: 5 }]);
+    const res = await request(app)
+      .get(`/api/reports/route?deviceId=${traccarDeviceId}&from=2026-06-01T00:00:00Z&to=2026-06-15T00:00:00Z`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('Date range');
   });
 
   test('GET /api/reports/route without token returns 401', async () => {
@@ -2178,6 +2501,73 @@ describe('Route Reports (playback)', () => {
     expect([...times].sort((a, b) => a - b)).toEqual(times);
     expect(res.body[0].deviceTime).toBe('2026-07-28T07:00:00Z');
   });
+
+  test('GET /api/reports/route preserves full attributes for customer and enriches custom rules', async () => {
+    let groupId;
+    try {
+      await db('users').where({ username: 'route_cust' }).delete();
+      await db('custom_attribute_rules').where({ name: 'calc_voltage' }).delete();
+      await db('device_groups').where({ device_id: traccarDeviceId, source: 'traccar' }).delete();
+      await db('groups').where({ name: 'route_test_group' }).delete();
+
+      const [grp] = await db('groups').insert({ name: 'route_test_group' }).returning('id');
+      groupId = typeof grp === 'object' ? grp.id : grp;
+
+      await db('device_groups').insert({ device_id: traccarDeviceId, source: 'traccar', group_id: groupId });
+      await db('custom_attribute_rules').insert({
+        group_id: groupId,
+        name: 'calc_voltage',
+        source_field: 'power',
+        mode: 'compute',
+        formula: 'value * 1.0',
+        priority: 1,
+        enabled: true,
+      });
+
+      await request(app)
+        .post('/api/users')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          username: 'route_cust',
+          email: 'route_cust@example.com',
+          firstName: 'Route',
+          lastName: 'Cust',
+          password: 'pass123',
+          confirmPassword: 'pass123',
+          role: 'customer',
+          groups: [groupId],
+          timezone: 'Asia/Jakarta',
+        });
+
+      const loginRes = await request(app)
+        .post('/api/auth/login')
+        .send({ username: 'route_cust', password: 'pass123' });
+      const custToken = loginRes.body.token;
+
+      traccar.getDevices.mockResolvedValue([{ id: traccarDeviceId, name: 'Test Traccar', uniqueId: 'test', status: 'online', groupId: 5 }]);
+      traccar.getReportRoute.mockResolvedValue([
+        { id: 1, deviceId: traccarDeviceId, latitude: -6.0, longitude: 106.7, speed: 20, deviceTime: '2026-06-15T10:00:00Z', attributes: { ignition: true, power: 12.5, motion: true } },
+      ]);
+      customAttributes.getDeviceRules.mockResolvedValueOnce([{ name: 'calc_voltage', mode: 'compute' }]);
+
+      const res = await request(app)
+        .get(`/api/reports/route?deviceId=${traccarDeviceId}&from=2026-06-15T00:00:00Z&to=2026-06-15T23:59:59Z`)
+        .set('Authorization', `Bearer ${custToken}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.length).toBe(1);
+      expect(res.body[0].attributes).toBeDefined();
+      expect(res.body[0].attributes.ignition).toBe(true);
+      expect(res.body[0].attributes.power).toBe(12.5);
+      expect(res.body[0].attributes.motion).toBe(true);
+      expect(res.body[0].attributes.calc_voltage).toBe(12.5);
+    } finally {
+      await db('users').where({ username: 'route_cust' }).delete();
+      await db('custom_attribute_rules').where({ name: 'calc_voltage' }).delete();
+      await db('device_groups').where({ device_id: traccarDeviceId, source: 'traccar' }).delete();
+      if (groupId) await db('groups').where({ id: groupId }).delete();
+    }
+  });
 });
 
 describe('Dashboard', () => {
@@ -2238,6 +2628,30 @@ describe('Dashboard', () => {
     expect(res.body.summary.totalFuel).toBe(30);
     expect(res.body.summary.totalEngineHours).toBe(10);
     expect(res.body.summary.totalDrivingHours).toBeDefined();
+  });
+
+  test('GET /api/dashboard returns recentEvents with name, type, and deviceName', async () => {
+    const cache = require('../services/cache');
+    cache.set('devices:merged', [
+      { id: 10, name: 'Truck Alpha', source: 'traccar', status: 'online', running: 'RUN' },
+    ], 120);
+
+    traccar.getReportEvents.mockResolvedValue([
+      { id: 1, type: 'ignitionOn', eventTime: '2026-06-15T10:00:00Z', deviceId: 10 },
+      { id: 2, type: 'geofenceEnter', eventTime: '2026-06-15T09:00:00Z', deviceId: 10 },
+    ]);
+
+    const res = await request(app)
+      .get('/api/dashboard')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.recentEvents.length).toBe(2);
+    expect(res.body.recentEvents[0].name).toBe('Ignition ON');
+    expect(res.body.recentEvents[0].type).toBe('ignitionOn');
+    expect(res.body.recentEvents[0].deviceName).toBe('Truck Alpha');
+    expect(res.body.recentEvents[1].name).toBe('Geofence Enter');
+    expect(res.body.recentEvents[1].type).toBe('geofenceEnter');
   });
 
   test('GET /api/dashboard without token returns 401', async () => {

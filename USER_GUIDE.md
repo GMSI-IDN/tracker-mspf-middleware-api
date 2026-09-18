@@ -377,6 +377,50 @@ GET /api/commands/logs?deviceId=101&limit=20
 Authorization: Bearer <token>
 ```
 
+### 3.10 Riwayat Event & Peringatan Insiden (Events & Alerts)
+
+Melihat log event armada (overspeed, geofence, engine on/off, alarm SOS, cut-power, fuel steal, dsb) lintas provider (**Traccar, MSPF, FoxLogger**) secara terpadu:
+
+```bash
+GET /api/reports/events?limit=50&offset=0
+Authorization: Bearer <token>
+```
+
+**Panduan Integrasi Khusus Frontend (FE):**
+1. **Buka Tabel Langsung Tanpa Wajib Tanggal:**
+   - FE tidak perlu memaksa user memilih tanggal saat tabel pertama kali dibuka. Cukup request `?limit=50&offset=0`.
+   - Backend otomatis memberikan data **7 hari terakhir**.
+2. **Pahami Semantik Status `OPEN` vs `CLOSE` & Detail Waktu:**
+   - **`OPEN` (Active Incident):** Event yang **saat ini masih berlangsung / belum terselesaikan** (`closedAt: null`). Misalnya event *"Out pool pondok cabe"* dengan `openedAt` 6 bulan lalu menandakan bahwa unit keluar dari pool sejak tanggal itu dan **hingga saat ini belum kembali ke pool**.
+   - **`CLOSE` (Resolved History):** Event yang sudah tuntas dalam jendela waktu filter.
+     - **MSPF & FoxLogger:** Memiliki durasi nyata. Field `openedAt` berisi kapan insiden mulai, `closedAt` berisi kapan insiden selesai, dan `eventTime = closedAt` (agar kronologis aktivitas terbaru muncul paling atas).
+     - **Traccar:** Bersifat *point-in-time discrete*. Untuk event open (`ignitionOn`, `geofenceEnter`), `openedAt = eventTime` dan `closedAt = null`. Untuk event close (`ignitionOff`, `geofenceExit`), `openedAt = null` dan `closedAt = eventTime`.
+3. **Penyajian Badge & Durasi di UI:**
+   - Event `OPEN` $\rightarrow$ Tampilkan badge mencolok: **`AKTIF / ONGOING`** beserta durasi berjalan (contoh: *"Sejak 25 Mar 2026 (176 hari lalu)"*).
+   - Event `CLOSE` $\rightarrow$ Tampilkan badge netral: **`SELESAI / RESOLVED`**.
+   - Hitung durasi insiden:
+     ```javascript
+     if (event.openedAt && event.closedAt) {
+       const durationMs = new Date(event.closedAt) - new Date(event.openedAt);
+       // Tampilkan format durasi: "X jam Y menit"
+     } else {
+       // Kejadian sesaat (point-in-time)
+     }
+     ```
+4. **Timezone User:**
+   - Semua timestamp yang dikirim backend (`eventTime`, `openedAt`, `closedAt`) selalu berupa **UTC ISO 8601** (berakhiran `Z`).
+   - Frontend memformat waktu tersebut ke jam lokal user sesuai `user.timezone` (misal: `"Asia/Jakarta"`) yang diperoleh dari `GET /api/auth/me`.
+5. **Investigasi Peta (On-Demand Location):**
+   - Respon tabel event sengaja tidak menyertakan koordinat GPS per baris untuk menjaga performa tabel tetap instan (<50ms).
+   - Saat user menekan tombol **"Lihat di Peta"**, FE cukup memanggil endpoint rute dengan jendela waktu $\pm 2$ menit dari waktu kejadian:
+     ```bash
+     GET /api/reports/route?deviceId={deviceId}&from={openedAt_or_eventTime_minus_2m}&to={closedAt_or_now_plus_2m}
+     ```
+     Lalu gambar polyline pendek dan beri Pin Marker di titik terdekat insiden.
+6. **Navigasi Cepat & Tombol Reload:**
+   - Pindah halaman (Page 1 $\rightarrow$ 2 $\rightarrow$ 3) didukung oleh in-memory cache 30 detik (<5ms). Summary menyertakan hitungan `{ total, open, closed, offset, limit }`.
+   - Jika membuat tombol "Refresh", tambahkan parameter `?refresh=true` untuk mem-bypass cache.
+
 ---
 
 ## 4. Alur Penggunaan

@@ -429,7 +429,7 @@ Mengembalikan posisi terbaru. Sama dengan `/api/positions` tanpa filter deviceId
 Mengembalikan riwayat posisi device dalam range waktu tertentu. Format mengikuti Traccar API.
 
 > Gateway otomatis mendeteksi sumber device (Traccar/MSPF/FoxLogger) melalui cache. Jika belum ada di cache, Gateway akan probing langsung ke semua backend untuk menemukan device-nya.
-> **Access control:** Admin mendapat enriched data + custom attributes (rename/compute). Customer hanya mendapat custom attributes sesuai aturan grup device-nya.
+> **Access control:** Baik Admin maupun Customer mendapatkan data posisi dengan `attributes` lengkap (bawaan provider/enriched) agar playback rute berfungsi optimal. Jika grup memiliki Custom Attribute Rules, atribut tersebut otomatis ditambahkan/dihitung (*enrich in-place*). Pada response Customer, field internal `source` disanitasi.
 >
 > **⚠️ Limitasi MSPF:** Range `from` dan `to` maksimal **7 hari**. Jika lebih, return `ERR_VALIDATION`.
 >
@@ -446,6 +446,8 @@ Mengembalikan riwayat posisi device dalam range waktu tertentu. Format mengikuti
 | `group` | string | - | Group/BC ID |
 | `from` | string | - | ISO 8601 — awal range (default: 00:00 hari ini, zona user) |
 | `to` | string | - | ISO 8601 — akhir range (default: waktu request) |
+
+> **Enrichment MSPF:** Titik koordinat dari `/v3/devices/{deviceId}/route` dicocokkan dengan telemetri historis asli dari `/v2/device/{deviceId}/data/history` pada rentang waktu kejadian (nearest-neighbor timestamp $\pm 120$ detik), BUKAN snapshot live hari ini. Nilai `speed` (`kph`), `course` (`dir`), `ignition` (`addr_IGN`), `voltage` (`volt`), `odom`, dan sensor lainnya merefleksikan kondisi aktual kendaraan di tiap titik riwayat. Jika rentang waktu melebihi 24 jam, Gateway otomatis memecah (*chunk*) query MCCS history ke MSPF per jendela 24 jam secara paralel (maksimal 7 hari).
 
 **Response 200 (admin — MSPF device enriched + custom attributes):**
 ```json
@@ -497,7 +499,7 @@ Mengembalikan riwayat posisi device dalam range waktu tertentu. Format mengikuti
 
 > **Enrichment FoxLogger:** `course` diisi dari `/report-rollback` (`dir`) dan `attributes.nopol` (plat nomor) dari endpoint yang sama, dicocokkan per waktu dengan `/report-history`. Jika tidak ada kecocokan rollback, `course` tetap 0 dan `nopol` tidak ada.
 
-**Response 200 (customer — hanya custom attributes):**
+**Response 200 (customer — full attributes + custom attributes, source disanitasi):**
 ```json
 [
   {
@@ -505,11 +507,18 @@ Mengembalikan riwayat posisi device dalam range waktu tertentu. Format mengikuti
     "latitude": -7.323517,
     "longitude": 112.740992,
     "speed": 0,
-    "source": "mspf",
+    "course": 0,
+    "deviceTime": "2026-06-18T04:05:12Z",
     "attributes": {
-      "EB": 13.44,
-      "AD": 0.017,
-      "AD computet": 0.034
+      "ignition": true,
+      "voltage": 13.59,
+      "sats": 16,
+      "rssi": -57,
+      "running": "IDLING",
+      "kph": 0,
+      "odom": 17.388,
+      "gpio": 1,
+      "calc_voltage": 13.59
     }
   }
 ]
@@ -981,11 +990,11 @@ Mengembalikan daftar peringkat armada dengan jarak tempuh (kilometer) tertinggi 
 
 Mengembalikan riwayat event device dalam range waktu tertentu. Mendukung Traccar (event built-in) dan MSPF (monitor-based events).
 
-> **Traccar:** Event dari `/api/reports/events` — type built-in (`geofenceEnter`, `ignitionOn`, dll). Status `OPEN`/`CLOSE` did derive dari type. Nama geofence di-enrich dari `GET /geofences` (single device).
-> **MSPF:** Event dari `/v4/events` + `/v4/closed-events` — `monitorName` sebagai type, native `openedAt`/`closedAt`.
+> **Traccar:** Event dari `/api/reports/events` — type built-in (`geofenceEnter`, `ignitionOn`, dll). Status `OPEN`/`CLOSE` di-derive dari type. Nama geofence di-enrich dari `GET /geofences` (single device) atau fallback ke label readable (multi-device).
+> **MSPF:** Event dari `/v4/events` + `/v4/closed-events` — `monitorName` sebagai name & type, native `openedAt`/`closedAt`.
 >
-> **Multi-device:** Cepat, tanpa enrich nama. **Single device:** Lengkap dengan nama event & device.
-> **Access control:** Admin semua, customer hanya device di group assign-nya.
+> **Multi-device:** Cepat, menyertakan `name`, `type`, dan `deviceName`. **Single device:** Lengkap dengan nama geofence hasil enrich & info device.
+> **Access control:** Admin semua, customer hanya device di group assign-nya (field `source` dibersihkan).
 
 **Query Parameters:**
 
@@ -993,35 +1002,59 @@ Mengembalikan riwayat event device dalam range waktu tertentu. Mendukung Traccar
 |-----------|------|-------|-----------|
 | `deviceId` | integer | - | Single device (enriched) |
 | `group` | integer | - | Filter by custom group ID |
-| `from` | string | ✅ | ISO 8601 — awal range |
-| `to` | string | - | ISO 8601 — akhir range |
+| `from` | string | - | ISO 8601 — awal range (default: 7 hari terakhir jika tidak diisi) |
+| `to` | string | - | ISO 8601 — akhir range (default: waktu sekarang jika `from` tidak diisi; rentang `from`..`to` maksimal 31 hari) |
 | `status` | string | - | Filter: `OPEN` atau `CLOSE` |
-| `name` | string | - | Cari event berdasarkan nama |
+| `name` | string | - | Cari event berdasarkan nama (case-insensitive substring) |
+| `type` | string | - | Filter tipe event (misal: `ignitionOn`, `geofenceEnter`, monitorName MSPF) |
+| `level` | string | - | Filter tingkat keparahan: `danger`, `warning`, `info`, atau `success` |
+| `limit` | integer | - | Jumlah data per halaman (default: 50, max: 200) |
+| `offset` | integer | - | Offset pagination (default: 0) |
+| `refresh` | boolean | - | Set `true` untuk bypass in-memory short cache (TTL 30 detik) |
+
+> **Catatan Optimasi & Proteksi:**
+> - Jika `from` dan `to` dikosongkan, backend secara otomatis mengambil **7 hari terakhir** (sangat ramah untuk UI tabel tanpa DatePicker wajib).
+> - Validasi rentang tanggal (`to - from`) dibatasi maksimal **31 hari** untuk mencegah server overload.
+> - Data event di-cache di memori selama 30 detik untuk navigasi pagination instan (<5ms). Gunakan `?refresh=true` untuk memuat data live terbaru.
+> - Multi-device query untuk MSPF secara otomatis mendeteksi seluruh `bcId` dari armada customer secara dinamis (mendukung mobil satuan hasil custom group), serta menggabungkan status event `OPEN` dan `CLOSE`.
 
 **Response 200 — single device (Traccar):**
 ```json
 {
   "deviceId": 2,
+  "deviceName": "Truck Alpha",
   "source": "traccar",
   "period": { "from": "...", "to": "..." },
   "events": [
     {
       "name": "Gudang A",
+      "type": "geofenceEnter",
+      "level": "warning",
+      "color": "#F59E0B",
       "eventTime": "2026-06-15T10:00:00Z",
       "status": "OPEN",
+      "openedAt": "2026-06-15T10:00:00Z",
+      "closedAt": null,
       "deviceId": 2,
+      "deviceName": "Truck Alpha",
       "source": "traccar",
       "geofenceId": 5
     },
     {
       "name": "Ignition ON",
+      "type": "ignitionOn",
+      "level": "success",
+      "color": "#10B981",
       "eventTime": "2026-06-15T11:00:00Z",
       "status": "OPEN",
+      "openedAt": "2026-06-15T11:00:00Z",
+      "closedAt": null,
       "deviceId": 2,
+      "deviceName": "Truck Alpha",
       "source": "traccar"
     }
   ],
-  "summary": { "total": 2, "open": 2, "closed": 0 }
+  "summary": { "total": 2, "open": 2, "closed": 0, "offset": 0, "limit": 50 }
 }
 ```
 
@@ -1029,21 +1062,26 @@ Mengembalikan riwayat event device dalam range waktu tertentu. Mendukung Traccar
 ```json
 {
   "deviceId": 10258579,
+  "deviceName": "Fleet 1",
   "source": "mspf",
   "period": { "from": "...", "to": "..." },
   "events": [
     {
       "name": "Voltage Alert",
+      "type": "Voltage Alert",
+      "level": "danger",
+      "color": "#EF4444",
       "eventTime": "2026-06-15T12:00:00Z",
       "status": "OPEN",
       "deviceId": 10258579,
+      "deviceName": "Fleet 1",
       "source": "mspf",
       "monitorId": 3,
       "openedAt": "2026-06-15T12:00:00Z",
       "closedAt": null
     }
   ],
-  "summary": { "total": 1, "open": 1, "closed": 0 }
+  "summary": { "total": 1, "open": 1, "closed": 0, "offset": 0, "limit": 50 }
 }
 ```
 
@@ -1052,11 +1090,51 @@ Mengembalikan riwayat event device dalam range waktu tertentu. Mendukung Traccar
 {
   "period": { "from": "...", "to": "..." },
   "events": [
-    { "name": null, "eventTime": "2026-06-15T10:00:00Z", "status": "OPEN", "deviceId": 2, "source": "traccar" }
+    {
+      "name": "Ignition ON",
+      "type": "ignitionOn",
+      "level": "success",
+      "color": "#10B981",
+      "eventTime": "2026-06-15T10:00:00Z",
+      "status": "OPEN",
+      "openedAt": "2026-06-15T10:00:00Z",
+      "closedAt": null,
+      "deviceId": 2,
+      "deviceName": "Truck Alpha",
+      "source": "traccar"
+    }
   ],
-  "summary": { "total": 1 }
+  "summary": { "total": 1, "open": 1, "closed": 0, "offset": 0, "limit": 50 }
 }
 ```
+
+#### Panduan & Semantik Khusus Frontend (FE Guide)
+
+1. **Semantik Status `OPEN` vs `CLOSE`:**
+   - **`status: "OPEN"` (Insiden Aktif / Ongoing Alert):** Menandakan kejadian yang **saat ini masih berlangsung atau belum diselesaikan/direset**. 
+     - *Contoh:* Event *"Out pool pondok cabe"* dengan `openedAt: "2026-03-25"` dan `closedAt: null` berarti unit kendaraan keluar dari pool pada 25 Maret dan **hingga detik ini belum tercatat kembali masuk ke pool**.
+     - Event `OPEN` sengaja dipertahankan muncul di tabel agar tim operasional **tetap menyadari adanya unit atau peringatan yang belum tuntas**, meskipun kejadian awalnya sudah lewat beberapa minggu/bulan lalu.
+   - **`status: "CLOSE"` (Riwayat Selesai / Resolved):** Menandakan event yang sudah tuntas (misal kendaraan sudah kembali ke pool, overspeed sudah berakhir, atau mesin sudah dimatikan). Event `CLOSE` diambil sesuai jendela filter tanggal `from`..`to`.
+
+2. **Rekomendasi Visualisasi di Tabel FE:**
+   - **Badge Status:**
+     - Jika `status === 'OPEN'`: Beri badge **`AKTIF / ONGOING`** (warna sesuai `event.color` atau highlight cerah).
+     - Jika `status === 'CLOSE'`: Beri badge **`SELESAI / RESOLVED`** (warna netral/abu-abu).
+   - **Keterangan Waktu:**
+     - Untuk event `OPEN`: Tampilkan waktu mulai dan durasi berjalan, contoh: *"Sejak 25 Mar 2026 (176 hari lalu)"*.
+     - Untuk event `CLOSE`: Tampilkan durasi kejadian (`closedAt - openedAt`).
+
+3. **On-Demand Location & Route Investigation (Peta Insiden):**
+   - **Tabel Event tidak menyediakan koordinat lat/lon langsung** untuk mencegah beban query $N+1$ dan menjaga response time tabel tetap instan (<50ms).
+   - Saat user menekan tombol **"Lihat di Peta" / "Investigasi Insiden"** pada baris event tertentu, FE memanggil endpoint rute dengan buffer waktu:
+     ```http
+     GET /api/reports/route?deviceId={deviceId}&from={fromIso}&to={toIso}
+     ```
+     - **Event Berdurasi (ada `openedAt` & `closedAt`):**
+       `from = openedAt - 2 menit`, `to = (closedAt || sekarang) + 2 menit`.
+     - **Event Sesaat (hanya `eventTime`):**
+       `from = eventTime - 2 menit`, `to = eventTime + 2 menit`.
+     - Titik koordinat GPS yang didapat di-render sebagai garis lintasan pendek di peta, dan letakkan Pin Marker Merah pada titik terdekat dengan waktu insiden.
 
 ---
 
@@ -1612,6 +1690,7 @@ Assign 1 device ke grup.
   "groupId": 1
 }
 ```
+> `source` mendukung `"traccar"`, `"mspf"`, atau `"foxlogger"`. `deviceId` mendukung angka integer 64-bit / IMEI 15 digit (contoh: `780901703170270`).
 
 **Response 201:**
 ```json
@@ -1634,7 +1713,8 @@ Assign banyak device sekaligus ke 1 grup.
   "groupId": 1,
   "devices": [
     { "deviceId": 2, "source": "traccar" },
-    { "deviceId": 10258579, "source": "mspf" }
+    { "deviceId": 10258579, "source": "mspf" },
+    { "deviceId": 780901703170270, "source": "foxlogger" }
   ]
 }
 ```
@@ -1734,6 +1814,128 @@ Mengembalikan daftar semua field yang tersedia dari device cache, untuk dropdown
     { "name": "adc1", "type": "number", "sources": ["traccar"] },
     { "name": "mobilityNo", "type": "string", "sources": ["mspf"] }
   ]
+}
+```
+
+---
+
+### Event & Alert Level Configuration (Admin)
+
+Middleware menyediakan katalog event terpadu dari Traccar, MSPF Monitors, dan FoxLogger Alarms, serta mengizinkan Admin mengklasifikasikan tingkat keparahan (*severity level*), warna (*color*), dan alias kustom (*customLabel*).
+
+#### GET /api/admin/events/catalog
+
+Menarik katalog seluruh event, geofence, monitor MSPF, dan alarm FoxLogger yang tersedia dari upstream, beserta status konfigurasinya saat ini.
+
+**Response 200:**
+```json
+{
+  "catalog": [
+    {
+      "source": "traccar",
+      "eventKey": "overspeed",
+      "externalId": null,
+      "eventType": "overspeed",
+      "originalName": "Overspeed",
+      "customLabel": "Kecepatan Melebihi Batas",
+      "level": "danger",
+      "color": "#DC2626",
+      "isEnabled": true,
+      "configured": true
+    },
+    {
+      "source": "mspf",
+      "eventKey": "monitor:5001",
+      "externalId": 5001,
+      "eventType": "monitor",
+      "originalName": "MSPF Speed Limit 80",
+      "customLabel": null,
+      "level": "warning",
+      "color": "#F59E0B",
+      "isEnabled": true,
+      "configured": false
+    }
+  ],
+  "total": 2
+}
+```
+
+#### GET /api/admin/events/configs
+
+Mengambil daftar aturan event yang sudah tersimpan di database gateway.
+
+**Response 200:**
+```json
+{
+  "configs": [
+    {
+      "id": 1,
+      "source": "traccar",
+      "event_key": "overspeed",
+      "external_id": null,
+      "event_type": "overspeed",
+      "original_name": "Overspeed",
+      "custom_label": "Kecepatan Melebihi Batas",
+      "level": "danger",
+      "color": "#DC2626",
+      "is_enabled": true
+    }
+  ],
+  "total": 1
+}
+```
+
+#### PUT /api/admin/events/configs
+
+Menyimpan atau memperbarui konfigurasi level, warna, nama kustom, dan status aktif untuk satu atau banyak event secara batch.
+
+**Request Body:**
+```json
+{
+  "configs": [
+    {
+      "source": "traccar",
+      "eventKey": "overspeed",
+      "eventType": "overspeed",
+      "originalName": "Overspeed",
+      "customLabel": "Kecepatan Melebihi Batas",
+      "level": "danger",
+      "color": "#DC2626",
+      "isEnabled": true
+    },
+    {
+      "source": "mspf",
+      "eventKey": "monitor:5001",
+      "externalId": 5001,
+      "eventType": "monitor",
+      "originalName": "MSPF Speed Limit 80",
+      "customLabel": "Radar Tol 80 KMH",
+      "level": "warning",
+      "color": "#F59E0B",
+      "isEnabled": true
+    }
+  ]
+}
+```
+
+**Response 200:**
+```json
+{
+  "success": true,
+  "updatedCount": 2,
+  "configs": [...]
+}
+```
+
+#### DELETE /api/admin/events/configs/:id
+
+Mereset konfigurasi event kembali ke pengaturan default bawaan middleware.
+
+**Response 200:**
+```json
+{
+  "success": true,
+  "message": "Event config reset to default"
 }
 ```
 
@@ -1996,6 +2198,26 @@ Dikirim sebagai konfirmasi eksekusi command.
   "source": "traccar"
 }
 ```
+
+#### `session-revoked` & `account-disabled`
+
+Dikirim sebelum server memutus koneksi socket pengguna (`socket.disconnect(true)`):
+- **`session-revoked`**: Dipancarkan ketika password pengguna diubah atau permission diubah oleh administrator. Sesi lama dicabut dan pengguna diarahkan login kembali.
+  ```json
+  {
+    "event": "session-revoked",
+    "message": "Session has been revoked due to password or permission update",
+    "code": "ERR_TOKEN_REVOKED"
+  }
+  ```
+- **`account-disabled`**: Dipancarkan ketika status akun pengguna diubah menjadi nonaktif (`isActive: false`) oleh administrator.
+  ```json
+  {
+    "event": "account-disabled",
+    "message": "Account has been disabled by administrator",
+    "code": "ERR_ACCOUNT_DISABLED"
+  }
+  ```
 
 ---
 
