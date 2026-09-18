@@ -55,7 +55,7 @@ async function applyCustomAttributes(positions, user) {
 
 router.get('/', async (req, res, next) => {
   try {
-    const { deviceId, group, source, from, to } = req.query;
+    const { deviceId, group, source, from, to, limit, offset } = req.query;
 
     if (deviceId) {
       const idNum = parseInt(deviceId, 10);

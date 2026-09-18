@@ -158,7 +158,9 @@
 | **Device metadata 2 owner** — tabel `device_metadata` direcreate + kolom `owner` (`admin`/`customer`) + `updated_by` (audit user id); response `GET devices`/detail jadi `metadata` flat gabungan + `metadataOwners` map per-key; rule: metadata admin **tidak bisa di-update/hapus customer** (403), customer hanya bisa tulis/hapus `owner=customer`, admin bisa edit kedua owner; data lama → `owner=admin`; helper murni `mergeMetadataBlobs` (admin menang saat key bentrok) | ✅ |
 | **User profile self-update (`PUT /api/auth/me`) + email & nama + dual login** — migrasi kolom `email`/`first_name`/`last_name`, login mengenali username/email, self-update profil user aman tanpa ubah role/groups, validasi confirmPassword di create & update, total **178 test pass** | ✅ |
 | **User enable/disable (`isActive`) & instant session revocation (`token_version`)** — skema `is_active` & `token_version`, pemblokiran login `403 ERR_ACCOUNT_DISABLED`, pencabutan instan token aktif `401 ERR_TOKEN_REVOKED`, pemutusan paksa socket WebSocket user nonaktif, total **180 test pass** | ✅ |
+| **WebSocket disconnect segregation** — pemisahan event WebSocket `session-revoked` (`code: ERR_TOKEN_REVOKED`) saat reset password / revoke sesi vs `account-disabled` (`code: ERR_ACCOUNT_DISABLED`) saat akun nonaktif, total **246 test pass** | ✅ |
 | **Top 10 Device Distance 24h (`GET /api/reports/top-distance`)** — leaderboard jarak tempuh 24 jam dengan master cache 30m TTL, RBAC customer filtering via `device_groups`, alias `/top-mileage`, total **187 test pass** | ✅ |
+| **PostgreSQL BIGINT Device ID (Fix 22003 Out of Range) & FoxLogger Device-Groups** — migrasi `20260916_alter_device_id_to_bigint.js` ubah `device_id` ke `BIGINT` di `device_metadata`, `device_groups`, dan `command_logs`; type parser `pg` OID 20 ke `Number`; dukungan `source: 'foxlogger'` di `POST /api/admin/device-groups`; verifikasi IMEI FoxLogger 15-digit `780901703170270`, total **250 test pass** | ✅ |
 
 ## Catatan Waktu FoxLogger (jangan diulang)
 
@@ -205,8 +207,11 @@
 | **Service `traccar.getReportRoute()`** — tambah wrapper `GET /reports/route` (dipakai `/api/reports/route`) | ✅ **SELESAI 2026-08-06** |
 | **Urutan posisi playback konsisten ASC** — MSPF `getDeviceRoute` sudah `reverse()` (MSPF balas DESC); Traccar & FoxLogger perlu dipastikan urut naik. Tambah sort by `deviceTime` di gateway sebagai pengaman | ✅ **SELESAI 2026-08-06** |
 | **Deteksi gap / offline di playback** — FE butuh info segmen tanpa data (device off) biar playback tidak "loncat"; potensi tambah field `gap`/`status` per titik | ⬜ Backlog |
-| **Events `type` (request FE)** — `/api/reports/events` **tidak punya field `type`**; data mentah ada (`e.type` Traccar, `e.monitorName` MSPF) tapi dibuang saat mapping. Rencana: tambah `type` di SEMUA response (single & multi-device) — Traccar raw type, MSPF `monitorName`; `name` tetap label enrich (null multi-device); envelope seragam (`geofenceId`/`monitorId`/`openedAt`/`closedAt` = null bila tak relevan). **Backlog — bukan prioritas sekarang** | ⬜ Backlog |
-| **Filter `?type=` server-side** — simetris dengan `?status=`/`?name=` (opsional, ikut saat implementasi events) | ⬜ Backlog |
+| **Events `type` & `name` (request FE)** — `/api/reports/events` & dashboard sekarang menyertakan `type`, `name` (human-readable), dan `deviceName` di SEMUA response (single & multi-device). Traccar mapped via dictionary + humanize fallback, MSPF pakai `monitorName`. | ✅ **SELESAI** |
+| **Filter `?type=` server-side** — simetris dengan `?status=`/`?name=`, mendukung pencarian tipe event spesifik (e.g. `ignitionOn`, `geofenceExit`) | ✅ **SELESAI** |
+| **Event Level & Alert Configuration** — tabel `event_configs`, discovery katalog (Traccar types & geofences, MSPF `/v4/monitors`, FoxLogger alarms), admin CRUD (`/api/admin/events/catalog`, `/configs`), enrich `level` & `color` di reports & dashboard, filter `?level=`, mute flag `is_enabled`, total **261 test pass** | ✅ **SELESAI** |
+| **Events Optimization, Pagination & Dynamic MSPF Satuan** — default 7 hari pada `GET /api/reports/events` (ramah UI tabel), pagination `limit` & `offset`, max date range 31 hari (route max 7 hari), in-memory cache TTL 30s (`?refresh=true`), dan dynamic MSPF multi-device `bcId` resolution untuk mobil satuan, total **268 test pass** | ✅ **SELESAI** |
+| **Events Lifecycle Standardization (`openedAt`, `closedAt`, `eventTime`) & FoxLogger Alarms** — Normalisasi siklus hidup event di `/api/reports/events`: MSPF multi-device menyertakan `openedAt` & `closedAt`, semantik `eventTime` event `CLOSE` memakai waktu penutupan (`closedAt`), Traccar point-in-time lifecycle mapping (`openedAt`/`closedAt`), integrasi alarm FoxLogger (`report-cut-power`), summary `open`/`closed` counts di single & multi-device, total **271 test pass** | ✅ **SELESAI** |
 | **FoxLogger live speed/course 0** — limitasi source (`report-position` tidak sediakan kecepatan/arah); marker statis untuk **live** — sudah dikomunikasikan ke FE. (Playback kini punya `course`+`nopol` via `report-rollback`.) | ✅/partial |
 
 ## Phase 12 — Live Group Session Continuity & Non-Disruptive Assignment: ✅
@@ -333,6 +338,14 @@
 ### 3. Refactoring & Eliminasi Redundansi (Shrink / Performance)
 - [x] **Eliminasi N+1 sequential loop saat query `GET /api/devices?group={id}` di `src/routes/devices.js`**
   - *Alasan:* Saat query berparameter `group`, route melakukan loop HTTP request satu per satu (`traccar.getDevices({ id })`, `mspf.getDevice(id)`). Kini sudah membaca dan memfilter data langsung dari in-memory cache `devices:merged` yang selalu sinkron, memangkas latensi dari detik menjadi <2ms dan memastikan seluruh group ter-enrich dengan benar.
+- [x] **Full attributes & in-place enrichment di `GET /api/reports/route`**
+  - *Perbaikan:* Baik akun Admin maupun Customer kini mendapatkan atribut posisi lengkap (`attributes`) tanpa di-reset ke `{}`. Aturan Custom Attributes diterapkan via `enrichWithRules` (in-place enrichment tanpa menghapus atribut asli).
+  - *Optimasi:* Rule lookup di-hoist ke luar loop (0ms overhead bila tidak ada rules).
+- [x] **True Historical MCCS Telemetry Matching untuk Rute MSPF (`getDeviceRoute`)**
+  - *Perbaikan:* Menghentikan pemakaian live snapshot `getLatestMccsData(id)` (waktu hari ini) pada riwayat rute masa lalu. Endpoint rute kini memanggil `getDeviceMccsHistory(id, { from, to })` untuk menarik telemetri MCCS historis asli pada rentang waktu rute tersebut.
+  - *Nearest-Neighbor Matching:* Koordinat GPS rute dicocokkan dengan paket MCCS historis via timestamp window $\pm 120$ detik (`findClosestMccsRecord`). Kecepatan (`kph`), arah (`dir`), kontak mesin (`addr_IGN`), tegangan aki (`volt`/`addr_EB`), odometer (`odom`), dan waktu data (`createdAt`/`insDtm`) kini unik dan akurat per titik kejadian.
+  - *24h Ceiling Slicing:* Range waktu yang melebihi batas 24 jam MSPF otomatis dipecah menjadi batch paralel 24 jam (hingga batas rute 7 hari).
+  - *Fallback:* Jika data MCCS tidak tersedia atau di luar toleransi, posisi tetap valid membawa koordinat asli dan static device tags (`VIN`, `mobilityNo`) tanpa data palsu hari ini. Unit test komprehensif di `src/__tests__/mspf.test.js` (total 275 test pass).
 - [ ] **Konsolidasi helper `applyCustomAttributes` & `normalizeTraccarPosition` antara `src/routes/reports.js` dan `src/routes/positions.js`**
   - *Alasan:* Duplikasi logika identik di kedua route. Sentralisasi fungsi ke service/util bersama mencegah inkonsistensi data saat ada pembaruan aturan atribut.
 - [ ] **Satukan instance `NodeCache` di `src/services/mspf.js` ke cache singleton `src/services/cache.js`**

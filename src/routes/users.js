@@ -142,7 +142,12 @@ router.put('/:id',
         await db('users').where({ id: req.params.id }).update(updates);
         invalidateUserAuthStatus(req.params.id);
         if (shouldRevokeTokens) {
-          disconnectUserSockets(req.params.id);
+          const isDeactivated = updates.is_active === false;
+          const disconnectEvent = isDeactivated ? 'account-disabled' : 'session-revoked';
+          const disconnectMsg = isDeactivated
+            ? 'Account has been disabled by administrator'
+            : 'Session has been revoked due to password or permission update';
+          disconnectUserSockets(req.params.id, disconnectEvent, disconnectMsg);
         } else if (req.body.groups !== undefined) {
           Promise.resolve(refreshUserSockets?.(req.params.id)).catch(() => {});
         }

@@ -11,6 +11,12 @@ if (config.dbDriver === 'sqlite3') {
 
 const knexfile = require(path.resolve(rootDir, 'knexfile.js'));
 const driverKey = config.dbDriver === 'pg' ? 'pg' : 'sqlite';
+
+// ponytail: BIGINT parsed as Number ceiling: device_id > Number.MAX_SAFE_INTEGER (9e15) -> upgrade path: string IDs everywhere or BigInt parser
+if (driverKey === 'pg') {
+  require('pg').types.setTypeParser(20, (val) => (val === null ? null : parseInt(val, 10)));
+}
+
 const db = require('knex')(knexfile[driverKey] || knexfile.sqlite);
 
 let migrationDone = false;

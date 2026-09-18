@@ -10,6 +10,12 @@ const isPg = (driver) => {
 
 const activeDriver = isPg(process.env.DB_DRIVER) ? 'pg' : 'sqlite';
 
+if (activeDriver === 'pg') {
+  try {
+    require('pg').types.setTypeParser(20, (val) => (val === null ? null : parseInt(val, 10)));
+  } catch {}
+}
+
 const sqliteConfig = {
   client: 'better-sqlite3',
   connection: { filename: resolveDbPath(process.env.DB_PATH) },
