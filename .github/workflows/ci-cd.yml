@@ -100,12 +100,12 @@ jobs:
           MSPF_CLIENT_ID: ${{ secrets.MSPF_CLIENT_ID }}
           MSPF_CLIENT_SECRET: ${{ secrets.MSPF_CLIENT_SECRET }}
           MSPF_TOKEN_URL: ${{ vars.MSPF_TOKEN_URL || secrets.MSPF_TOKEN_URL }}
-          # Secrets didahulukan; vars sebagai fallback agar deploy tetap jalan
-          # sebelum FOXLOGGER_* dipindahkan dari Variables ke Secrets.
           FOXLOGGER_EMAIL: ${{ secrets.FOXLOGGER_EMAIL || vars.FOXLOGGER_EMAIL }}
           FOXLOGGER_PASSWORD: ${{ secrets.FOXLOGGER_PASSWORD || vars.FOXLOGGER_PASSWORD }}
           FOXLOGGER_TIMEZONE: ${{ vars.FOXLOGGER_TIMEZONE || 'Asia/Jakarta' }}
           DEFAULT_USER_TIMEZONE: ${{ vars.DEFAULT_USER_TIMEZONE || 'Asia/Jakarta' }}
+          CACHE_PROVIDER: ${{ vars.CACHE_PROVIDER }}
+          CACHE_TTL: ${{ vars.CACHE_TTL }}
           CACHE_DEVICE_TTL: ${{ vars.CACHE_DEVICE_TTL }}
           MCCS_CACHE_TTL: ${{ vars.MCCS_CACHE_TTL }}
           RATE_LIMIT_WINDOW_MS: ${{ vars.RATE_LIMIT_WINDOW_MS }}
