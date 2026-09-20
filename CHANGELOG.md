@@ -2,6 +2,14 @@
 
 > Semua perubahan signifikan dicatat di file ini.
 
+## 2026-09-20
+
+### Route Playback Historical Running Status Fix
+
+| Waktu | Perubahan | File |
+|-------|-----------|------|
+| ~now | **Koreksi Evaluasi `running` Historis di Rute MSPF (`enrichRouteWithMccsHistory`)** — `src/services/mspf.js`: Menghapus pemanggilan `calcRunningStatus(ignition, speed, p.deviceTime)` dengan argumen waktu `p.deviceTime`. Pada rute historis/playback masa lalu, running status dievaluasi murni dari telemetri kontak dan kecepatan (`calcRunningStatus(ignition, speed)`) tanpa membandingkan terhadap `Date.now()`, mencegah titik rute berumur $>24\text{ jam}$ salah diklasifikasikan sebagai `UNKNOWN`. Memperbaiki kegagalan test suite `mspf.test.js` (total 275 test pass). | `src/services/mspf.js` |
+
 ## 2026-09-18
 
 ### Route Playback True Historical Telemetry Integration & Full Attributes Preservation
