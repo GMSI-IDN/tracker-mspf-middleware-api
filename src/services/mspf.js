@@ -573,7 +573,7 @@ function enrichRouteWithMccsHistory(positions, mccsHistory = [], status = null) 
     }
 
     const voltage = d?.volt !== undefined ? d.volt : (d?.addr?.EB !== undefined ? d.addr.EB : status?.voltage);
-    const running = calcRunningStatus(ignition, speed, p.deviceTime);
+    const running = calcRunningStatus(ignition, speed);
     const serverTime = matchedMccs.insDtm ? toUtcIso(matchedMccs.insDtm) || p.serverTime : p.serverTime;
 
     return {

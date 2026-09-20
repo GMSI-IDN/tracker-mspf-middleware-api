@@ -161,6 +161,7 @@
 | **WebSocket disconnect segregation** — pemisahan event WebSocket `session-revoked` (`code: ERR_TOKEN_REVOKED`) saat reset password / revoke sesi vs `account-disabled` (`code: ERR_ACCOUNT_DISABLED`) saat akun nonaktif, total **246 test pass** | ✅ |
 | **Top 10 Device Distance 24h (`GET /api/reports/top-distance`)** — leaderboard jarak tempuh 24 jam dengan master cache 30m TTL, RBAC customer filtering via `device_groups`, alias `/top-mileage`, total **187 test pass** | ✅ |
 | **PostgreSQL BIGINT Device ID (Fix 22003 Out of Range) & FoxLogger Device-Groups** — migrasi `20260916_alter_device_id_to_bigint.js` ubah `device_id` ke `BIGINT` di `device_metadata`, `device_groups`, dan `command_logs`; type parser `pg` OID 20 ke `Number`; dukungan `source: 'foxlogger'` di `POST /api/admin/device-groups`; verifikasi IMEI FoxLogger 15-digit `780901703170270`, total **250 test pass** | ✅ |
+| **Koreksi evaluasi `running` historis rute MSPF** — hapus perbandingan `age > 24h` terhadap `Date.now()` di `enrichRouteWithMccsHistory`, evaluasi murni telemetri kontak & speed via `calcRunningStatus(ignition, speed)`, total **275 test pass** | ✅ |
 
 ## Catatan Waktu FoxLogger (jangan diulang)
 
