@@ -177,6 +177,220 @@ describe('engineControl — Unified Telematics Immobilizer State', () => {
       expect(ec.isApplied).toBe(true);
       expect(ec.desired).toBe('ACTIVE');
     });
+
+    test('MSPF: detects provider rollback (DEACTIVATING -> ACTIVE) and resets state to ACTIVE', async () => {
+      const [inserted] = await db('command_logs').insert({
+        device_id: 7772,
+        source: 'mspf',
+        command_type: 'engineStop',
+        status: 'SUCCESS',
+      }).returning('id');
+      const logId = typeof inserted === 'object' ? inserted.id : inserted;
+
+      setEngineDesired(7772, 'mspf', 'INACTIVE', logId);
+
+      // Hardware enters DEACTIVATING
+      const devInTransit = {
+        id: 7772,
+        source: 'mspf',
+        attributes: { activationStatus: 'DEACTIVATING' },
+      };
+      const ec1 = deriveEngineControl(devInTransit);
+      expect(ec1.state).toBe('DEACTIVATING');
+      expect(ec1.isApplied).toBe(false);
+
+      // Provider aborts and returns to ACTIVE
+      const devRolledBack = {
+        id: 7772,
+        source: 'mspf',
+        attributes: { activationStatus: 'ACTIVE' },
+      };
+      const ec2 = deriveEngineControl(devRolledBack);
+      expect(ec2.state).toBe('ACTIVE');
+      expect(ec2.isApplied).toBe(true);
+      expect(ec2.desired).toBe('ACTIVE');
+
+      // Verify command_log was marked FAILED
+      const updatedLog = await db('command_logs').where({ id: logId }).first();
+      expect(updatedLog.status).toBe('FAILED');
+      expect(updatedLog.error_message).toContain('rolled back to ACTIVE');
+    });
+
+    test('MSPF: times out after 60s when provider never transitions from ACTIVE and marks log FAILED', async () => {
+      const [inserted] = await db('command_logs').insert({
+        device_id: 7772,
+        source: 'mspf',
+        command_type: 'engineStop',
+        status: 'SUCCESS',
+      }).returning('id');
+      const logId = typeof inserted === 'object' ? inserted.id : inserted;
+
+      setEngineDesired(7772, 'mspf', 'INACTIVE', logId);
+
+      const cached = getEngineDesired(7772, 'mspf');
+      cached.updatedAt = new Date(Date.now() - 65000).toISOString();
+      cache.set('engine:desired:mspf:7772', cached, 86400);
+
+      const dev = {
+        id: 7772,
+        source: 'mspf',
+        attributes: { activationStatus: 'ACTIVE' },
+      };
+      const ec = deriveEngineControl(dev);
+      expect(ec.state).toBe('ACTIVE');
+      expect(ec.isApplied).toBe(true);
+
+      const updatedLog = await db('command_logs').where({ id: logId }).first();
+      expect(updatedLog.status).toBe('FAILED');
+      expect(updatedLog.error_message).toContain('timed out after 60s');
+    });
+
+    test('Traccar: auto-reconciles to INACTIVE after 60s timeout when vehicle ignition is OFF (No-ACK tracker)', () => {
+      setEngineDesired(7771, 'traccar', 'INACTIVE');
+
+      const cached = getEngineDesired(7771, 'traccar');
+      cached.updatedAt = new Date(Date.now() - 65000).toISOString();
+      cache.set('engine:desired:traccar:7771', cached, 86400);
+
+      const dev = {
+        id: 7771,
+        source: 'traccar',
+        ignition: false,
+        attributes: { blocked: false, ignition: false },
+      };
+      const ec = deriveEngineControl(dev);
+      expect(ec.state).toBe('INACTIVE');
+      expect(ec.isApplied).toBe(true);
+      expect(ec.desired).toBe('INACTIVE');
+    });
+
+    test('Traccar: marks log FAILED after 60s timeout if vehicle ignition is still ON and moving', async () => {
+      const [inserted] = await db('command_logs').insert({
+        device_id: 7771,
+        source: 'traccar',
+        command_type: 'engineStop',
+        status: 'SUCCESS',
+      }).returning('id');
+      const logId = typeof inserted === 'object' ? inserted.id : inserted;
+
+      setEngineDesired(7771, 'traccar', 'INACTIVE', logId);
+
+      const cached = getEngineDesired(7771, 'traccar');
+      cached.updatedAt = new Date(Date.now() - 65000).toISOString();
+      cache.set('engine:desired:traccar:7771', cached, 86400);
+
+      const dev = {
+        id: 7771,
+        source: 'traccar',
+        ignition: true,
+        speed: 45,
+        attributes: { blocked: false, ignition: true },
+      };
+      const ec = deriveEngineControl(dev);
+      expect(ec.state).toBe('ACTIVE');
+      expect(ec.isApplied).toBe(true);
+
+      const updatedLog = await db('command_logs').where({ id: logId }).first();
+      expect(updatedLog.status).toBe('FAILED');
+    });
+
+    test('MSPF: detects provider rollback (ACTIVATING -> INACTIVE) and resets state to INACTIVE', async () => {
+      const [inserted] = await db('command_logs').insert({
+        device_id: 7772,
+        source: 'mspf',
+        command_type: 'engineResume',
+        status: 'SUCCESS',
+      }).returning('id');
+      const logId = typeof inserted === 'object' ? inserted.id : inserted;
+
+      setEngineDesired(7772, 'mspf', 'ACTIVE', logId);
+
+      // Hardware enters ACTIVATING
+      const devInTransit = {
+        id: 7772,
+        source: 'mspf',
+        attributes: { activationStatus: 'ACTIVATING' },
+      };
+      const ec1 = deriveEngineControl(devInTransit);
+      expect(ec1.state).toBe('ACTIVATING');
+      expect(ec1.isApplied).toBe(false);
+
+      // Provider aborts and returns to INACTIVE
+      const devRolledBack = {
+        id: 7772,
+        source: 'mspf',
+        attributes: { activationStatus: 'INACTIVE' },
+      };
+      const ec2 = deriveEngineControl(devRolledBack);
+      expect(ec2.state).toBe('INACTIVE');
+      expect(ec2.isApplied).toBe(true);
+      expect(ec2.desired).toBe('INACTIVE');
+
+      // Verify command_log was marked FAILED
+      const updatedLog = await db('command_logs').where({ id: logId }).first();
+      expect(updatedLog.status).toBe('FAILED');
+      expect(updatedLog.error_message).toContain('rolled back to INACTIVE');
+    });
+
+    test('MSPF: times out after 60s when activation never transitions from INACTIVE and marks log FAILED', async () => {
+      const [inserted] = await db('command_logs').insert({
+        device_id: 7772,
+        source: 'mspf',
+        command_type: 'engineResume',
+        status: 'SUCCESS',
+      }).returning('id');
+      const logId = typeof inserted === 'object' ? inserted.id : inserted;
+
+      setEngineDesired(7772, 'mspf', 'ACTIVE', logId);
+
+      const cached = getEngineDesired(7772, 'mspf');
+      cached.updatedAt = new Date(Date.now() - 65000).toISOString();
+      cache.set('engine:desired:mspf:7772', cached, 86400);
+
+      const dev = {
+        id: 7772,
+        source: 'mspf',
+        attributes: { activationStatus: 'INACTIVE' },
+      };
+      const ec = deriveEngineControl(dev);
+      expect(ec.state).toBe('INACTIVE');
+      expect(ec.isApplied).toBe(true);
+      expect(ec.desired).toBe('INACTIVE');
+
+      const updatedLog = await db('command_logs').where({ id: logId }).first();
+      expect(updatedLog.status).toBe('FAILED');
+      expect(updatedLog.error_message).toContain('timed out after 60s');
+    });
+
+    test('Traccar: times out after 60s when engineResume is sent but vehicle remains blocked', async () => {
+      const [inserted] = await db('command_logs').insert({
+        device_id: 7771,
+        source: 'traccar',
+        command_type: 'engineResume',
+        status: 'SUCCESS',
+      }).returning('id');
+      const logId = typeof inserted === 'object' ? inserted.id : inserted;
+
+      setEngineDesired(7771, 'traccar', 'ACTIVE', logId);
+
+      const cached = getEngineDesired(7771, 'traccar');
+      cached.updatedAt = new Date(Date.now() - 65000).toISOString();
+      cache.set('engine:desired:traccar:7771', cached, 86400);
+
+      const dev = {
+        id: 7771,
+        source: 'traccar',
+        attributes: { blocked: true },
+      };
+      const ec = deriveEngineControl(dev);
+      expect(ec.state).toBe('INACTIVE');
+      expect(ec.isApplied).toBe(true);
+      expect(ec.desired).toBe('INACTIVE');
+
+      const updatedLog = await db('command_logs').where({ id: logId }).first();
+      expect(updatedLog.status).toBe('FAILED');
+      expect(updatedLog.error_message).toContain('timed out after 60s');
+    });
   });
 
   describe('Integration via API Endpoints', () => {

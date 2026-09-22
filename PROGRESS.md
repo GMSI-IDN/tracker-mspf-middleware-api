@@ -275,10 +275,13 @@
 | Task | Status |
 |------|--------|
 | **Engine Control Utility (`src/utils/engineControl.js`)** — Rekonsiliasi state mesin: `desired`, `state`, `isApplied`, `lastAppliedAt` murni berbasis `activationStatus` (MSPF) dan `attributes.blocked` (Traccar) tanpa false-positive | ✅ |
+| **Bidirectional Transitions & Rollback Detection** — Mendukung transisi dua arah (`ACTIVE` $\leftrightarrow$ `INACTIVE`). Deteksi otomatis pembatalan perintah oleh provider (`DEACTIVATING` $\rightarrow$ `ACTIVE` atau `ACTIVATING` $\rightarrow$ `INACTIVE`) dengan reset state dan marking `command_logs` FAILED | ✅ |
+| **Fire-and-Forget (No-ACK) Auto-Reconciliation** — Timeout 60 detik mencegah UI terkunci selamanya jika tracker GPS tidak mengirim paket ACK relay balik | ✅ |
+| **Zero-Lag Cache Mutation & Guaranteed Fresh WebSocket Stream** — Mutasi in-place pada `devices:merged` seketika saat command terkirim dan pengiriman eksplisit objek `engineControl` segar (dengan fallback cold-cache derivation) ke WebSocket `device-status` | ✅ |
 | **Device Endpoints Integration** — `GET /api/devices` & `GET /api/devices/:id` menyertakan `engineControl` di root device untuk Admin dan Customer | ✅ |
 | **Immediate Command Feedback** — `POST /api/commands` dan `PUT /activation` mengembalikan initial pending state `engineControl` | ✅ |
 | **WebSocket Real-Time Stream** — Event `device-status` mengalirkan update `engineControl` on-change dan heartbeat | ✅ |
-| **Comprehensive Tests** — 12 unit & integration tests di `src/__tests__/engineControl.test.js` (total 227 test pass) | ✅ |
+| **Comprehensive Tests** — 284 unit & integration tests lulus 100% (17 test suites passed) | ✅ |
 | **Dokumentasi Lengkap** — Spesifikasi di `CHANGELOG.md`, `API_REFERENCE.md`, `USER_GUIDE.md`, dan `PROGRESS.md` | ✅ |
 
 ## Phase 6 — Role-Based Upstream Vendor Sanitization (White-Label Customer View): ✅

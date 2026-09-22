@@ -98,7 +98,7 @@ function normalizeDevice(d) {
       ...(d.tags || {}),
       bcId: d.bcId,
       deviceTypeId: d.deviceTypeId,
-      activationStatus: d.activationCurrentStatus || undefined,
+      activationStatus: d.activationStatus || d.activationCurrentStatus || d.tags?.activationStatus || undefined,
       activationReservation: d.activationReservation || undefined,
       firmwareVersion: d.fwVersion || undefined,
     },
@@ -295,6 +295,7 @@ async function enrichPositions(positions) {
 
 function normalizeDeviceStatus(status) {
   if (!status) return null;
+  const activationStatus = status.activation?.currentStatus || status.activation || status.activationStatus || undefined;
   return {
     deviceId: status.deviceId,
     speed: status.speed || 0,
@@ -312,6 +313,7 @@ function normalizeDeviceStatus(status) {
       timestamp: status.position.timestamp ? new Date(status.position.timestamp * 1000).toISOString() : undefined,
     } : undefined,
     tags: status.tags || {},
+    activationStatus,
     option1: status.option1 || undefined,
   };
 }
@@ -362,7 +364,12 @@ async function enrichDevice(device) {
   const deviceIgnition = st?.ignition === 'ON' ? true : (st?.ignition === 'OFF' ? false : undefined);
   const running = deviceRunning && deviceRunning !== 'UNKNOWN' ? deviceRunning : calcRunningStatus(deviceIgnition, st?.speed, st?.lastCommunicatedAt);
 
-  const enrichedAttrs = { ...device.attributes, ...mccs, ...(st?.tags ? { tags: st.tags } : {}) };
+  const enrichedAttrs = {
+    ...device.attributes,
+    ...mccs,
+    ...(st?.tags ? { tags: st.tags } : {}),
+    ...(st?.activationStatus ? { activationStatus: st.activationStatus } : {}),
+  };
 
   return {
     ...device,

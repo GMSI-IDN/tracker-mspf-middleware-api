@@ -54,6 +54,25 @@ describe('buildStatusPayload — device-status contract', () => {
     const payload = buildStatusPayload({ deviceId: 2, source: 'mspf', status: 'online', lastUpdate: undefined });
     expect(payload.lastUpdate).toBe('2026-06-18T04:05:12Z');
   });
+
+  test('engineControl is populated with explicit engineControl argument even if cache is empty', () => {
+    const explicitEc = { desired: 'INACTIVE', state: 'DEACTIVATING', isApplied: false, lastAppliedAt: null };
+    const payload = buildStatusPayload({ deviceId: 101, source: 'traccar', status: 'online', engineControl: explicitEc });
+    expect(payload.engineControl).toEqual(explicitEc);
+  });
+
+  test('engineControl falls back to derived status when intent exists and cache is cold', () => {
+    const { setEngineDesired } = require('../utils/engineControl');
+    setEngineDesired(102, 'mspf', 'INACTIVE');
+    const payload = buildStatusPayload({ deviceId: 102, source: 'mspf', status: 'online' });
+    expect(payload.engineControl).toEqual({
+      desired: 'INACTIVE',
+      state: 'DEACTIVATING',
+      isApplied: false,
+      lastAppliedAt: null,
+    });
+    cache.del('engine:desired:mspf:102');
+  });
 });
 
 describe('disconnectUserSockets contract', () => {
