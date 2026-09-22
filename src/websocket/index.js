@@ -11,6 +11,7 @@ const { toUtcIso } = require('../utils/timestamp');
 const { logger } = require('../middleware/logger');
 const { getUserAuthStatus } = require('../services/userAuth');
 const { getAllowedDeviceKeys } = require('../services/groupMembership');
+const cache = require('../services/cache');
 const db = require('../db');
 
 let io = null;
@@ -219,6 +220,16 @@ function emitDeviceStatusFrom(item) {
   const ignition = item.attributes?.ignition;
   const running = deriveRunningStatus(item.attributes, speed, lastUpdate);
   const dev = getDeviceFromCache(item.deviceId, item.source);
+  if (dev && item.attributes) {
+    if (item.attributes.blocked !== undefined) {
+      if (!dev.attributes) dev.attributes = {};
+      dev.attributes.blocked = item.attributes.blocked;
+    }
+    if (item.attributes.activationStatus !== undefined) {
+      if (!dev.attributes) dev.attributes = {};
+      dev.attributes.activationStatus = item.attributes.activationStatus;
+    }
+  }
   const engineControl = deriveEngineControl({ ...(dev || {}), attributes: { ...(dev?.attributes || {}), ...(item.attributes || {}) } }, item.source);
 
   emitDeviceStatus(item.deviceId, item.source, {
@@ -244,11 +255,11 @@ function getDeviceFromCache(deviceId, source) {
   return null;
 }
 
-function buildStatusPayload({ deviceId, source, status, lastUpdate }) {
+function buildStatusPayload({ deviceId, source, status, lastUpdate, engineControl: explicitEc }) {
   const dev = getDeviceFromCache(deviceId, source);
   const attrs = dev?.attributes || {};
   const isOffline = status === 'offline';
-  const engineControl = deriveEngineControl(dev, source);
+  const engineControl = explicitEc !== undefined ? explicitEc : deriveEngineControl(dev || { id: deviceId, source }, source);
   return {
     deviceId,
     source,
@@ -263,8 +274,8 @@ function buildStatusPayload({ deviceId, source, status, lastUpdate }) {
   };
 }
 
-function emitStatusFor({ deviceId, source, status, lastUpdate }) {
-  emitDeviceStatus(deviceId, source, buildStatusPayload({ deviceId, source, status, lastUpdate }));
+function emitStatusFor({ deviceId, source, status, lastUpdate, engineControl }) {
+  emitDeviceStatus(deviceId, source, buildStatusPayload({ deviceId, source, status, lastUpdate, engineControl }));
 }
 
 // ── Traccar WebSocket ─────────────────────────────────────
@@ -296,6 +307,23 @@ function connectTraccarWs() {
         const msg = JSON.parse(raw.toString());
         const events = msg.events || [];
         const positions = msg.positions || (Array.isArray(msg) ? msg : (msg && msg.deviceId ? [msg] : []));
+        const devices = msg.devices || [];
+
+        for (const dev of devices) {
+          if (!dev.id) continue;
+          const cachedMerged = cache.get('devices:merged');
+          if (cachedMerged) {
+            const found = cachedMerged.find(x => x.id === dev.id && x.source === 'traccar');
+            if (found) {
+              if (dev.attributes) {
+                found.attributes = { ...(found.attributes || {}), ...dev.attributes };
+              }
+              if (dev.status) found.status = dev.status;
+              if (dev.lastUpdate) found.lastUpdate = dev.lastUpdate;
+            }
+          }
+          emitStatusFor({ deviceId: dev.id, source: 'traccar', status: dev.status || 'online', lastUpdate: dev.lastUpdate });
+        }
 
         for (const ev of events) {
           if (ev.type !== 'deviceOnline' && ev.type !== 'deviceOffline') continue;

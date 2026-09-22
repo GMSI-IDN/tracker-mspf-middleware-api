@@ -8,8 +8,9 @@ const validate = require('../middleware/validate');
 const db = require('../db');
 const cache = require('../services/cache');
 const { sanitizeLogs } = require('../utils/sanitizer');
-const { setEngineDesired, deriveEngineControl } = require('../utils/engineControl');
+const { setEngineDesired, deriveEngineControl, markCommandLogFailed, updateMergedDeviceCache } = require('../utils/engineControl');
 const { isDeviceAllowedForGroups, getAllowedDeviceKeys } = require('../services/groupMembership');
+const { emitStatusFor } = require('../websocket');
 
 const router = express.Router();
 
@@ -52,7 +53,7 @@ async function logCommand({
   try {
     const user = req?.user;
     const ip = req?.ip || req?.headers?.['x-forwarded-for'] || req?.socket?.remoteAddress || null;
-    await db('command_logs').insert({
+    const [result] = await db('command_logs').insert({
       user_id: user?.id ?? null,
       username: user?.username ?? 'anonymous',
       role: user?.role ?? 'unknown',
@@ -67,9 +68,11 @@ async function logCommand({
       error_message: errorMessage ? String(errorMessage).slice(0, 1000) : null,
       ip_address: ip,
       created_at: new Date().toISOString(),
-    });
+    }).returning('id');
+    return (typeof result === 'object' ? result?.id : result) || null;
   } catch (err) {
     req?.log?.error?.(`Failed to write command_log: ${err.message}`);
+    return null;
   }
 }
 
@@ -239,7 +242,7 @@ router.post('/',
           }
         }
 
-        await logCommand({
+        const logId = await logCommand({
           req,
           deviceId: idNum,
           source: devSource,
@@ -252,11 +255,15 @@ router.post('/',
 
         let engineControl = null;
         if (ENGINE_STOP_TYPES.has(type)) {
-          setEngineDesired(idNum, devSource, 'INACTIVE');
+          setEngineDesired(idNum, devSource, 'INACTIVE', logId);
+          if (devSource === 'mspf') updateMergedDeviceCache(idNum, devSource, { attributes: { activationStatus: 'DEACTIVATING' } });
           engineControl = { desired: 'INACTIVE', state: 'DEACTIVATING', isApplied: false, lastAppliedAt: null };
+          try { emitStatusFor({ deviceId: idNum, source: devSource, status: 'online', engineControl }); } catch {}
         } else if (ENGINE_RESUME_TYPES.has(type)) {
-          setEngineDesired(idNum, devSource, 'ACTIVE');
+          setEngineDesired(idNum, devSource, 'ACTIVE', logId);
+          if (devSource === 'mspf') updateMergedDeviceCache(idNum, devSource, { attributes: { activationStatus: 'ACTIVATING' } });
           engineControl = { desired: 'ACTIVE', state: 'ACTIVATING', isApplied: false, lastAppliedAt: null };
+          try { emitStatusFor({ deviceId: idNum, source: devSource, status: 'online', engineControl }); } catch {}
         }
 
         const isAdmin = req.user?.role === 'admin';
@@ -411,7 +418,7 @@ router.put('/:deviceId/activation',
           result = await traccar.sendCommand({ deviceId, type: cmd.type });
         }
 
-        await logCommand({
+        const logId = await logCommand({
           req,
           deviceId,
           source: devSource,
@@ -424,11 +431,15 @@ router.put('/:deviceId/activation',
 
         let engineControl = null;
         if (desiredStatus === 'INACTIVE') {
-          setEngineDesired(deviceId, devSource, 'INACTIVE');
+          setEngineDesired(deviceId, devSource, 'INACTIVE', logId);
+          if (devSource === 'mspf') updateMergedDeviceCache(deviceId, devSource, { attributes: { activationStatus: 'DEACTIVATING' } });
           engineControl = { desired: 'INACTIVE', state: 'DEACTIVATING', isApplied: false, lastAppliedAt: null };
+          try { emitStatusFor({ deviceId, source: devSource, status: 'online', engineControl }); } catch {}
         } else if (desiredStatus === 'ACTIVE') {
-          setEngineDesired(deviceId, devSource, 'ACTIVE');
+          setEngineDesired(deviceId, devSource, 'ACTIVE', logId);
+          if (devSource === 'mspf') updateMergedDeviceCache(deviceId, devSource, { attributes: { activationStatus: 'ACTIVATING' } });
           engineControl = { desired: 'ACTIVE', state: 'ACTIVATING', isApplied: false, lastAppliedAt: null };
+          try { emitStatusFor({ deviceId, source: devSource, status: 'online', engineControl }); } catch {}
         }
 
         const isAdmin = req.user?.role === 'admin';

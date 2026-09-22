@@ -364,9 +364,20 @@ Backend menyediakan field seragam **`engineControl`** di dalam data device (`GET
 | `lastAppliedAt` | string / null | ISO timestamp | Waktu konfirmasi fisik terakhir dari telemetri perangkat |
 
 **Panduan Tampilan di Frontend:**
-- `isApplied: false` & `state: "DEACTIVATING"` $\rightarrow$ Tampilkan badge kuning: **"Memproses Pemutusan Mesin..."**
-- `isApplied: true` & `state: "INACTIVE"` $\rightarrow$ Tampilkan badge merah: **"Mesin Dinonaktifkan (Terkonfirmasi)"**
-- `isApplied: true` & `state: "ACTIVE"` $\rightarrow$ Tampilkan badge hijau: **"Mesin Normal / Aktif"**
+- `isApplied: false` & `state: "DEACTIVATING"` $\rightarrow$ Tampilkan badge kuning / spinner: **"Memproses Pemutusan Mesin..."** (tombol terkunci sementara).
+- `isApplied: false` & `state: "ACTIVATING"` $\rightarrow$ Tampilkan badge kuning / spinner: **"Memproses Pengaktifan Mesin..."** (tombol terkunci sementara).
+- `isApplied: true` & `state: "INACTIVE"` $\rightarrow$ Tampilkan badge merah: **"Mesin Dinonaktifkan (Terkonfirmasi)"** $\rightarrow$ tombol terbuka untuk perintah nyalakan (`engineResume`).
+- `isApplied: true` & `state: "ACTIVE"` $\rightarrow$ Tampilkan badge hijau: **"Mesin Normal / Aktif"** $\rightarrow$ tombol terbuka untuk perintah matikan (`engineStop`).
+
+**Mekanisme Pencegahan UI Terkunci Permanen (Auto-Reconciliation & Rollback Detection):**
+1. **Deteksi Pembatalan Upstream (Provider Rollback):**
+   - Jika perintah pemutusan (`INACTIVE`) atau pengaktifan (`ACTIVE`) sempat masuk fase transisi (`DEACTIVATING`/`ACTIVATING`) namun upstream server membatalkan perintah tersebut (misal GPS menolak pemutusan karena mobil melaju kencang), Backend seketika mendeteksi rollback ini.
+   - Target `desired` otomatis dibersihkan dan status dikembalikan ke kondisi fisik riil (`isApplied: true`, `state: "ACTIVE"` atau `"INACTIVE"`). Spinner berhenti dan tombol di UI langsung terbuka kembali.
+2. **Penanganan Tracker Fire-and-Forget (No-ACK):**
+   - Beberapa tipe tracker GPS tidak mengirim paket ACK konfirmasi relay balik ke server.
+   - Backend menerapkan batas toleransi rekonsiliasi **60 detik**. Jika setelah 60 detik kontak mesin sudah OFF atau kecepatan 0, Backend otomatis mengonfirmasi status menjadi `isApplied: true`. Jika kendaraan masih melaju kencang / kontak ON, perintah dibatalkan dan status dikembalikan ke `ACTIVE` demi keselamatan.
+3. **Pembaruan Real-Time WebSocket:**
+   - Setiap kali terjadi perubahan status relay atau timeout rekonsiliasi, Backend mem-broadcast event WebSocket `device-status` dengan blob `engineControl` terbaru, sehingga Frontend tidak perlu meminta user me-refresh browser.
 
 ### 3.9 Riwayat Perintah Kendaraan (Audit Trail)
 
