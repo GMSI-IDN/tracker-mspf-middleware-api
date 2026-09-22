@@ -1291,6 +1291,12 @@ Unified activation endpoint — berfungsi untuk Traccar dan MSPF.
 ```
 *(Catatan: field `source` hanya tampil untuk role `admin`)*
 
+> **Siklus Hidup & Rekonsiliasi Dua Arah `engineControl`:**
+> - **Transisi Dua Arah (`ACTIVE` $\leftrightarrow$ `INACTIVE`):** Mendukung pemutusan (`engineStop`/`INACTIVE`) dan pengaktifan kembali (`engineResume`/`ACTIVE`).
+> - **Provider Rollback Detection:** Jika server provider sempat menerima perintah (`DEACTIVATING`/`ACTIVATING`) namun kemudian membatalkan/menggagalkannya dan kembali ke status awal, Backend otomatis mendeteksi pembatalan ini, mereset `desired`, menetapkan `isApplied: true`, dan memperbarui status command log menjadi `FAILED`.
+> - **Auto-Reconciliation Timeout (60s):** Untuk tracker GPS tipe fire-and-forget (tanpa paket ACK relay balik), jika setelah 60 detik tidak ada error dan status kontak sudah OFF, status otomatis terkonfirmasi (`isApplied: true`). Jika kontak masih ON dan kendaraan melaju, perintah dibatalkan dan status kembali normal.
+> - **WebSocket Broadcast:** Setiap perubahan status `engineControl` di-stream seketika via event WebSocket `device-status`.
+
 ---
 
 ### GET /api/commands/logs
