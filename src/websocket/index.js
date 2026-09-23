@@ -137,10 +137,9 @@ function setupRedisAdapter(io) {
   }
 }
 
-function getDeviceName(deviceId, source) {
+function getDeviceName(deviceId, source, devicesSnapshot = null) {
   try {
-    const cache = require('../services/cache');
-    const merged = cache.get('devices:merged');
+    const merged = devicesSnapshot || require('../services/cache').get('devices:merged');
     if (merged) {
       const d = merged.find(x => x.id === deviceId && x.source === source);
       if (d) return d.name || '';
@@ -171,8 +170,8 @@ function isDeviceAllowed(socket, source, deviceId) {
   return false;
 }
 
-async function emitPosition(data) {
-  const name = getDeviceName(data.deviceId, data.source);
+async function emitPosition(data, devicesSnapshot = null) {
+  const name = getDeviceName(data.deviceId, data.source, devicesSnapshot);
   const sockets = io ? [...io.sockets.sockets.values()] : [];
   const users = sockets.map(s => s.user?.username || '?').join(',');
   // console.log(`[WS] position → {id:${data.deviceId}, name:"${name}", ...}`);
@@ -234,12 +233,12 @@ function emitDeviceStatus(deviceId, source, data) {
 function emitCommandResult(data) { if (io) io.emit('command-result', data); }
 function getIO() { return io; }
 
-function emitDeviceStatusFrom(item) {
+function emitDeviceStatusFrom(item, devicesSnapshot = null) {
   const lastUpdate = item.deviceTime;
   const speed = item.speed || 0;
   const ignition = item.attributes?.ignition;
   const running = deriveRunningStatus(item.attributes, speed, lastUpdate);
-  const dev = getDeviceFromCache(item.deviceId, item.source);
+  const dev = getDeviceFromCache(item.deviceId, item.source, devicesSnapshot);
   if (dev && item.attributes) {
     if (item.attributes.blocked !== undefined) {
       if (!dev.attributes) dev.attributes = {};
@@ -266,17 +265,16 @@ function emitDeviceStatusFrom(item) {
   });
 }
 
-function getDeviceFromCache(deviceId, source) {
+function getDeviceFromCache(deviceId, source, devicesSnapshot = null) {
   try {
-    const cache = require('../services/cache');
-    const merged = cache.get('devices:merged');
+    const merged = devicesSnapshot || require('../services/cache').get('devices:merged');
     if (merged) return merged.find(x => x.id === deviceId && x.source === source);
   } catch {}
   return null;
 }
 
-function buildStatusPayload({ deviceId, source, status, lastUpdate, engineControl: explicitEc }) {
-  const dev = getDeviceFromCache(deviceId, source);
+function buildStatusPayload({ deviceId, source, status, lastUpdate, engineControl: explicitEc }, devicesSnapshot = null) {
+  const dev = getDeviceFromCache(deviceId, source, devicesSnapshot);
   const attrs = dev?.attributes || {};
   const isOffline = status === 'offline';
   const engineControl = explicitEc !== undefined ? explicitEc : deriveEngineControl(dev || { id: deviceId, source }, source);
@@ -294,11 +292,63 @@ function buildStatusPayload({ deviceId, source, status, lastUpdate, engineContro
   };
 }
 
-function emitStatusFor({ deviceId, source, status, lastUpdate, engineControl }) {
-  emitDeviceStatus(deviceId, source, buildStatusPayload({ deviceId, source, status, lastUpdate, engineControl }));
+function emitStatusFor({ deviceId, source, status, lastUpdate, engineControl }, devicesSnapshot = null) {
+  emitDeviceStatus(deviceId, source, buildStatusPayload({ deviceId, source, status, lastUpdate, engineControl }, devicesSnapshot));
 }
 
 // ── Traccar WebSocket ─────────────────────────────────────
+
+async function handleTraccarMessage(raw) {
+  try {
+    const msg = JSON.parse(raw.toString());
+    const events = msg.events || [];
+    const positions = msg.positions || (Array.isArray(msg) ? msg : (msg && msg.deviceId ? [msg] : []));
+    const devices = msg.devices || [];
+
+    wsMetrics.messages++;
+    wsMetrics.devices += devices.length;
+    wsMetrics.positions += positions.length;
+    wsMetrics.events += events.length;
+
+    const devicesSnapshot = cache.get('devices:merged') || [];
+
+    for (const dev of devices) {
+      if (!dev.id) continue;
+      // TODO Fase 2: persist via deviceStore.update() — mutasi ini dulu tidak berefek karena useClones: true
+      emitStatusFor(
+        { deviceId: dev.id, source: 'traccar', status: dev.status || 'online', lastUpdate: dev.lastUpdate },
+        devicesSnapshot
+      );
+    }
+
+    for (const ev of events) {
+      if (ev.type !== 'deviceOnline' && ev.type !== 'deviceOffline') continue;
+      const status = ev.type === 'deviceOnline' ? 'online' : 'offline';
+      const ts = ev.eventTime || new Date().toISOString();
+      const t = new Date(ts).getTime() || Date.now();
+      statusTracker.setStatus(ev.deviceId, 'traccar', status, t);
+      emitStatusFor({ deviceId: ev.deviceId, source: 'traccar', status, lastUpdate: ts }, devicesSnapshot);
+    }
+
+    for (const pos of positions) {
+      if (!pos.deviceId) continue;
+      const speed = pos.speed ? parseFloat((pos.speed * 1.852).toFixed(2)) : 0;
+      await emitPosition({
+        deviceId: pos.deviceId, latitude: pos.latitude, longitude: pos.longitude,
+        speed, course: pos.course || 0, altitude: pos.altitude || 0,
+        deviceTime: pos.deviceTime || pos.fixTime || new Date().toISOString(),
+        valid: pos.valid !== false, source: 'traccar',
+        attributes: pos.attributes || {},
+      }, devicesSnapshot);
+      emitDeviceStatusFrom({
+        deviceId: pos.deviceId,
+        deviceTime: pos.deviceTime || pos.fixTime,
+        source: 'traccar',
+        attributes: pos.attributes || {},
+      }, devicesSnapshot);
+    }
+  } catch { /* non-JSON message */ }
+}
 
 function connectTraccarWs() {
   if (traccarWs) { traccarWs.close(); traccarWs = null; }
@@ -322,62 +372,7 @@ function connectTraccarWs() {
       if (traccarWsReconnectTimer) { clearTimeout(traccarWsReconnectTimer); traccarWsReconnectTimer = null; }
     });
 
-    traccarWs.on('message', async (raw) => {
-      try {
-        const msg = JSON.parse(raw.toString());
-        const events = msg.events || [];
-        const positions = msg.positions || (Array.isArray(msg) ? msg : (msg && msg.deviceId ? [msg] : []));
-        const devices = msg.devices || [];
-
-        wsMetrics.messages++;
-        wsMetrics.devices += devices.length;
-        wsMetrics.positions += positions.length;
-        wsMetrics.events += events.length;
-
-        for (const dev of devices) {
-          if (!dev.id) continue;
-          const cachedMerged = cache.get('devices:merged');
-          if (cachedMerged) {
-            const found = cachedMerged.find(x => x.id === dev.id && x.source === 'traccar');
-            if (found) {
-              if (dev.attributes) {
-                found.attributes = { ...(found.attributes || {}), ...dev.attributes };
-              }
-              if (dev.status) found.status = dev.status;
-              if (dev.lastUpdate) found.lastUpdate = dev.lastUpdate;
-            }
-          }
-          emitStatusFor({ deviceId: dev.id, source: 'traccar', status: dev.status || 'online', lastUpdate: dev.lastUpdate });
-        }
-
-        for (const ev of events) {
-          if (ev.type !== 'deviceOnline' && ev.type !== 'deviceOffline') continue;
-          const status = ev.type === 'deviceOnline' ? 'online' : 'offline';
-          const ts = ev.eventTime || new Date().toISOString();
-          const t = new Date(ts).getTime() || Date.now();
-          statusTracker.setStatus(ev.deviceId, 'traccar', status, t);
-          emitStatusFor({ deviceId: ev.deviceId, source: 'traccar', status, lastUpdate: ts });
-        }
-
-        for (const pos of positions) {
-          if (!pos.deviceId) continue;
-          const speed = pos.speed ? parseFloat((pos.speed * 1.852).toFixed(2)) : 0;
-          await emitPosition({
-            deviceId: pos.deviceId, latitude: pos.latitude, longitude: pos.longitude,
-            speed, course: pos.course || 0, altitude: pos.altitude || 0,
-            deviceTime: pos.deviceTime || pos.fixTime || new Date().toISOString(),
-            valid: pos.valid !== false, source: 'traccar',
-            attributes: pos.attributes || {},
-          });
-          emitDeviceStatusFrom({
-            deviceId: pos.deviceId,
-            deviceTime: pos.deviceTime || pos.fixTime,
-            source: 'traccar',
-            attributes: pos.attributes || {},
-          });
-        }
-      } catch { /* non-JSON message */ }
-    });
+    traccarWs.on('message', handleTraccarMessage);
 
     traccarWs.on('close', () => {
       logger.warn('Traccar WebSocket disconnected');
@@ -462,8 +457,24 @@ async function refreshUserSockets(userId) {
   });
 }
 
+function teardownWebSocket() {
+  if (traccarWs) {
+    try { traccarWs.close(); } catch {}
+    traccarWs = null;
+  }
+  if (traccarFallbackTimer) {
+    clearInterval(traccarFallbackTimer);
+    traccarFallbackTimer = null;
+  }
+  if (traccarWsReconnectTimer) {
+    clearTimeout(traccarWsReconnectTimer);
+    traccarWsReconnectTimer = null;
+  }
+}
+
 module.exports = {
   setupWebSocket,
+  teardownWebSocket,
   emitPosition,
   emitDeviceStatus,
   emitDeviceStatusFrom,
@@ -475,4 +486,5 @@ module.exports = {
   refreshUserSockets,
   getWsMetrics,
   resetWsMetrics,
+  handleTraccarMessage,
 };
