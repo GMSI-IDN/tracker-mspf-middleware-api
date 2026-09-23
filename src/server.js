@@ -9,6 +9,7 @@ const foxlogger = require('./services/foxlogger');
 const deviceRouter = require('./services/deviceRouter');
 const cache = require('./services/cache');
 const { logger } = require('./middleware/logger');
+const { startEventLoopMonitor } = require('./utils/eventLoopMonitor');
 const db = require('./db');
 
 async function buildDeviceCache() {
@@ -52,6 +53,7 @@ async function buildDeviceCache() {
 const server = http.createServer(app);
 
 setupWebSocket(server);
+startEventLoopMonitor();
 
 setEmitHooks({
   onPosition: (item) => emitPosition(item),

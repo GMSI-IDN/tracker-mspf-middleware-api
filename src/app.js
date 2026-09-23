@@ -3,6 +3,7 @@ const helmet = require('helmet');
 const cors = require('cors');
 const config = require('./config');
 const requestId = require('./middleware/requestId');
+const { requestLogger } = require('./middleware/requestLogger');
 const errorHandler = require('./middleware/errorHandler');
 const { authMiddleware, adminOnly } = require('./middleware/auth');
 const { logRequest, logger } = require('./middleware/logger');
@@ -31,6 +32,7 @@ app.use(helmet());
 app.use(cors({ origin: config.cors.origin, credentials: true }));
 app.use(express.json());
 app.use(requestId);
+app.use(requestLogger);
 app.use(logRequest);
 
 app.use(globalLimiter);
