@@ -22,6 +22,26 @@ let traccarFallbackTimer = null;
 let traccarWsRetries = 0;
 const TRACCAR_WS_MAX_RETRIES = 3;
 
+const wsMetrics = {
+  messages: 0,
+  devices: 0,
+  positions: 0,
+  events: 0,
+};
+
+function getWsMetrics() {
+  return { ...wsMetrics };
+}
+
+function resetWsMetrics() {
+  const snapshot = { ...wsMetrics };
+  wsMetrics.messages = 0;
+  wsMetrics.devices = 0;
+  wsMetrics.positions = 0;
+  wsMetrics.events = 0;
+  return snapshot;
+}
+
 function setupWebSocket(httpServer) {
   const { Server } = require('socket.io');
   io = new Server(httpServer, {
@@ -309,6 +329,11 @@ function connectTraccarWs() {
         const positions = msg.positions || (Array.isArray(msg) ? msg : (msg && msg.deviceId ? [msg] : []));
         const devices = msg.devices || [];
 
+        wsMetrics.messages++;
+        wsMetrics.devices += devices.length;
+        wsMetrics.positions += positions.length;
+        wsMetrics.events += events.length;
+
         for (const dev of devices) {
           if (!dev.id) continue;
           const cachedMerged = cache.get('devices:merged');
@@ -448,4 +473,6 @@ module.exports = {
   getIO,
   disconnectUserSockets,
   refreshUserSockets,
+  getWsMetrics,
+  resetWsMetrics,
 };
