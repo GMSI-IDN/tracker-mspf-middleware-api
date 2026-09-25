@@ -1,0 +1,27 @@
+config:
+  target: "http://127.0.0.1:3001"
+  phases:
+    - duration: 120
+      arrivalRate: 50
+      name: "Sustained Positions Phase (50 RPS, 2m)"
+  payload:
+    path: "./tokens.csv"
+    fields:
+      - "token"
+      - "role"
+      - "username"
+    order: "random"
+  ensure:
+    thresholds:
+      - "http.response_time.p95": 800
+      - "http.response_time.p99": 1500
+      - "errors.rate": 0.01
+
+scenarios:
+  - name: "Positions Endpoint Only"
+    flow:
+      - get:
+          url: "/api/positions"
+          headers:
+            Authorization: "Bearer {{ token }}"
+            Accept: "application/json"
