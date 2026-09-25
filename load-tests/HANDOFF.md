@@ -9,8 +9,9 @@ Dokumen serah terima teknis untuk agent sesi berikutnya. Tanpa pujian, padat fak
 | Iterasi | Status | File Diubah |
 |---|---|---|
 | **3a** | ✅ Commit `d9b0e2a` | `src/utils/guardedJob.js`, `src/services/positionSync.js`, `src/__tests__/guardedJob.test.js`, `src/__tests__/positionSyncGuard.test.js`, `src/__tests__/positionSyncMetrics.test.js` |
-| **3b & 3d** | ✅ Selesai, siap commit | `src/services/mspf.js`, `src/utils/guardedJob.js`, `src/__tests__/mccsWorkerCoverage.test.js` (baru), `load-tests/scripts/prove-mccs-coverage.js` (baru) |
-| **3c** | ✅ Audit selesai (laporan di chat & HANDOFF) | Tidak ada kode diubah (semua pemanggil aman) |
+| **3b & 3d** | ✅ Commit `f659556` | `src/services/mspf.js`, `src/utils/guardedJob.js`, `src/__tests__/mccsWorkerCoverage.test.js`, `load-tests/scripts/prove-mccs-coverage.js` |
+| **3c** | ✅ Audit selesai | Tidak ada kode diubah (semua pemanggil aman) |
+| **3e** | ✅ Selesai, siap commit | `src/services/positionSync.js`, `src/services/traccar.js`, `src/services/foxlogger.js`, `src/services/mspf.js`, `src/utils/guardedJob.js`, `src/__tests__/positionSyncGuard.test.js`, `src/__tests__/mccsDecoupling.test.js` |
 
 ---
 
@@ -115,11 +116,12 @@ Tiga commit telah dibuat di branch `development`, **BELUM diuji di staging/produ
 
 ---
 
-## 6b. Backlog Teknis (dari audit 3a, jangan dikerjakan tanpa persetujuan)
+## 6b. Backlog Teknis (jangan dikerjakan tanpa persetujuan)
 
-1. **Total timeout request berurutan di jalur sync posisi:** `Promise.allSettled` 3 upstream (traccar + mspf + foxlogger) masing-masing timeout 30s. Worst-case sequential = 90s, mendekati watchdog 120s. Dengan device cache rebuild (3 upstream lagi) = 180s > 120s. Usulkan timeout request jalur sync ~10s.
+1. ~~**Total timeout request berurutan di jalur sync posisi:**~~ ✅ Selesai di 3e (timeout jalur sync diturunkan ke 10s, total terburuk ~40s << 120s watchdog).
 2. **Retry 401 tanpa penanda anti-loop:** Interceptor MSPF dan FoxLogger melakukan `await axios(err.config)` pada 401. Jika token baru juga 401 (misal client credentials revoked), ini bisa infinite loop. Perlu penanda `_retry` di config atau batas 1x retry.
 3. **Batas jumlah halaman di loop pagination:** `getDevices`, `getDeviceMccsHistory`, `getDeviceStatsReports`, `getBcStatsReports` — semua loop `do/while(start)`. Jika upstream mengembalikan `next` tak terhingga, loop tak berhenti. Perlu batas max pages (misal 100).
+4. **Device baru terhitung missingCount sampai rotasi mencapainya:** Jika device baru ditambahkan ke `devices:merged` saat aplikasi berjalan, device tersebut dapat terhitung sebagai `missingCount` sementara sampai rotasi background MCCS menjangkaunya (warning palsu sementara, prioritas rendah).
 
 ---
 

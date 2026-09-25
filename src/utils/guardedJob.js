@@ -62,7 +62,8 @@ function guardedJob({ name, timeoutMs, jobFn }) {
 
   run.isRunning = () => currentRunId !== null;
   run.getElapsed = () => (currentRunId !== null ? Date.now() - startedAt : 0);
-  run.reset = () => { currentRunId = null; startedAt = 0; };
+  // Hanya untuk keperluan unit test/teardown — DILARANG digunakan di kode aplikasi produksi
+  run._resetForTests = () => { currentRunId = null; startedAt = 0; };
 
   return run;
 }
