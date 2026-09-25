@@ -64,6 +64,7 @@ setEmitHooks({
 
 buildDeviceCache().then(() => {
   startPositionSync();
+  mspf.startMccsWorker?.();
   const { runAutoSync } = require('./services/autoSync');
   Promise.resolve(runAutoSync?.()).catch(() => {});
 });
@@ -77,6 +78,7 @@ server.listen(config.port, () => {
 
 function shutdown(signal) {
   logger.info(`${signal} received. Shutting down gracefully...`);
+  mspf.stopMccsWorker?.();
   server.close(() => {
     db.destroy().then(() => {
       logger.info('Server closed.');
