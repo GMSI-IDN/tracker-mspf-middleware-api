@@ -1,0 +1,74 @@
+services:
+  mock-upstream:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: ["node", "load-tests/mock-upstream/server.js"]
+    environment:
+      - MOCK_PORT=4000
+      - MOCK_MSPF_COUNT=1109
+      - MOCK_TRACCAR_COUNT=90
+      - MOCK_FOXLOGGER_COUNT=1
+      - MOCK_DELAY_MS=0
+      - MOCK_JITTER_MS=0
+      - MOCK_ERROR_RATE=0
+    ports:
+      - "4000:4000"
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: gateway
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_loadtest_data:/var/lib/postgresql/data
+
+  middleware:
+    build: .
+    ports:
+      - "3000:3000"
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2g
+    depends_on:
+      - postgres
+      - mock-upstream
+    environment:
+      - PORT=3000
+      - NODE_ENV=production
+      - LOG_LEVEL=info
+      - DB_DRIVER=pg
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=gateway
+      - DB_USER=postgres
+      - DB_PASS=postgrespassword
+      - JWT_SECRET=super_secret_key_change_in_production
+      - JWT_EXPIRY=8h
+      - TRACCAR_URL=http://mock-upstream:4000/traccar/api
+      - TRACCAR_USERNAME=mockadmin
+      - TRACCAR_PASSWORD=mockpassword
+      - MSPF_URL=http://mock-upstream:4000/mspf/api
+      - MSPF_CLIENT_ID=mock_client
+      - MSPF_CLIENT_SECRET=mock_secret
+      - MSPF_TOKEN_URL=http://mock-upstream:4000/mspf/v1/oauth2/token
+      - FOXLOGGER_EMAIL=
+      - FOXLOGGER_PASSWORD=
+      - CACHE_DEVICE_TTL=120
+      - CACHE_TTL=300
+      - CACHE_PROVIDER=node-cache
+      - RATE_LIMIT_WINDOW_MS=60000
+      - RATE_LIMIT_MAX=50000
+      - RATE_LIMIT_AUTH_MAX=20
+      - REQUEST_TIMEOUT=30000
+      - CORS_ORIGIN=*
+
+volumes:
+  pg_loadtest_data:

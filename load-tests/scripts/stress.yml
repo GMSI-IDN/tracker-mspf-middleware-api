@@ -1,0 +1,44 @@
+config:
+  target: "http://127.0.0.1:3001"
+  phases:
+    - duration: 30
+      arrivalRate: 20
+      name: "Phase 1: 20 RPS (30s)"
+    - duration: 30
+      arrivalRate: 50
+      name: "Phase 2: 50 RPS (30s)"
+    - duration: 30
+      arrivalRate: 100
+      name: "Phase 3: 100 RPS (30s)"
+    - duration: 30
+      arrivalRate: 200
+      name: "Phase 4: 200 RPS (30s)"
+    - duration: 30
+      arrivalRate: 400
+      name: "Phase 5: 400 RPS (30s)"
+  payload:
+    path: "./tokens.csv"
+    fields:
+      - "token"
+      - "role"
+      - "username"
+    order: "random"
+  ensure:
+    thresholds:
+      - "http.response_time.p95": 800
+      - "http.response_time.p99": 1500
+      - "errors.rate": 0.01
+
+scenarios:
+  - name: "Jalur A Stress — Find Saturation Point"
+    flow:
+      - get:
+          url: "/api/devices?page=1&limit=50"
+          headers:
+            Authorization: "Bearer {{ token }}"
+            Accept: "application/json"
+      - get:
+          url: "/api/positions?page=1&limit=50"
+          headers:
+            Authorization: "Bearer {{ token }}"
+            Accept: "application/json"

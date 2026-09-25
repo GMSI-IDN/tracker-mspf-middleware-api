@@ -1,0 +1,43 @@
+config:
+  target: "http://127.0.0.1:3001"
+  phases:
+    - duration: 30
+      arrivalRate: 5
+      rampTo: 25
+      name: "Warm-up Phase (5 -> 25 RPS)"
+    - duration: 270
+      arrivalRate: 25
+      name: "Sustained Load Phase (25 RPS, 4.5m)"
+  payload:
+    path: "./tokens.csv"
+    fields:
+      - "token"
+      - "role"
+      - "username"
+    order: "random"
+  ensure:
+    thresholds:
+      - "http.response_time.p95": 800
+      - "http.response_time.p99": 1500
+      - "errors.rate": 0.01
+
+scenarios:
+  - name: "Jalur A Load — Devices Pagination & Positions"
+    flow:
+      - get:
+          url: "/api/devices?page=1&limit=50"
+          headers:
+            Authorization: "Bearer {{ token }}"
+            Accept: "application/json"
+      - think: 0.5
+      - get:
+          url: "/api/devices?page=2&limit=50"
+          headers:
+            Authorization: "Bearer {{ token }}"
+            Accept: "application/json"
+      - think: 0.5
+      - get:
+          url: "/api/positions?page=1&limit=50"
+          headers:
+            Authorization: "Bearer {{ token }}"
+            Accept: "application/json"
