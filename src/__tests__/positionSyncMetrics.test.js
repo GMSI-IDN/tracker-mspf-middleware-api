@@ -93,7 +93,7 @@ describe('positionSync — Metrics, Duration & Concurrency', () => {
     expect(completedLog[0]).toMatch(/\[PositionSync\] completed in \d+ms \(concurrent: 0\)/);
   });
 
-  test('concurrency counter is 2 and logs WARN when two cycles run concurrently', async () => {
+  test('guards against overlapping runs and logs WARN when previous cycle is still in progress', async () => {
     cache.set('devices:merged', [
       { id: 1, source: 'traccar', group: 'traccar_1' },
       { id: 2, source: 'mspf', group: 'mspf_100' },
@@ -114,15 +114,15 @@ describe('positionSync — Metrics, Duration & Concurrency', () => {
     // Start second sync immediately while first is running
     const p2 = syncPositions();
 
-    // Now check concurrency counter
-    expect(getActiveSyncCount()).toBe(2);
+    // Now check concurrency counter is guarded to 1 (second sync is skipped)
+    expect(getActiveSyncCount()).toBe(1);
 
-    // Verify WARN was logged for concurrent execution
+    // Verify WARN was logged for skipping overlapping execution
     expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining('[PositionSync] concurrent execution detected: 2 runs in progress')
+      expect.stringContaining('[PositionSync] previous sync still in progress')
     );
 
-    // Resolve slow promise to finish both
+    // Resolve slow promise to finish first
     resolveFirst();
     await Promise.all([p1, p2]);
 

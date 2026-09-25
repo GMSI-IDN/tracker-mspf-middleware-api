@@ -15,6 +15,9 @@ const MSPF_BC_CACHE_TTL = 300000;
 let emitHooks = { onPosition: null, onStatus: null };
 let lastHeartbeatAt = 0;
 let activeSyncCount = 0;
+let isSyncing = false;
+let syncStartedAt = 0;
+const SYNC_TIMEOUT_MS = 120000; // 120 detik batas waktu watchdog
 
 function getActiveSyncCount() {
   return activeSyncCount;
@@ -135,15 +138,26 @@ function maybeHeartbeat() {
 }
 
 async function syncPositions() {
-  activeSyncCount++;
-  const concurrent = activeSyncCount;
-  logger.info(`[PositionSync] start (concurrent: ${concurrent})`);
-  if (concurrent > 1) {
-    logger.warn(`[PositionSync] concurrent execution detected: ${concurrent} runs in progress`);
+  if (isSyncing) {
+    const elapsed = Date.now() - syncStartedAt;
+    if (elapsed < SYNC_TIMEOUT_MS) {
+      logger.warn(`[PositionSync] previous sync still in progress (${elapsed}ms), skipping tick`);
+      return;
+    }
+    logger.error(`[PositionSync] previous sync timed out after ${elapsed}ms! Unlocking guard for next sync.`);
+    isSyncing = false;
   }
+  isSyncing = true;
+  syncStartedAt = Date.now();
   const startTime = Date.now();
 
   try {
+    activeSyncCount++;
+    const concurrent = activeSyncCount;
+    logger.info(`[PositionSync] start (concurrent: ${concurrent})`);
+    if (concurrent > 1) {
+      logger.warn(`[PositionSync] concurrent execution detected: ${concurrent} runs in progress`);
+    }
     let bcIds = getMspfBcIds();
     if (bcIds.length === 0) {
       bcIds = await getBcIdsFallback();
@@ -257,6 +271,7 @@ async function syncPositions() {
     const mem = process.memoryUsage();
     logger.info(`[Cache] RSS:${Math.round(mem.rss / 1024 / 1024)}MB | Heap:${Math.round(mem.heapUsed / 1024 / 1024)}MB | Keys:${cache.keys().length}`);
   } finally {
+    isSyncing = false;
     const duration = Date.now() - startTime;
     activeSyncCount--;
     logger.info(`[PositionSync] completed in ${duration}ms (concurrent: ${activeSyncCount})`);
