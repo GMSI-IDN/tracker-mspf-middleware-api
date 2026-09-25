@@ -31,8 +31,8 @@ describe('Traccar WS Message Characterization & Snapshot Parity', () => {
     emittedEvents = [];
     statusTracker.reset();
 
-    // Verify cache is real NodeCache with useClones: true
-    expect(cache.options.useClones).toBe(true);
+    // Verify cache has useClones disabled for high-throughput zero-copy performance
+    expect(cache.options.useClones).toBe(false);
 
     const io = getIO();
     mockSocket = {

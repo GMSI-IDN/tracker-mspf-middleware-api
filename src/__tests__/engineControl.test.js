@@ -227,8 +227,7 @@ describe('engineControl — Unified Telematics Immobilizer State', () => {
 
       setEngineDesired(7772, 'mspf', 'INACTIVE', logId);
 
-      const cached = getEngineDesired(7772, 'mspf');
-      cached.updatedAt = new Date(Date.now() - 65000).toISOString();
+      const cached = { ...getEngineDesired(7772, 'mspf'), updatedAt: new Date(Date.now() - 65000).toISOString() };
       cache.set('engine:desired:mspf:7772', cached, 86400);
 
       const dev = {
@@ -248,8 +247,7 @@ describe('engineControl — Unified Telematics Immobilizer State', () => {
     test('Traccar: auto-reconciles to INACTIVE after 60s timeout when vehicle ignition is OFF (No-ACK tracker)', () => {
       setEngineDesired(7771, 'traccar', 'INACTIVE');
 
-      const cached = getEngineDesired(7771, 'traccar');
-      cached.updatedAt = new Date(Date.now() - 65000).toISOString();
+      const cached = { ...getEngineDesired(7771, 'traccar'), updatedAt: new Date(Date.now() - 65000).toISOString() };
       cache.set('engine:desired:traccar:7771', cached, 86400);
 
       const dev = {
@@ -275,8 +273,7 @@ describe('engineControl — Unified Telematics Immobilizer State', () => {
 
       setEngineDesired(7771, 'traccar', 'INACTIVE', logId);
 
-      const cached = getEngineDesired(7771, 'traccar');
-      cached.updatedAt = new Date(Date.now() - 65000).toISOString();
+      const cached = { ...getEngineDesired(7771, 'traccar'), updatedAt: new Date(Date.now() - 65000).toISOString() };
       cache.set('engine:desired:traccar:7771', cached, 86400);
 
       const dev = {
@@ -343,8 +340,7 @@ describe('engineControl — Unified Telematics Immobilizer State', () => {
 
       setEngineDesired(7772, 'mspf', 'ACTIVE', logId);
 
-      const cached = getEngineDesired(7772, 'mspf');
-      cached.updatedAt = new Date(Date.now() - 65000).toISOString();
+      const cached = { ...getEngineDesired(7772, 'mspf'), updatedAt: new Date(Date.now() - 65000).toISOString() };
       cache.set('engine:desired:mspf:7772', cached, 86400);
 
       const dev = {
@@ -373,8 +369,7 @@ describe('engineControl — Unified Telematics Immobilizer State', () => {
 
       setEngineDesired(7771, 'traccar', 'ACTIVE', logId);
 
-      const cached = getEngineDesired(7771, 'traccar');
-      cached.updatedAt = new Date(Date.now() - 65000).toISOString();
+      const cached = { ...getEngineDesired(7771, 'traccar'), updatedAt: new Date(Date.now() - 65000).toISOString() };
       cache.set('engine:desired:traccar:7771', cached, 86400);
 
       const dev = {
@@ -511,6 +506,27 @@ describe('engineControl — Unified Telematics Immobilizer State', () => {
         isApplied: false,
         lastAppliedAt: null,
       });
+    });
+
+    test('deriveEngineControl preserves immutability when transitionSeen updates under useClones: false', () => {
+      const dev = {
+        id: 7779,
+        source: 'mspf',
+        attributes: { activationStatus: 'DEACTIVATING' },
+      };
+      cache.set('engine:desired:mspf:7779', {
+        desired: 'INACTIVE',
+        updatedAt: new Date().toISOString(),
+        transitionSeen: false,
+      });
+
+      // Calling deriveEngineControl should transition cached.transitionSeen to true without mutating the original object in-place
+      const ec = deriveEngineControl(dev);
+      expect(ec.state).toBe('DEACTIVATING');
+      expect(ec.isApplied).toBe(false);
+
+      const cachedAfter = cache.get('engine:desired:mspf:7779');
+      expect(cachedAfter.transitionSeen).toBe(true);
     });
   });
 });
