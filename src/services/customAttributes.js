@@ -1,3 +1,5 @@
+'use strict';
+
 const { evaluate } = require('mathjs');
 const set = require('lodash/set');
 const unset = require('lodash/unset');

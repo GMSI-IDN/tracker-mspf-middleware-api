@@ -1,3 +1,5 @@
+'use strict';
+
 // ponytail: shallow property deletion ceiling: deeply nested custom provider debug fields -> upgrade path: schema-based serializer (e.g. Zod/Joi view projections)
 
 function sanitizeDevice(device, isAdmin) {

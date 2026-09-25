@@ -1,3 +1,5 @@
+'use strict';
+
 const { toKmh } = require('../services/traccar');
 
 describe('traccar — toKmh', () => {

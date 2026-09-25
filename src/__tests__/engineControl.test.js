@@ -1,3 +1,5 @@
+'use strict';
+
 const request = require('supertest');
 const { deriveEngineControl, setEngineDesired, getEngineDesired } = require('../utils/engineControl');
 const cache = require('../services/cache');

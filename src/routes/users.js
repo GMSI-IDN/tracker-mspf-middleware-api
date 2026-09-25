@@ -1,3 +1,5 @@
+'use strict';
+
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const { body } = require('express-validator');

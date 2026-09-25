@@ -1,3 +1,5 @@
+'use strict';
+
 const { monitorEventLoopDelay } = require('perf_hooks');
 const { logger } = require('../middleware/logger');
 const { resetWsMetrics } = require('../websocket');

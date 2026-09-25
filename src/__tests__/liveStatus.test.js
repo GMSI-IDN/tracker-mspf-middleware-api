@@ -1,3 +1,5 @@
+'use strict';
+
 const { createStatusTracker, resolveThresholds, toMs } = require('../utils/liveStatus');
 
 const OFFLINE = 600000;

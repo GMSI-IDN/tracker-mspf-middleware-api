@@ -1,3 +1,5 @@
+'use strict';
+
 function classifyAxiosError(err) {
   const error = new Error();
   error.requestId = undefined;

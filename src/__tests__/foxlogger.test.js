@@ -1,3 +1,5 @@
+'use strict';
+
 const { enrichHistoryWithRollback, fmtFoxTime } = require('../services/foxlogger');
 
 const IMEI = '0780901703170270';

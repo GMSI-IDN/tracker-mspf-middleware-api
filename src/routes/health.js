@@ -1,3 +1,5 @@
+'use strict';
+
 const express = require('express');
 const traccar = require('../services/traccar');
 const mspf = require('../services/mspf');

@@ -1,3 +1,5 @@
+'use strict';
+
 const NodeCache = require('node-cache');
 const config = require('../config');
 
@@ -19,7 +21,12 @@ const cache = new NodeCache({
   useClones: false,
 });
 
-if (process.env.NODE_ENV === 'test') {
+const shouldFreeze =
+  process.env.NODE_ENV === 'test' ||
+  process.env.CACHE_FREEZE === '1' ||
+  process.env.CACHE_FREEZE === 'true';
+
+if (shouldFreeze) {
   const origSet = cache.set.bind(cache);
   cache.set = (key, val, ttl) => {
     deepFreeze(val);

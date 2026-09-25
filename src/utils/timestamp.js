@@ -1,3 +1,5 @@
+'use strict';
+
 const config = require('../config');
 
 const SENTINEL_DATE = /^0{4}-0{2}-0{2}/;

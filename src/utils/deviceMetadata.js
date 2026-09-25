@@ -1,3 +1,5 @@
+'use strict';
+
 function mergeMetadataBlobs(adminData, customerData) {
   const admin = adminData && typeof adminData === 'object' && !Array.isArray(adminData) ? adminData : {};
   const customer = customerData && typeof customerData === 'object' && !Array.isArray(customerData) ? customerData : {};

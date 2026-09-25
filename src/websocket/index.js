@@ -1,3 +1,5 @@
+'use strict';
+
 const jwt = require('jsonwebtoken');
 const WebSocket = require('ws');
 const config = require('../config');

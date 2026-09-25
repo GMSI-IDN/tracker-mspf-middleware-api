@@ -1,3 +1,5 @@
+'use strict';
+
 const { classifyAxiosError } = require('../utils/axiosError');
 const { logger } = require('../middleware/logger');
 const { toUtcIso, toSourceNaive } = require('../utils/timestamp');
