@@ -7,6 +7,8 @@ description: Aturan dan alur kerja untuk membuat, menjalankan, dan menganalisis 
 
 ## Konteks
 
+Baca `load-tests/PLAYBOOK.md` dan `load-tests/HANDOFF.md` untuk urutan kerja dan status terakhir project.
+
 Aplikasi ini adalah middleware: menerima request dari client, memanggil server upstream, lalu meneruskan hasilnya. Kapasitasnya dipengaruhi oleh middleware itu sendiri dan oleh kecepatan upstream. Tujuan tes di project ini adalah mengukur kapasitas middleware, jadi upstream selalu digantikan mock server kecuali user secara eksplisit meminta sebaliknya.
 
 Project ini tidak memakai k6. Jangan memasang atau menyarankan k6.
