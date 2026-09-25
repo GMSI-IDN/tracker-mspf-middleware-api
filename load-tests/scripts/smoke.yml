@@ -1,0 +1,33 @@
+config:
+  target: "http://127.0.0.1:3001"
+  phases:
+    - duration: 30
+      arrivalRate: 2
+      name: "Smoke Test (1-2 VU, 30s)"
+  payload:
+    path: "./tokens.csv"
+    fields:
+      - "token"
+      - "role"
+      - "username"
+    order: "random"
+  ensure:
+    thresholds:
+      - "http.response_time.p95": 800
+      - "http.response_time.p99": 1500
+      - "errors.rate": 0.01
+
+scenarios:
+  - name: "Jalur A Smoke — Devices and Positions"
+    flow:
+      - get:
+          url: "/api/devices?page=1&limit=50"
+          headers:
+            Authorization: "Bearer {{ token }}"
+            Accept: "application/json"
+      - think: 1
+      - get:
+          url: "/api/positions?page=1&limit=50"
+          headers:
+            Authorization: "Bearer {{ token }}"
+            Accept: "application/json"
