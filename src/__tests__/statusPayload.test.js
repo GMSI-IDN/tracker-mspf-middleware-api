@@ -1,3 +1,5 @@
+'use strict';
+
 process.env.RUN_MIGRATIONS = 'false';
 
 const cache = require('../services/cache');

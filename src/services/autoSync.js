@@ -1,3 +1,5 @@
+'use strict';
+
 const db = require('../db');
 const traccar = require('./traccar');
 const mspf = require('./mspf');

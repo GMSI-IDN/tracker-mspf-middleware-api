@@ -1,3 +1,5 @@
+'use strict';
+
 const STALE_MS = 24 * 3600 * 1000;
 
 function calcRunningStatus(ignition, speed, lastUpdate) {

@@ -1,3 +1,5 @@
+'use strict';
+
 const request = require('supertest');
 const db = require('../db');
 const cache = require('../services/cache');

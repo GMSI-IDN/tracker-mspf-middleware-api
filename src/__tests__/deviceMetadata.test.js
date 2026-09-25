@@ -1,3 +1,5 @@
+'use strict';
+
 const { mergeMetadataBlobs } = require('../utils/deviceMetadata');
 
 describe('mergeMetadataBlobs', () => {

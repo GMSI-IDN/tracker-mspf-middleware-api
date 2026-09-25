@@ -1,3 +1,5 @@
+'use strict';
+
 // ponytail: single endpoint batch event configs upsert ceiling: >500 event types in a single payload -> upgrade path: paginated admin event management
 const express = require('express');
 const createError = require('http-errors');

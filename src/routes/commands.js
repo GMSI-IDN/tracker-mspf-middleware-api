@@ -1,3 +1,5 @@
+'use strict';
+
 const express = require('express');
 const { body, query } = require('express-validator');
 const createError = require('http-errors');

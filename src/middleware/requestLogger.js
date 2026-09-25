@@ -1,3 +1,5 @@
+'use strict';
+
 const { logger } = require('./logger');
 
 const SENSITIVE_PARAM_REGEX = /token|key|secret|password|auth|jwt/i;

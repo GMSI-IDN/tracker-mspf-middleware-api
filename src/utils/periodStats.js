@@ -1,3 +1,5 @@
+'use strict';
+
 const { toUtcIso } = require('./timestamp');
 
 function toDate(value) {

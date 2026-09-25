@@ -1,3 +1,5 @@
+'use strict';
+
 process.env.JWT_SECRET = 'test-secret';
 process.env.TRACCAR_URL = 'http://localhost:18082';
 process.env.TRACCAR_USERNAME = 'test';

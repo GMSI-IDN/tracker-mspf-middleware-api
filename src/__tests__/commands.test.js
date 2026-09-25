@@ -1,3 +1,5 @@
+'use strict';
+
 const request = require('supertest');
 const bcrypt = require('bcryptjs');
 

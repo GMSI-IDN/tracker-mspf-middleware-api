@@ -1,3 +1,5 @@
+'use strict';
+
 const cache = require('./cache');
 const traccar = require('./traccar');
 const mspf = require('./mspf');

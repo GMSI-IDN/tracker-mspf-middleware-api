@@ -1,3 +1,5 @@
+'use strict';
+
 jest.mock('../services/traccar', () => ({
   getPositions: jest.fn(),
   getDevices: jest.fn(),
