@@ -70,6 +70,9 @@ function updateApiClient(token) {
 }
 
 function getApi() {
+  if (module.exports && module.exports.getApi && module.exports.getApi !== getApi) {
+    return module.exports.getApi();
+  }
   if (!mspfApi) throw Object.assign(new Error('MSPF API not initialized'), { status: 502, code: 'ERR_BAD_GATEWAY' });
   return mspfApi;
 }
@@ -186,7 +189,13 @@ async function getBatchMccsData(deviceIds, statusMap = {}) {
       for (let j = 0; j < batch.length; j++) {
         const id = batch[j];
         const data = fetched[j].status === 'fulfilled' ? fetched[j].value : null;
-        if (data) { try { mccsCache.set(id, data); } catch { } }
+        if (data) {
+          try {
+            const baseTtl = Math.max(30, Math.ceil(mccsCacheTtl / 1000));
+            const jitterTtl = baseTtl + Math.floor(Math.random() * 30);
+            mccsCache.set(id, data, jitterTtl);
+          } catch { }
+        }
         results[id] = data;
       }
     }
@@ -222,7 +231,7 @@ function normalizeMccsToAttributes(mccsRecord) {
 // ── Enrich positions ─────────────────────────────────────
 
 // ponytail: single-device route directly fetches single status; batch positions use list paging -> upgrade path: streaming position enricher
-async function enrichPositions(positions) {
+async function enrichPositions(positions, options = {}) {
   if (!positions || positions.length === 0) return positions;
   const deviceIds = [...new Set(positions.map(p => p.deviceId).filter(Boolean))];
 
@@ -251,7 +260,13 @@ async function enrichPositions(positions) {
   }
 
   let mccsMap = {};
-  try { mccsMap = await getBatchMccsData(deviceIds, statusMap); } catch { };
+  if (options.fetchMccs) {
+    try { mccsMap = await getBatchMccsData(deviceIds, statusMap); } catch { };
+  } else {
+    for (const id of deviceIds) {
+      if (mccsCache.has(id)) mccsMap[id] = mccsCache.get(id);
+    }
+  }
 
   const latestTimes = {};
   for (const p of positions) {
@@ -436,7 +451,7 @@ async function getBc(bcId) {
   return res.data;
 }
 
-async function getPositions(params = {}) {
+async function getPositions(params = {}, options = { fetchMccs: false }) {
   let all = [];
   let start = undefined;
   do {
@@ -447,7 +462,7 @@ async function getPositions(params = {}) {
     all.push(...page);
     start = res.data.next;
   } while (start);
-  return enrichPositions(all);
+  return enrichPositions(all, options);
 }
 
 // ── Historical MCCS & Route Enrichment ─────────────────────
@@ -735,8 +750,41 @@ async function getMonitors(params = {}) {
   return res.data?.data || res.data || [];
 }
 
+let mccsWorkerTimer = null;
+let mccsWorkerOffset = 0;
+const MCCS_CHUNK_SIZE = 50;
+
+async function syncMccsBackground() {
+  const cache = require('./cache');
+  const merged = cache.get('devices:merged') || [];
+  const mspfIds = merged.filter(d => d.source === 'mspf').map(d => d.id);
+  if (mspfIds.length === 0) return;
+
+  const slice = mspfIds.slice(mccsWorkerOffset, mccsWorkerOffset + MCCS_CHUNK_SIZE);
+  mccsWorkerOffset = (mccsWorkerOffset + MCCS_CHUNK_SIZE) % mspfIds.length;
+
+  try {
+    await getBatchMccsData(slice);
+  } catch (err) {
+    logger.warn(`[MccsWorker] batch refresh error: ${err.message}`);
+  }
+}
+
+function startMccsWorker(intervalMs = 15000) {
+  if (mccsWorkerTimer) return;
+  mccsWorkerTimer = setInterval(syncMccsBackground, intervalMs);
+  if (mccsWorkerTimer.unref) mccsWorkerTimer.unref();
+}
+
+function stopMccsWorker() {
+  if (mccsWorkerTimer) {
+    clearInterval(mccsWorkerTimer);
+    mccsWorkerTimer = null;
+  }
+}
+
 module.exports = {
-  init, waitForInit, getApi, normalizeDevice, normalizePosition, enrichDevice,
+  init, waitForInit, getApi, updateApiClient, normalizeDevice, normalizePosition, enrichDevice,
   getDevices, searchDevices, getDevice, getBcList, getBc,
   getPositions, getDeviceRoute,
   getDeviceMccsHistory, enrichRouteWithMccsHistory,
@@ -750,4 +798,8 @@ module.exports = {
   getMspfEvents,
   getMspfClosedEvents,
   getMonitors,
+  startMccsWorker,
+  stopMccsWorker,
+  syncMccsBackground,
+  getBatchMccsData,
 };

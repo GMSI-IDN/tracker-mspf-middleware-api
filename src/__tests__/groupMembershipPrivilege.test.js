@@ -229,4 +229,11 @@ describe('Customer Privilege Security & Dynamic Sync vs Manual Segregation', () 
     expect(listRes.status).toBe(200);
     expect(listRes.body.devices.length).toBe(0);
   });
+
+  afterAll(async () => {
+    await db('group_sync_rules').whereIn('middleware_group_id', [customGroup1, customGroup2]).delete();
+    await db('device_groups').whereIn('group_id', [customGroup1, customGroup2]).delete();
+    await db('groups').whereIn('id', [customGroup1, customGroup2]).delete();
+    await db('users').whereIn('username', ['cust_priv_a', 'cust_priv_b']).delete();
+  });
 });
