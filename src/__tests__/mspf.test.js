@@ -1,3 +1,5 @@
+'use strict';
+
 const { enrichRouteWithMccsHistory } = require('../services/mspf');
 
 describe('mspf — enrichRouteWithMccsHistory', () => {

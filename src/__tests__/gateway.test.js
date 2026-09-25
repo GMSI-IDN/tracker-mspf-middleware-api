@@ -1,3 +1,5 @@
+'use strict';
+
 const request = require('supertest');
 const bcrypt = require('bcryptjs');
 
@@ -990,11 +992,11 @@ describe('Admin Custom Groups', () => {
       .post('/api/auth/login')
       .send({ username: 'admin', password: 'admin123' });
     token = login.body.token;
-    await db('groups').whereIn('name', ['test_group', 'custom_attr_group']).delete();
+    await db('groups').whereIn('name', ['test_group', 'custom_attr_group']).orWhere('id', '>=', 9000).delete();
   });
 
   afterAll(async () => {
-    await db('groups').whereIn('name', ['test_group', 'custom_attr_group']).delete();
+    await db('groups').whereIn('name', ['test_group', 'custom_attr_group']).orWhere('id', '>=', 9000).delete();
   });
 
   test('GET /api/admin/groups returns empty list', async () => {

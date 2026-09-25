@@ -1,3 +1,5 @@
+'use strict';
+
 const { periodKey, periodStartDate, addPeriod, aggregateByPeriod, fillMissingPeriods, buildSeries } = require('../utils/periodStats');
 
 describe('periodStats — periodKey', () => {

@@ -1,3 +1,5 @@
+'use strict';
+
 const http = require('http');
 const cache = require('../services/cache');
 const { statusTracker } = require('../utils/liveStatus');

@@ -1,3 +1,5 @@
+'use strict';
+
 // ponytail: engineControl state derivation ceiling: polling-based state reconciliation without hardware bi-directional ACK stream -> upgrade path: dedicated IoT device shadow / digital twin state engine
 const cache = require('../services/cache');
 

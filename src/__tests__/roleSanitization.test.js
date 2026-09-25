@@ -1,3 +1,5 @@
+'use strict';
+
 const request = require('supertest');
 
 jest.mock('../services/traccar', () => ({

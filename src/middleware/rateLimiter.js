@@ -1,3 +1,5 @@
+'use strict';
+
 const rateLimit = require('express-rate-limit');
 const config = require('../config');
 

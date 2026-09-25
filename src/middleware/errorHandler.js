@@ -1,3 +1,5 @@
+'use strict';
+
 function errorHandler(err, req, res, _next) {
   const status = err.status || err.statusCode || 500;
   const code = err.code || (status >= 500 ? 'ERR_INTERNAL' : 'ERR_VALIDATION');

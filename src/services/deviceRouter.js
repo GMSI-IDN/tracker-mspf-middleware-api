@@ -1,3 +1,5 @@
+'use strict';
+
 const cache = require('./cache');
 
 function getSourceByDeviceId(deviceId) {

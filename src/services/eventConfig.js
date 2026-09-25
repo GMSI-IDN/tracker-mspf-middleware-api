@@ -1,3 +1,5 @@
+'use strict';
+
 // ponytail: in-memory event configs map ceiling: multi-instance node cluster without pubsub cache invalidation -> upgrade path: Redis pub/sub for cross-instance event_configs cache sync
 const db = require('../db');
 const traccar = require('./traccar');

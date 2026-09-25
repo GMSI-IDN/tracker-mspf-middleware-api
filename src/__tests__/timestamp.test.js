@@ -1,3 +1,5 @@
+'use strict';
+
 const { toUtcIso, toUtcDateStr, toSourceNaive, isValidTimeZone, startOfDayIso } = require('../utils/timestamp');
 
 describe('timestamp util — toUtcIso', () => {
