@@ -57,5 +57,12 @@ describe('Pilar 3: Decouple MCCS from Fast Position Sync', () => {
     // Verify /data/history was NOT called on the fast position sync path
     const historyCalls = mockGet.mock.calls.filter(([url]) => url.includes('/data/history'));
     expect(historyCalls.length).toBe(0);
+
+    // Verify 3e: timeout 10000ms on position sync path
+    const positionsCall = mockGet.mock.calls.find(([url]) => url.includes('/positions'));
+    expect(positionsCall[1]).toEqual(expect.objectContaining({ timeout: 10000 }));
+
+    const statusCall = mockGet.mock.calls.find(([url]) => url.includes('/status'));
+    expect(statusCall[1]).toEqual(expect.objectContaining({ timeout: 10000 }));
   });
 });

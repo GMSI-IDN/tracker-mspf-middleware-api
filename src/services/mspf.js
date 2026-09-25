@@ -237,20 +237,21 @@ async function enrichPositions(positions, options = {}) {
   if (!positions || positions.length === 0) return positions;
   const deviceIds = [...new Set(positions.map(p => p.deviceId).filter(Boolean))];
 
+  const statusTimeout = options.timeout || 10000;
   const statusMap = {};
   if (deviceIds.length === 1) {
     try {
-      const single = await getDeviceStatus(deviceIds[0]);
+      const single = await getDeviceStatus(deviceIds[0], { timeout: statusTimeout });
       if (single) statusMap[deviceIds[0]] = single;
     } catch { }
   } else {
     let statusResult = null;
     if (deviceIds.length <= 200) {
-      statusResult = await getDeviceStatusList({ limit: 200 });
+      statusResult = await getDeviceStatusList({ limit: 200 }, { timeout: statusTimeout });
     } else {
       let all = []; let start = undefined;
       do {
-        const res = await getApi().get('/v3/devices/status', { params: { limit: 200, start } });
+        const res = await getApi().get('/v3/devices/status', { params: { limit: 200, start }, timeout: statusTimeout });
         all.push(...(res.data?.data || []));
         start = res.data?.next;
       } while (start);
@@ -409,15 +410,19 @@ async function enrichDevice(device) {
 
 // ── API functions ──────────────────────────────────────
 
-async function getDevices(params = {}) {
+async function getDevices(params = {}, options = {}) {
+  const { timeout, ...queryParams } = params;
+  const reqTimeout = options.timeout || timeout;
   let all = [];
   let start = undefined;
   let total = 0;
   let pageCount = 0;
   do {
-    const query = { ...params, status: 'WORKING', limit: 200 };
+    const query = { ...queryParams, status: 'WORKING', limit: 200 };
     if (start) query.start = start;
-    const res = await getApi().get('/v3/devices', { params: query });
+    const reqConfig = { params: query };
+    if (reqTimeout) reqConfig.timeout = reqTimeout;
+    const res = await getApi().get('/v3/devices', reqConfig);
     const page = (res.data.data || []).map(normalizeDevice);
     all.push(...page);
     total = res.data.total ?? all.length;
@@ -443,8 +448,12 @@ async function getDevice(deviceId) {
   return normalizeDevice(res.data);
 }
 
-async function getBcList(params = {}) {
-  const res = await getApi().get('/v2/bc', { params });
+async function getBcList(params = {}, options = {}) {
+  const { timeout, ...queryParams } = params;
+  const reqTimeout = options.timeout || timeout;
+  const reqConfig = { params: queryParams };
+  if (reqTimeout) reqConfig.timeout = reqTimeout;
+  const res = await getApi().get('/v2/bc', reqConfig);
   return res.data;
 }
 
@@ -454,17 +463,19 @@ async function getBc(bcId) {
 }
 
 async function getPositions(params = {}, options = { fetchMccs: false }) {
+  const { timeout, ...queryParams } = params;
+  const reqTimeout = options.timeout || timeout || 10000;
   let all = [];
   let start = undefined;
   do {
-    const query = { ...params, limit: 1000 };
+    const query = { ...queryParams, limit: 1000 };
     if (start) query.start = start;
-    const res = await getApi().get('/v3/devices/positions', { params: query });
+    const res = await getApi().get('/v3/devices/positions', { params: query, timeout: reqTimeout });
     const page = normalizePositionsResponse(res.data);
     all.push(...page);
     start = res.data.next;
   } while (start);
-  return enrichPositions(all, options);
+  return enrichPositions(all, { ...options, timeout: reqTimeout });
 }
 
 // ── Historical MCCS & Route Enrichment ─────────────────────
@@ -636,13 +647,19 @@ async function getDeviceRoute(deviceId, params = {}) {
   return enrichRouteWithMccsHistory(positions, mccsData, status);
 }
 
-async function getDeviceStatus(deviceId) {
-  const res = await getApi().get(`/v3/devices/${deviceId}/status`);
+async function getDeviceStatus(deviceId, options = {}) {
+  const reqConfig = {};
+  if (options.timeout) reqConfig.timeout = options.timeout;
+  const res = await getApi().get(`/v3/devices/${deviceId}/status`, reqConfig);
   return res.data;
 }
 
-async function getDeviceStatusList(params = {}) {
-  const res = await getApi().get('/v3/devices/status', { params });
+async function getDeviceStatusList(params = {}, options = {}) {
+  const { timeout, ...queryParams } = params;
+  const reqTimeout = options.timeout || timeout;
+  const reqConfig = { params: queryParams };
+  if (reqTimeout) reqConfig.timeout = reqTimeout;
+  const res = await getApi().get('/v3/devices/status', reqConfig);
   return res.data;
 }
 
@@ -889,7 +906,7 @@ function getMccsStats() {
 }
 
 function resetMccsWorkerState() {
-  guardedMccsSync.reset?.();
+  guardedMccsSync._resetForTests?.();
   mccsSyncOffset = 0;
   mccsCompletedCycles = 0;
   mccsCycleStats = { totalDevices: 0, fetchedThisCycle: 0, cycleStartedAt: 0, timeToFullMs: 0 };

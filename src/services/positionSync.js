@@ -10,6 +10,8 @@ const { logger } = require('../middleware/logger');
 const { statusTracker } = require('../utils/liveStatus');
 const { guardedJob } = require('../utils/guardedJob');
 
+const SYNC_REQUEST_TIMEOUT_MS = 10000;
+
 const mspfBcCache = { ids: [], ts: 0 };
 const MSPF_BC_CACHE_TTL = 300000;
 
@@ -59,7 +61,7 @@ function normalizePosition(p) {
 async function getBcIdsFallback() {
   if (Date.now() - mspfBcCache.ts < MSPF_BC_CACHE_TTL) return mspfBcCache.ids;
   try {
-    const bcs = await mspf.getBcList();
+    const bcs = await mspf.getBcList({}, { timeout: SYNC_REQUEST_TIMEOUT_MS });
     const ids = (bcs?.data || bcs || []).map(b => b.id).filter(Boolean);
     mspfBcCache.ids = ids;
     mspfBcCache.ts = Date.now();
@@ -166,9 +168,9 @@ async function syncPositionsImpl(isActive) {
   let actT = 0, actM = 0, actF = 0;
 
   const [traccarResult, mspfResult, foxloggerResult] = await Promise.allSettled([
-    traccar.getPositions(),
-    mspf.getPositions({ limit: 1000, bc: bcIds }),
-    foxlogger.getPositions(),
+    traccar.getPositions({}, { timeout: SYNC_REQUEST_TIMEOUT_MS }),
+    mspf.getPositions({ limit: 1000, bc: bcIds }, { timeout: SYNC_REQUEST_TIMEOUT_MS }),
+    foxlogger.getPositions({}, { timeout: SYNC_REQUEST_TIMEOUT_MS }),
   ]);
 
   let positions = [];
@@ -205,9 +207,9 @@ async function syncPositionsImpl(isActive) {
         }
         logger.warn('[PositionSync] device cache expired, rebuilding...');
         const [t, m, f] = await Promise.allSettled([
-          traccar.getDevices({ all: true }),
-          mspf.waitForInit().then(() => mspf.getDevices()),
-          foxlogger.waitForInit().then(() => foxlogger.getDevices()),
+          traccar.getDevices({ all: true }, { timeout: SYNC_REQUEST_TIMEOUT_MS }),
+          mspf.waitForInit().then(() => mspf.getDevices({}, { timeout: SYNC_REQUEST_TIMEOUT_MS })),
+          foxlogger.waitForInit().then(() => foxlogger.getDevices({}, { timeout: SYNC_REQUEST_TIMEOUT_MS })),
         ]);
         const rebuild = [];
         if (t.status === 'fulfilled' && t.value) {

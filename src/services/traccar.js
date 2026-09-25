@@ -26,8 +26,12 @@ traccarApi.interceptors.response.use(
   }
 );
 
-async function getDevices(params = {}) {
-  const res = await traccarApi.get('/devices', { params });
+async function getDevices(params = {}, options = {}) {
+  const { timeout, ...queryParams } = params;
+  const reqTimeout = options.timeout || timeout;
+  const reqConfig = { params: queryParams };
+  if (reqTimeout) reqConfig.timeout = reqTimeout;
+  const res = await traccarApi.get('/devices', reqConfig);
   return res.data;
 }
 
@@ -40,8 +44,12 @@ function toKmh(speed) {
   return speed ? parseFloat((speed * 1.852).toFixed(2)) : 0;
 }
 
-async function getPositions(params = {}) {
-  const res = await traccarApi.get('/positions', { params });
+async function getPositions(params = {}, options = {}) {
+  const { timeout, ...queryParams } = params;
+  const reqTimeout = options.timeout || timeout;
+  const reqConfig = { params: queryParams };
+  if (reqTimeout) reqConfig.timeout = reqTimeout;
+  const res = await traccarApi.get('/positions', reqConfig);
   return (res.data || []).map(p => ({
     ...p,
     speed: toKmh(p.speed),
