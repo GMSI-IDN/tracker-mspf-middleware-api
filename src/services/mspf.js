@@ -96,7 +96,7 @@ function normalizeDevice(d) {
     source: 'mspf', group: `mspf_${d.bcId}`,
     lastUpdate: toUtcIso(d.lastCommunicatedAt) || undefined,
     voltage: d.tags?.volt ?? undefined,
-    internalBattery: d.tags?.addr_IB ?? mccsCache.get(d.id)?.data?.addr?.IB ?? undefined,
+    internalBattery: d.tags?.addr_IB ?? mccsStore.get(d.id)?.data?.addr?.IB ?? undefined,
     batteryLevel: undefined,
     ignition: undefined,
     attributes: {
@@ -138,15 +138,21 @@ function normalizePositionsResponse(data) {
 // ── MCCS Data History ────────────────────────────────────
 
 const NodeCache = require('node-cache');
-let mccsCacheTtl = 10000;
-try {
-  const cfg = require('../config');
-  mccsCacheTtl = cfg.mspf.cacheTtl;
-} catch { }
-const mccsCache = new NodeCache({
-  stdTTL: Math.ceil(mccsCacheTtl / 1000),
-  checkperiod: 5,
-});
+const { guardedJob } = require('../utils/guardedJob');
+
+const mccsStore = new Map();
+const mccsFetchTimes = new Map();
+
+let mccsSyncOffset = 0;
+let mccsCompletedCycles = 0;
+const MCCS_STALE_THRESHOLD_MS = 5 * 60 * 1000;
+
+let mccsCycleStats = { totalDevices: 0, fetchedThisCycle: 0, cycleStartedAt: 0, timeToFullMs: 0 };
+let mccsFirstFullAt = 0;
+
+const MCCS_CHUNK_SIZE = 50;
+const MCCS_CONCURRENCY = 10;
+const MCCS_WORKER_INTERVAL_MS = 7000;
 
 async function getLatestMccsData(deviceId) {
   try {
@@ -164,39 +170,35 @@ async function getLatestMccsData(deviceId) {
   }
 }
 
+function getMccsForDevice(deviceId) {
+  return mccsStore.get(deviceId) || null;
+}
+
 async function getBatchMccsData(deviceIds, statusMap = {}) {
-  const now = Date.now();
   const ids = [...new Set(deviceIds.filter(Boolean))];
-  const activeIds = ids.filter(id => {
-    if (ids.length === 1) return true;
-    const s = statusMap[id];
-    if (!s?.lastCommunicatedAt) return false;
-    return (now - new Date(s.lastCommunicatedAt).getTime()) < 30 * 24 * 3600 * 1000;
-  });
-
   const results = {};
-  const fromCacheIds = activeIds.filter(id => mccsCache.has(id));
 
-  for (const id of fromCacheIds) results[id] = mccsCache.get(id);
-  for (const id of ids.filter(id => !activeIds.includes(id))) results[id] = null;
+  for (const id of ids) {
+    if (mccsStore.has(id)) {
+      results[id] = mccsStore.get(id);
+    } else {
+      results[id] = null;
+    }
+  }
 
-  const toFetch = activeIds.filter(id => !mccsCache.has(id));
+  const toFetch = ids.filter(id => !mccsStore.has(id));
   if (toFetch.length > 0) {
-    const CONCURRENCY = 10;
-    for (let i = 0; i < toFetch.length; i += CONCURRENCY) {
-      const batch = toFetch.slice(i, i + CONCURRENCY);
+    for (let i = 0; i < toFetch.length; i += MCCS_CONCURRENCY) {
+      const batch = toFetch.slice(i, i + MCCS_CONCURRENCY);
       const fetched = await Promise.allSettled(batch.map(id => getLatestMccsData(id)));
       for (let j = 0; j < batch.length; j++) {
         const id = batch[j];
         const data = fetched[j].status === 'fulfilled' ? fetched[j].value : null;
         if (data) {
-          try {
-            const baseTtl = Math.max(30, Math.ceil(mccsCacheTtl / 1000));
-            const jitterTtl = baseTtl + Math.floor(Math.random() * 30);
-            mccsCache.set(id, data, jitterTtl);
-          } catch { }
+          mccsStore.set(id, data);
+          mccsFetchTimes.set(id, Date.now());
+          results[id] = data;
         }
-        results[id] = data;
       }
     }
   }
@@ -264,7 +266,7 @@ async function enrichPositions(positions, options = {}) {
     try { mccsMap = await getBatchMccsData(deviceIds, statusMap); } catch { };
   } else {
     for (const id of deviceIds) {
-      if (mccsCache.has(id)) mccsMap[id] = mccsCache.get(id);
+      if (mccsStore.has(id)) mccsMap[id] = mccsStore.get(id);
     }
   }
 
@@ -751,28 +753,96 @@ async function getMonitors(params = {}) {
 }
 
 let mccsWorkerTimer = null;
-let mccsWorkerOffset = 0;
-const MCCS_CHUNK_SIZE = 50;
 
-async function syncMccsBackground() {
+const guardedMccsSync = guardedJob({
+  name: 'MccsWorker',
+  timeoutMs: 60000,
+  jobFn: runMccsSyncImpl,
+});
+
+async function runMccsSyncOnce() {
+  const res = await guardedMccsSync();
+  if (res.status === 'skipped') return;
+  if (res.status === 'error') throw res.error;
+  return res.result;
+}
+
+async function runMccsSyncImpl(isActive) {
   const cache = require('./cache');
   const merged = cache.get('devices:merged') || [];
   const mspfIds = merged.filter(d => d.source === 'mspf').map(d => d.id);
   if (mspfIds.length === 0) return;
 
-  const slice = mspfIds.slice(mccsWorkerOffset, mccsWorkerOffset + MCCS_CHUNK_SIZE);
-  mccsWorkerOffset = (mccsWorkerOffset + MCCS_CHUNK_SIZE) % mspfIds.length;
-
-  try {
-    await getBatchMccsData(slice);
-  } catch (err) {
-    logger.warn(`[MccsWorker] batch refresh error: ${err.message}`);
+  if (mccsSyncOffset === 0 || mccsSyncOffset >= mspfIds.length) {
+    if (mccsCycleStats.cycleStartedAt > 0) {
+      mccsCompletedCycles++;
+      const cycleDuration = Date.now() - mccsCycleStats.cycleStartedAt;
+      logger.info(`[MccsWorker] cycle completed: ${mccsCycleStats.fetchedThisCycle}/${mccsCycleStats.totalDevices} in ${cycleDuration}ms`);
+    }
+    const activeSet = new Set(mspfIds);
+    for (const id of mccsStore.keys()) {
+      if (!activeSet.has(id)) {
+        mccsStore.delete(id);
+        mccsFetchTimes.delete(id);
+      }
+    }
+    mccsSyncOffset = 0;
+    mccsFirstFullAt = 0;
+    mccsCycleStats = { totalDevices: mspfIds.length, fetchedThisCycle: 0, cycleStartedAt: Date.now(), timeToFullMs: 0 };
   }
+
+  const slice = mspfIds.slice(mccsSyncOffset, mccsSyncOffset + MCCS_CHUNK_SIZE);
+  if (slice.length === 0) {
+    mccsSyncOffset = 0;
+    return;
+  }
+  mccsSyncOffset += slice.length;
+
+  let successCount = 0;
+  for (let i = 0; i < slice.length; i += MCCS_CONCURRENCY) {
+    const batch = slice.slice(i, i + MCCS_CONCURRENCY);
+    const fetched = await Promise.allSettled(batch.map(id => getLatestMccsData(id)));
+    for (let j = 0; j < batch.length; j++) {
+      const id = batch[j];
+      const data = fetched[j].status === 'fulfilled' ? fetched[j].value : null;
+      if (data && isActive()) {
+        mccsStore.set(id, data);
+        mccsFetchTimes.set(id, Date.now());
+        successCount++;
+      }
+    }
+  }
+
+  mccsCycleStats.fetchedThisCycle += successCount;
+
+  const covered = mspfIds.filter(id => mccsStore.has(id)).length;
+  if (mccsFirstFullAt === 0 && covered === mspfIds.length && mspfIds.length > 0) {
+    mccsFirstFullAt = Date.now();
+    mccsCycleStats.timeToFullMs = mccsFirstFullAt - mccsCycleStats.cycleStartedAt;
+    logger.info(`[MccsWorker] 100% coverage reached in ${mccsCycleStats.timeToFullMs}ms`);
+  }
+  const staleCount = mspfIds.filter(id => {
+    const t = mccsFetchTimes.get(id);
+    return t && (Date.now() - t) > MCCS_STALE_THRESHOLD_MS;
+  }).length;
+  const isFirstCycleDone = mccsCompletedCycles >= 1 || (mccsSyncOffset >= mspfIds.length && mspfIds.length > 0);
+  const missingCount = isFirstCycleDone
+    ? mspfIds.filter(id => !mccsFetchTimes.has(id)).length
+    : 0;
+
+  if (staleCount > 0) {
+    logger.warn(`[MccsWorker] ${staleCount} device(s) with stale MCCS data (>5min)`);
+  }
+  if (missingCount > 0) {
+    logger.warn(`[MccsWorker] ${missingCount} device(s) missing MCCS data after full cycle`);
+  }
+  logger.info(`[MccsWorker] batch ${slice.length} devs, ${successCount} ok, coverage ${covered}/${mspfIds.length}`);
 }
 
-function startMccsWorker(intervalMs = 15000) {
+function startMccsWorker(intervalMs) {
   if (mccsWorkerTimer) return;
-  mccsWorkerTimer = setInterval(syncMccsBackground, intervalMs);
+  const interval = intervalMs || MCCS_WORKER_INTERVAL_MS;
+  mccsWorkerTimer = setInterval(runMccsSyncOnce, interval);
   if (mccsWorkerTimer.unref) mccsWorkerTimer.unref();
 }
 
@@ -781,6 +851,51 @@ function stopMccsWorker() {
     clearInterval(mccsWorkerTimer);
     mccsWorkerTimer = null;
   }
+}
+
+function getMccsStats() {
+  const allFetchTimes = [...mccsFetchTimes.values()];
+  const now = Date.now();
+  const maxAge = allFetchTimes.length > 0
+    ? now - Math.min(...allFetchTimes)
+    : 0;
+  const minAge = allFetchTimes.length > 0
+    ? now - Math.max(...allFetchTimes)
+    : 0;
+  const staleCount = [...mccsFetchTimes.values()].filter(t => (now - t) > MCCS_STALE_THRESHOLD_MS).length;
+
+  const cache = require('./cache');
+  const merged = cache.get('devices:merged') || [];
+  const mspfIds = merged.filter(d => d.source === 'mspf').map(d => d.id);
+  const isFirstCycleDone = mccsCompletedCycles >= 1 || (mccsSyncOffset >= mspfIds.length && mspfIds.length > 0);
+  const missingCount = isFirstCycleDone
+    ? mspfIds.filter(id => !mccsFetchTimes.has(id)).length
+    : 0;
+
+  return {
+    storeSize: mccsStore.size,
+    isSyncing: guardedMccsSync.isRunning(),
+    offset: mccsSyncOffset,
+    coverage: mccsCycleStats.fetchedThisCycle,
+    totalDevices: mccsCycleStats.totalDevices,
+    cycleStartedAt: mccsCycleStats.cycleStartedAt,
+    maxAgeMs: maxAge,
+    minAgeMs: minAge,
+    staleCount,
+    missingCount,
+    timeToFullMs: mccsCycleStats.timeToFullMs,
+    completedCycles: mccsCompletedCycles,
+  };
+}
+
+function resetMccsWorkerState() {
+  guardedMccsSync.reset?.();
+  mccsSyncOffset = 0;
+  mccsCompletedCycles = 0;
+  mccsCycleStats = { totalDevices: 0, fetchedThisCycle: 0, cycleStartedAt: 0, timeToFullMs: 0 };
+  mccsFirstFullAt = 0;
+  mccsStore.clear();
+  mccsFetchTimes.clear();
 }
 
 module.exports = {
@@ -800,6 +915,9 @@ module.exports = {
   getMonitors,
   startMccsWorker,
   stopMccsWorker,
-  syncMccsBackground,
+  runMccsSyncOnce,
+  getMccsStats,
+  resetMccsWorkerState,
   getBatchMccsData,
+  getMccsForDevice,
 };

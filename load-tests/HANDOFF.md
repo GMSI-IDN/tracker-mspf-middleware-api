@@ -4,6 +4,16 @@ Dokumen serah terima teknis untuk agent sesi berikutnya. Tanpa pujian, padat fak
 
 ---
 
+## 0. File yang Diubah per Iterasi
+
+| Iterasi | Status | File Diubah |
+|---|---|---|
+| **3a** | ✅ Commit `d9b0e2a` | `src/utils/guardedJob.js`, `src/services/positionSync.js`, `src/__tests__/guardedJob.test.js`, `src/__tests__/positionSyncGuard.test.js`, `src/__tests__/positionSyncMetrics.test.js` |
+| **3b & 3d** | ✅ Selesai, siap commit | `src/services/mspf.js`, `src/utils/guardedJob.js`, `src/__tests__/mccsWorkerCoverage.test.js` (baru), `load-tests/scripts/prove-mccs-coverage.js` (baru) |
+| **3c** | ✅ Audit selesai (laporan di chat & HANDOFF) | Tidak ada kode diubah (semua pemanggil aman) |
+
+---
+
 ## 1. Status Commit Git (Local Development Branch)
 
 Tiga commit telah dibuat di branch `development`, **BELUM diuji di staging/production**:
@@ -18,6 +28,10 @@ Tiga commit telah dibuat di branch `development`, **BELUM diuji di staging/produ
    - Pilar 1: `isSyncing` guard + watchdog timeout 120s di `positionSync.js`.
    - Pilar 3: Fast position sync (positions + status, tanpa MCCS history) + background MCCS worker (chunk 50, interval 15s, jittered TTL 30–60s).
    - Unit test `positionSyncGuard.test.js` dan `mccsDecoupling.test.js`.
+
+**Perubahan lokal (belum commit):**
+- **3b & 3d**: Redesign worker MCCS — persistent store (tanpa TTL), fetch-time tracking, `guardedJob` wrapper dengan ownership token, boundary purge, tracking `missingCount` & `staleCount`, cycle stats.
+- **3c**: Audit pemanggil `getPositions` selesai — tidak ada kode yang perlu diubah.
 
 ---
 
@@ -43,21 +57,25 @@ Tiga commit telah dibuat di branch `development`, **BELUM diuji di staging/produ
 
 ---
 
-## 3. Masalah TERBUKA di Commit 24035ae (Wajib Diperbaiki Sebelum Staging)
+## 3. Masalah TERBUKA
 
-1. **Watchdog Pilar 1:**
-   - Jika sync menggantung dan watchdog membuka paksa kunci (`isSyncing = false`), proses sync lama masih berjalan di background.
-   - Ketika proses lama akhirnya selesai, ia menulis data usang ke cache dan blok `finally`-nya mereset `isSyncing = false` saat sync baru sedang berjalan.
-   - Solusi: Token kepemilikan / run-ID per siklus. Hanya pemegang token aktif yang boleh menulis ke cache dan mereset kunci. Pastikan semua call upstream memiliki timeout eksplisit.
-2. **Rotasi MCCS Pilar 3 & TTL:**
-   - Rotasi 50 device / 15 s membutuhkan ~5,4 menit untuk 1.109 device (1.109 ÷ 50 × 15s).
-   - TTL saat ini 30–60 s, sehingga sebagian besar device tidak memiliki data MCCS di cache (~5 menit setelah startup dan saat berjalan).
-   - Solusi: Naikkan TTL MCCS > 1 putaran (misal 10–15 menit) atau pertahankan data lama sampai pembaruan selesai. Tambahkan tes kelengkapan: % device dengan data MCCS dan umur data maksimum.
-3. **Audit Pemanggil `getPositions`:**
-   - Default `fetchMccs: false` di `mspf.getPositions` berlaku untuk semua pemanggil.
-   - Periksa pemanggil lain (`/api/reports/*`, detail rute single-device) apakah memerlukan data MCCS.
-4. **Guard Worker MCCS:**
-   - `syncMccsBackground` memakai `setInterval` tanpa guard re-entrancy. Samakan pengamannya dengan Pilar 1.
+1. **3a — Watchdog Pilar 1: ✅ SELESAI (lokal, belum commit)**
+   - Dibuat helper `src/utils/guardedJob.js`: mutex + watchdog + token kepemilikan (Symbol per run).
+   - `positionSync.js` direfaktor: manual `isSyncing` → `guardedJob`, 3 titik `isActive()` guard.
+   - 9 unit test guardedJob + 5 integration test positionSync.
+2. **3b — Rotasi MCCS & 3d — guardedJob Worker MCCS: ✅ SELESAI (lokal, belum commit)**
+   - NodeCache (TTL 30–60s) diganti persistent Map store + fetch-time tracking.
+   - Menggunakan helper `guardedJob` (`timeoutMs: 60000`, name: `MccsWorker`).
+   - Boundary purge: hapus device yang tidak lagi ada di `devices:merged` setiap awal siklus.
+   - Warning & tracking `staleCount` (>5 min) dan `missingCount` (device tanpa MCCS setelah putaran 1 selesai).
+   - 23 chunks × 7s = 161s per cycle, max age 154s < 180s.
+   - ~7,1 req/s ke MSPF. Tes di `src/__tests__` menggunakan fake timers (~3,6s).
+   - Script pembuktian delay 500ms di `load-tests/scripts/prove-mccs-coverage.js`.
+3. **3c — Audit Pemanggil `getPositions`: ✅ SELESAI**
+   - Satu-satunya pemanggil production untuk `mspf.getPositions` adalah `positionSync.js`.
+   - Endpoint HTTP `/api/positions` membaca dari cache `positions:merged`.
+   - Fitur lain yang butuh MCCS (`enrichDevice`, `getDeviceRoute`) memanggil endpoint upstream khusus langsung (`/data/history`), bukan via `getPositions`.
+   - Kesimpulan: Default `fetchMccs: false` 100% aman dan data dari `mccsStore` (umur maks 2,7 menit) cukup untuk seluruh kebutuhan live tracking.
 
 ---
 
@@ -97,12 +115,22 @@ Tiga commit telah dibuat di branch `development`, **BELUM diuji di staging/produ
 
 ---
 
+## 6b. Backlog Teknis (dari audit 3a, jangan dikerjakan tanpa persetujuan)
+
+1. **Total timeout request berurutan di jalur sync posisi:** `Promise.allSettled` 3 upstream (traccar + mspf + foxlogger) masing-masing timeout 30s. Worst-case sequential = 90s, mendekati watchdog 120s. Dengan device cache rebuild (3 upstream lagi) = 180s > 120s. Usulkan timeout request jalur sync ~10s.
+2. **Retry 401 tanpa penanda anti-loop:** Interceptor MSPF dan FoxLogger melakukan `await axios(err.config)` pada 401. Jika token baru juga 401 (misal client credentials revoked), ini bisa infinite loop. Perlu penanda `_retry` di config atau batas 1x retry.
+3. **Batas jumlah halaman di loop pagination:** `getDevices`, `getDeviceMccsHistory`, `getDeviceStatsReports`, `getBcStatsReports` — semua loop `do/while(start)`. Jika upstream mengembalikan `next` tak terhingga, loop tak berhenti. Perlu batas max pages (misal 100).
+
+---
+
 ## 7. Daftar File Penting
 
 - **Laporan:**
   - `load-tests/results/stress-report-jalur-a.md`
   - `load-tests/results/ws-phase-c-report.md`
   - `load-tests/results/soak-150vu-45m.json` & `.log`
+  - `load-tests/results/3a-guarded-job-report.md`
+  - `load-tests/results/3b-mccs-worker-coverage-report.md`
 - **Skrip Tes & Pembuktian:**
   - `load-tests/scripts/run-improved-baseline.js`
   - `load-tests/scripts/run-ws-tier.js`
@@ -121,15 +149,18 @@ Tiga commit telah dibuat di branch `development`, **BELUM diuji di staging/produ
   - `docker-compose.loadtest.yml`
 - **Unit Test Baru di `src/__tests__/`:**
   - `cacheImmutability.test.js`
-  - `positionSyncGuard.test.js`
+  - `guardedJob.test.js` (3a)
+  - `positionSyncGuard.test.js` (3a rewrite)
+  - `positionSyncMetrics.test.js` (3a update)
   - `mccsDecoupling.test.js`
+  - `mccsWorkerCoverage.test.js` (3b, baru)
 
 ---
 
 ## 8. Langkah Berikutnya untuk Sesi Baru
 
-1. Perbaiki poin **3a** (token kepemilikan sync watchdog).
-2. Perbaiki poin **3b** (rotasi MCCS, TTL > 1 putaran, tes kelengkapan data).
-3. Perbaiki poin **3c** (audit pemanggil `getPositions`).
-4. Perbaiki poin **3d** (re-entrancy guard worker MCCS).
-5. Deploy dan uji ketiga commit di staging, pantau log `[PositionSync]`.
+1. ~~Perbaiki poin **3a** (token kepemilikan sync watchdog).~~ ✅ Selesai (`d9b0e2a`).
+2. ~~Selesaikan **3b & 3d** (rotasi MCCS, persistent store, guardedJob, missingCount, tes).~~ ✅ Selesai (siap commit).
+3. ~~Perbaiki poin **3c** (audit pemanggil `getPositions`).~~ ✅ Selesai (audit membuktikan tidak perlu perubahan kode).
+4. Deploy dan uji commit di staging, pantau log `[PositionSync]` dan `[MccsWorker]`.
+5. Kerjakan Pilar 2 (`devices:merged` Stale-While-Revalidate & Single-Flight Rebuild).
