@@ -966,7 +966,7 @@ router.get(['/top-distance', '/top-mileage'], async (req, res, next) => {
     const isAdmin = req.user.role === 'admin';
     const userGroups = req.user.groups || [];
 
-    let filtered = master.devices;
+    let filtered = [...master.devices];
 
     if (group) {
       const groupId = parseInt(group, 10);

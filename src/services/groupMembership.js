@@ -192,8 +192,11 @@ async function enrichAndFilterDevices(devices, targetGroupIds = null, isUserAdmi
       const gname = groupNameMap.get(gid) || `Group ${gid}`;
       customGroups.push({ id: gid, name: gname });
     }
-    d.customGroups = customGroups;
-    filtered.push(d);
+    filtered.push({
+      ...d,
+      customGroups,
+      attributes: d.attributes ? { ...d.attributes } : {},
+    });
   }
 
   return filtered;

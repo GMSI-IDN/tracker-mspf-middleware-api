@@ -82,13 +82,21 @@ router.get('/', async (req, res, next) => {
       } else if (from || to) {
         positions = await mspf.getDeviceRoute(idNum, { from, to });
       } else {
-        positions = (cache.get('positions:merged') || []).filter(p => p.deviceId === idNum && p.source === 'mspf');
+        const cachedSingle = (cache.get('positions:merged') || []).filter(p => p.deviceId === idNum && p.source === 'mspf');
+        positions = cachedSingle.map(p => ({
+          ...p,
+          attributes: p.attributes ? { ...p.attributes } : {},
+        }));
       }
       await applyCustomAttributes(positions, req.user);
       return res.json(sanitizePositions(positions, req.user.role === 'admin'));
     }
 
-    let positions = cache.get('positions:merged') || [];
+    const cachedPositions = cache.get('positions:merged') || [];
+    let positions = cachedPositions.map(p => ({
+      ...p,
+      attributes: p.attributes ? { ...p.attributes } : {},
+    }));
     const userGroups = req.user.groups || [];
     if (req.user.role !== 'admin') {
       if (userGroups.length === 0) {
