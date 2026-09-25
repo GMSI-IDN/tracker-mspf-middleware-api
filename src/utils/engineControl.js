@@ -39,12 +39,17 @@ function updateMergedDeviceCache(deviceId, source, patch) {
   try {
     const merged = cache.get('devices:merged');
     if (!merged || !Array.isArray(merged)) return;
-    const target = merged.find(d => d.id === deviceId && d.source === source);
-    if (target) {
-      if (patch.attributes) {
-        target.attributes = { ...(target.attributes || {}), ...patch.attributes };
-      }
-      Object.assign(target, patch);
+    const idx = merged.findIndex(d => d.id === deviceId && d.source === source);
+    if (idx !== -1) {
+      const target = merged[idx];
+      const updated = {
+        ...target,
+        ...patch,
+        attributes: patch.attributes ? { ...(target.attributes || {}), ...patch.attributes } : (target.attributes || {}),
+      };
+      const newMerged = [...merged];
+      newMerged[idx] = updated;
+      cache.set('devices:merged', newMerged, config.cache.ttl || 120);
     }
   } catch {}
 }
@@ -106,16 +111,16 @@ function deriveEngineControl(device, sourceOverride) {
       isApplied = false;
       desired = 'INACTIVE';
       if (cached && !cached.transitionSeen) {
-        cached.transitionSeen = true;
-        cache.set(`engine:desired:${source}:${deviceId}`, cached, 86400);
+        const updated = { ...cached, transitionSeen: true };
+        cache.set(`engine:desired:${source}:${deviceId}`, updated, 86400);
       }
     } else if (rawStatus === 'ACTIVATING') {
       state = 'ACTIVATING';
       isApplied = false;
       desired = 'ACTIVE';
       if (cached && !cached.transitionSeen) {
-        cached.transitionSeen = true;
-        cache.set(`engine:desired:${source}:${deviceId}`, cached, 86400);
+        const updated = { ...cached, transitionSeen: true };
+        cache.set(`engine:desired:${source}:${deviceId}`, updated, 86400);
       }
     } else if (rawStatus === 'ACTIVE') {
       if (desired === 'INACTIVE') {
