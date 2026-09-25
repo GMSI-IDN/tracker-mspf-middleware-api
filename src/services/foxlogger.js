@@ -296,22 +296,26 @@ function foxTimeRange(params = {}) {
   };
 }
 
-async function getDevices(params = {}) {
+async function getDevices(params = {}, options = {}) {
   const uid = cachedUserId || params.user_id;
   if (!uid) throw new Error('FoxLogger user_id not available');
+
+  const { timeout, ...queryParams } = params;
+  const reqTimeout = options.timeout || timeout;
+  const reqConfig = reqTimeout ? { timeout: reqTimeout } : {};
 
   let devices = [];
 
   // Try device-lists first
   try {
-    const res = await getApi().get(`/device-lists/${uid}`);
+    const res = await getApi().get(`/device-lists/${uid}`, reqConfig);
     devices = (res.data?.data || []).map(normalizeDevice);
     logger.debug(`FoxLogger devices (device-lists): ${devices.length}`);
   } catch (err) {
     // Fallback: build device list from report-position
     logger.warn(`[FoxLogger] device-lists failed (${err.status || err.code}), falling back to report-position`);
     try {
-      const posRes = await getApi().get(`/web-tracker-staging/report-position/${uid}?status=MOVE,PARK,OFF,MISS`);
+      const posRes = await getApi().get(`/web-tracker-staging/report-position/${uid}?status=MOVE,PARK,OFF,MISS`, reqConfig);
       const rawPositions = posRes.data?.data || [];
       devices = rawPositions.map((p) => {
         const id = parseInt(p.imei, 10);
@@ -384,15 +388,19 @@ function normalizeFoxLoggerPositionForDevice(device, posMap) {
   };
 }
 
-async function getPositions(params = {}) {
+async function getPositions(params = {}, options = {}) {
   const uid = cachedUserId || params.user_id;
   if (!uid) return [];
 
-  // Get current positions from report-position endpoint
-  const statusFilter = params.status || 'MOVE,PARK,OFF,MISS';
-  const res = await getApi().get(`/web-tracker-staging/report-position/${uid}`, {
-    params: { status: statusFilter },
-  });
+  const { timeout, status, ...otherParams } = params;
+  const reqTimeout = options.timeout || timeout;
+  const statusFilter = status || 'MOVE,PARK,OFF,MISS';
+  const reqConfig = {
+    params: { ...otherParams, status: statusFilter },
+  };
+  if (reqTimeout) reqConfig.timeout = reqTimeout;
+
+  const res = await getApi().get(`/web-tracker-staging/report-position/${uid}`, reqConfig);
 
   const rawPositions = res.data?.data || [];
   const positions = [];

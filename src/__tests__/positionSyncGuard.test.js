@@ -151,4 +151,21 @@ describe('Pilar 1: PositionSync GuardedJob Integration', () => {
       jest.useRealTimers();
     }
   });
+
+  test('3e: positionSync passes timeout 10000ms to all upstream calls', async () => {
+    await positionSync.syncPositions();
+
+    expect(traccar.getPositions).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ timeout: 10000 })
+    );
+    expect(mspf.getPositions).toHaveBeenCalledWith(
+      expect.objectContaining({ limit: 1000 }),
+      expect.objectContaining({ timeout: 10000 })
+    );
+    expect(foxlogger.getPositions).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ timeout: 10000 })
+    );
+  });
 });
