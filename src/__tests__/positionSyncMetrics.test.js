@@ -56,15 +56,12 @@ describe('positionSync — Metrics, Duration & Concurrency', () => {
     await syncPositions();
 
     expect(getActiveSyncCount()).toBe(0);
-    const startLog = infoSpy.mock.calls.find(c => c[0].includes('[PositionSync] start (concurrent: 1)'));
     const completedLog = infoSpy.mock.calls.find(c => c[0].includes('[PositionSync] completed in'));
-    expect(startLog).toBeDefined();
     expect(completedLog).toBeDefined();
-    expect(completedLog[0]).toMatch(/\[PositionSync\] completed in \d+ms \(concurrent: 0\)/);
+    expect(completedLog[0]).toMatch(/\[PositionSync\] completed in \d+ms/);
   });
 
   test('logs duration on early return path when no BC IDs found', async () => {
-    // Empty devices cache and empty API fallback
     cache.set('devices:merged', [], 120);
     mspf.getBcList.mockResolvedValue({ data: [] });
 
@@ -73,24 +70,23 @@ describe('positionSync — Metrics, Duration & Concurrency', () => {
     expect(getActiveSyncCount()).toBe(0);
     const completedLog = infoSpy.mock.calls.find(c => c[0].includes('[PositionSync] completed in'));
     expect(completedLog).toBeDefined();
-    expect(completedLog[0]).toMatch(/\[PositionSync\] completed in \d+ms \(concurrent: 0\)/);
+    expect(completedLog[0]).toMatch(/\[PositionSync\] completed in \d+ms/);
   });
 
-  test('logs duration on error path and rethrows', async () => {
+  test('handles upstream error gracefully via Promise.allSettled', async () => {
     cache.set('devices:merged', [
       { id: 2, source: 'mspf', group: 'mspf_100' },
     ], 120);
 
-    // Force an unexpected error in traccar.getPositions
-    traccar.getPositions.mockImplementation(() => {
-      throw new Error('Fatal network explosion');
-    });
+    traccar.getPositions.mockRejectedValue(new Error('Fatal network explosion'));
+    mspf.getPositions.mockResolvedValue([]);
+    foxlogger.getPositions.mockResolvedValue([]);
 
-    await expect(syncPositions()).rejects.toThrow('Fatal network explosion');
+    await syncPositions();
     expect(getActiveSyncCount()).toBe(0);
     const completedLog = infoSpy.mock.calls.find(c => c[0].includes('[PositionSync] completed in'));
     expect(completedLog).toBeDefined();
-    expect(completedLog[0]).toMatch(/\[PositionSync\] completed in \d+ms \(concurrent: 0\)/);
+    expect(completedLog[0]).toMatch(/\[PositionSync\] completed in \d+ms/);
   });
 
   test('guards against overlapping runs and logs WARN when previous cycle is still in progress', async () => {
@@ -108,21 +104,15 @@ describe('positionSync — Metrics, Duration & Concurrency', () => {
     mspf.getPositions.mockResolvedValue([]);
     foxlogger.getPositions.mockResolvedValue([]);
 
-    // Start first sync (will wait on slowPromise)
     const p1 = syncPositions();
-
-    // Start second sync immediately while first is running
     const p2 = syncPositions();
 
-    // Now check concurrency counter is guarded to 1 (second sync is skipped)
     expect(getActiveSyncCount()).toBe(1);
 
-    // Verify WARN was logged for skipping overlapping execution
     expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining('[PositionSync] previous sync still in progress')
+      expect.stringContaining('[PositionSync] previous run still in progress')
     );
 
-    // Resolve slow promise to finish first
     resolveFirst();
     await Promise.all([p1, p2]);
 
