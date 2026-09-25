@@ -8,19 +8,16 @@ const deviceRouter = require('./deviceRouter');
 const config = require('../config');
 const { logger } = require('../middleware/logger');
 const { statusTracker } = require('../utils/liveStatus');
+const { guardedJob } = require('../utils/guardedJob');
 
 const mspfBcCache = { ids: [], ts: 0 };
 const MSPF_BC_CACHE_TTL = 300000;
 
 let emitHooks = { onPosition: null, onStatus: null };
 let lastHeartbeatAt = 0;
-let activeSyncCount = 0;
-let isSyncing = false;
-let syncStartedAt = 0;
-const SYNC_TIMEOUT_MS = 120000; // 120 detik batas waktu watchdog
 
 function getActiveSyncCount() {
-  return activeSyncCount;
+  return guardedSync.isRunning() ? 1 : 0;
 }
 
 function setEmitHooks(hooks = {}) {
@@ -137,145 +134,145 @@ function maybeHeartbeat() {
   }
 }
 
+const guardedSync = guardedJob({
+  name: 'PositionSync',
+  timeoutMs: 120000,
+  jobFn: syncPositionsImpl,
+});
+
 async function syncPositions() {
-  if (isSyncing) {
-    const elapsed = Date.now() - syncStartedAt;
-    if (elapsed < SYNC_TIMEOUT_MS) {
-      logger.warn(`[PositionSync] previous sync still in progress (${elapsed}ms), skipping tick`);
+  const result = await guardedSync();
+  if (result.status === 'skipped') return;
+  if (result.status === 'error') throw result.error;
+  return result.result;
+}
+
+async function syncPositionsImpl(isActive) {
+  let bcIds = getMspfBcIds();
+  if (bcIds.length === 0) {
+    bcIds = await getBcIdsFallback();
+    if (bcIds.length === 0) {
+      logger.warn('[PositionSync] no BC IDs (device cache + API both failed), skipping...');
+      await evaluateOffline();
+      maybeHeartbeat();
       return;
     }
-    logger.error(`[PositionSync] previous sync timed out after ${elapsed}ms! Unlocking guard for next sync.`);
-    isSyncing = false;
   }
-  isSyncing = true;
-  syncStartedAt = Date.now();
-  const startTime = Date.now();
 
-  try {
-    activeSyncCount++;
-    const concurrent = activeSyncCount;
-    logger.info(`[PositionSync] start (concurrent: ${concurrent})`);
-    if (concurrent > 1) {
-      logger.warn(`[PositionSync] concurrent execution detected: ${concurrent} runs in progress`);
+  let merged = cache.get('devices:merged');
+  let expT = merged?.filter(d => d.source === 'traccar').length || 0;
+  let expM = merged?.filter(d => d.source === 'mspf').length || 0;
+  let expF = merged?.filter(d => d.source === 'foxlogger').length || 0;
+  let actT = 0, actM = 0, actF = 0;
+
+  const [traccarResult, mspfResult, foxloggerResult] = await Promise.allSettled([
+    traccar.getPositions(),
+    mspf.getPositions({ limit: 1000, bc: bcIds }),
+    foxlogger.getPositions(),
+  ]);
+
+  let positions = [];
+  let useStale = false;
+  if (mspfResult.status !== 'fulfilled') {
+    logger.warn(`[PositionSync] MSPF failed: ${mspfResult.reason?.message || 'unknown error'}`);
+    const old = cache.get('positions:merged');
+    if (old && old.length > 0) {
+      positions = old;
+      useStale = true;
     }
-    let bcIds = getMspfBcIds();
-    if (bcIds.length === 0) {
-      bcIds = await getBcIdsFallback();
-      if (bcIds.length === 0) {
-        logger.warn('[PositionSync] no BC IDs (device cache + API both failed), skipping...');
-        await evaluateOffline();
-        maybeHeartbeat();
-        return;
-      }
-    }
-
-    let merged = cache.get('devices:merged');
-    let expT = merged?.filter(d => d.source === 'traccar').length || 0;
-    let expM = merged?.filter(d => d.source === 'mspf').length || 0;
-    let expF = merged?.filter(d => d.source === 'foxlogger').length || 0;
-    let actT = 0, actM = 0, actF = 0;
-
-    const [traccarResult, mspfResult, foxloggerResult] = await Promise.allSettled([
-      traccar.getPositions(),
-      mspf.getPositions({ limit: 1000, bc: bcIds }),
-      foxlogger.getPositions(),
-    ]);
-
-    let positions = [];
-    let useStale = false;
-    if (mspfResult.status !== 'fulfilled') {
-      logger.warn(`[PositionSync] MSPF failed: ${mspfResult.reason?.message || 'unknown error'}`);
-      const old = cache.get('positions:merged');
-      if (old && old.length > 0) {
-        positions = old;
-        useStale = true;
-      }
-    }
-
-    if (!useStale) {
-      const now = new Date().toISOString();
-
-      if (traccarResult.status === 'fulfilled' && traccarResult.value) {
-        for (const p of traccarResult.value) {
-          positions.push(normalizePosition({ ...p, serverTime: p.serverTime || now, source: 'traccar' }));
-          actT++;
-        }
-      }
-
-      if (mspfResult.status === 'fulfilled' && mspfResult.value) {
-        let activeIds = getActiveIds('mspf');
-        if (!activeIds) {
-          logger.warn('[PositionSync] device cache expired, rebuilding...');
-          const [t, m, f] = await Promise.allSettled([
-            traccar.getDevices({ all: true }),
-            mspf.waitForInit().then(() => mspf.getDevices()),
-            foxlogger.waitForInit().then(() => foxlogger.getDevices()),
-          ]);
-          const rebuild = [];
-          if (t.status === 'fulfilled' && t.value) {
-            for (const d of t.value) rebuild.push({ id: d.id, name: d.name, uniqueId: d.uniqueId, status: d.status || 'offline', source: 'traccar', group: `traccar_${d.groupId}`, lastUpdate: d.lastUpdate || (d.attributes?.motionTime ? new Date(d.attributes.motionTime).toISOString() : undefined), voltage: d.attributes?.power ?? undefined, attributes: d.attributes || {} });
-          }
-          if (m.status === 'fulfilled' && m.value?.data) rebuild.push(...m.value.data);
-          if (f.status === 'fulfilled' && f.value?.data) rebuild.push(...f.value.data);
-          rebuild.sort((a, b) => {
-            const aId = String(a.id).padStart(20, '0');
-            const bId = String(b.id).padStart(20, '0');
-            if (aId !== bId) return aId < bId ? -1 : 1;
-            if (a.source < b.source) return -1;
-            if (a.source > b.source) return 1;
-            return 0;
-          });
-          deviceRouter.buildDeviceMap(rebuild);
-          cache.set('devices:merged', rebuild, config.cache.ttl || 120);
-          logger.info(`Device cache rebuilt: ${rebuild.length} devices`);
-          merged = rebuild;
-          expT = merged.filter(d => d.source === 'traccar').length;
-          expM = merged.filter(d => d.source === 'mspf').length;
-          activeIds = new Set(merged.filter(d => d.source === 'mspf').map(d => d.id));
-        }
-        if (activeIds && activeIds.size > 0) {
-          for (const p of mspfResult.value) {
-            if (activeIds.has(p.deviceId)) {
-              positions.push(normalizePosition({ ...p, serverTime: p.serverTime || now, source: 'mspf' }));
-              actM++;
-            }
-          }
-        }
-      }
-
-      if (foxloggerResult.status === 'fulfilled' && foxloggerResult.value) {
-        let foxActiveIds = getActiveFoxloggerIds();
-        if (foxActiveIds && foxActiveIds.size > 0) {
-          const foxPosByImei = {};
-          for (const p of foxloggerResult.value) foxPosByImei[p.deviceId] = p;
-          for (const imei of foxActiveIds) {
-            const pos = foxPosByImei[imei];
-            if (pos) {
-              positions.push(normalizePosition({ ...pos, serverTime: pos.serverTime || now, source: 'foxlogger' }));
-              actF++;
-            }
-          }
-        }
-      }
-
-      positions.sort((a, b) => new Date(b.deviceTime || 0) - new Date(a.deviceTime || 0));
-      cache.set('positions:merged', positions, 30);
-    }
-
-    await feedAndEmit(positions);
-    await evaluateOffline();
-    maybeHeartbeat();
-
-    logger.info(`[PositionSync] cached: traccar ${actT}/${expT}, mspf ${actM}/${expM}, foxlogger ${actF}/${expF}`);
-
-    const mem = process.memoryUsage();
-    logger.info(`[Cache] RSS:${Math.round(mem.rss / 1024 / 1024)}MB | Heap:${Math.round(mem.heapUsed / 1024 / 1024)}MB | Keys:${cache.keys().length}`);
-  } finally {
-    isSyncing = false;
-    const duration = Date.now() - startTime;
-    activeSyncCount--;
-    logger.info(`[PositionSync] completed in ${duration}ms (concurrent: ${activeSyncCount})`);
   }
+
+  if (!useStale) {
+    if (!isActive()) {
+      logger.warn('[PositionSync] run became stale before cache write, aborting');
+      return;
+    }
+    const now = new Date().toISOString();
+
+    if (traccarResult.status === 'fulfilled' && traccarResult.value) {
+      for (const p of traccarResult.value) {
+        positions.push(normalizePosition({ ...p, serverTime: p.serverTime || now, source: 'traccar' }));
+        actT++;
+      }
+    }
+
+    if (mspfResult.status === 'fulfilled' && mspfResult.value) {
+      let activeIds = getActiveIds('mspf');
+      if (!activeIds) {
+        if (!isActive()) {
+          logger.warn('[PositionSync] run became stale, skipping device cache rebuild');
+          return;
+        }
+        logger.warn('[PositionSync] device cache expired, rebuilding...');
+        const [t, m, f] = await Promise.allSettled([
+          traccar.getDevices({ all: true }),
+          mspf.waitForInit().then(() => mspf.getDevices()),
+          foxlogger.waitForInit().then(() => foxlogger.getDevices()),
+        ]);
+        const rebuild = [];
+        if (t.status === 'fulfilled' && t.value) {
+          for (const d of t.value) rebuild.push({ id: d.id, name: d.name, uniqueId: d.uniqueId, status: d.status || 'offline', source: 'traccar', group: `traccar_${d.groupId}`, lastUpdate: d.lastUpdate || (d.attributes?.motionTime ? new Date(d.attributes.motionTime).toISOString() : undefined), voltage: d.attributes?.power ?? undefined, attributes: d.attributes || {} });
+        }
+        if (m.status === 'fulfilled' && m.value?.data) rebuild.push(...m.value.data);
+        if (f.status === 'fulfilled' && f.value?.data) rebuild.push(...f.value.data);
+        rebuild.sort((a, b) => {
+          const aId = String(a.id).padStart(20, '0');
+          const bId = String(b.id).padStart(20, '0');
+          if (aId !== bId) return aId < bId ? -1 : 1;
+          if (a.source < b.source) return -1;
+          if (a.source > b.source) return 1;
+          return 0;
+        });
+        deviceRouter.buildDeviceMap(rebuild);
+        cache.set('devices:merged', rebuild, config.cache.ttl || 120);
+        logger.info(`Device cache rebuilt: ${rebuild.length} devices`);
+        merged = rebuild;
+        expT = merged.filter(d => d.source === 'traccar').length;
+        expM = merged.filter(d => d.source === 'mspf').length;
+        activeIds = new Set(merged.filter(d => d.source === 'mspf').map(d => d.id));
+      }
+      if (activeIds && activeIds.size > 0) {
+        for (const p of mspfResult.value) {
+          if (activeIds.has(p.deviceId)) {
+            positions.push(normalizePosition({ ...p, serverTime: p.serverTime || now, source: 'mspf' }));
+            actM++;
+          }
+        }
+      }
+    }
+
+    if (foxloggerResult.status === 'fulfilled' && foxloggerResult.value) {
+      let foxActiveIds = getActiveFoxloggerIds();
+      if (foxActiveIds && foxActiveIds.size > 0) {
+        const foxPosByImei = {};
+        for (const p of foxloggerResult.value) foxPosByImei[p.deviceId] = p;
+        for (const imei of foxActiveIds) {
+          const pos = foxPosByImei[imei];
+          if (pos) {
+            positions.push(normalizePosition({ ...pos, serverTime: pos.serverTime || now, source: 'foxlogger' }));
+            actF++;
+          }
+        }
+      }
+    }
+
+    positions.sort((a, b) => new Date(b.deviceTime || 0) - new Date(a.deviceTime || 0));
+    cache.set('positions:merged', positions, 30);
+  }
+
+  if (!isActive()) {
+    logger.warn('[PositionSync] run became stale, skipping post-processing');
+    return;
+  }
+
+  await feedAndEmit(positions);
+  await evaluateOffline();
+  maybeHeartbeat();
+
+  logger.info(`[PositionSync] cached: traccar ${actT}/${expT}, mspf ${actM}/${expM}, foxlogger ${actF}/${expF}`);
+
+  const mem = process.memoryUsage();
+  logger.info(`[Cache] RSS:${Math.round(mem.rss / 1024 / 1024)}MB | Heap:${Math.round(mem.heapUsed / 1024 / 1024)}MB | Keys:${cache.keys().length}`);
 }
 
 async function startPositionSync() {
