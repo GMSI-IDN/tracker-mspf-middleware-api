@@ -78,9 +78,9 @@ function getApi() {
 }
 
 async function waitForInit(timeout = 15000) {
-  const start = Date.now();
+  const start = performance.now();
   while (!mspfApi) {
-    if (Date.now() - start > timeout) throw new Error('MSPF init timeout');
+    if (performance.now() - start > timeout) throw new Error('MSPF init timeout');
     await new Promise(r => setTimeout(r, 200));
   }
 }
@@ -147,8 +147,8 @@ let mccsSyncOffset = 0;
 let mccsCompletedCycles = 0;
 const MCCS_STALE_THRESHOLD_MS = 5 * 60 * 1000;
 
-let mccsCycleStats = { totalDevices: 0, fetchedThisCycle: 0, cycleStartedAt: 0, timeToFullMs: 0 };
-let mccsFirstFullAt = 0;
+let mccsCycleStats = { totalDevices: 0, fetchedThisCycle: 0, cycleStartedAt: null, timeToFullMs: 0 };
+let mccsFirstFullAt = null;
 
 const MCCS_CHUNK_SIZE = 50;
 const MCCS_CONCURRENCY = 10;
@@ -912,9 +912,9 @@ async function runMccsSyncImpl(isActive) {
   const mspfIds = merged.filter(d => d.source === 'mspf').map(d => d.id);
   if (mspfIds.length === 0) return;
 
-  const now = Date.now();
+  const nowMono = performance.now();
   for (const [pId, pInfo] of mccsPausedDevices.entries()) {
-    if (now - pInfo.pausedAt >= pInfo.pauseDurationMs) {
+    if (nowMono - pInfo.pausedAt >= pInfo.pauseDurationMs) {
       mccsPausedDevices.delete(pId);
     }
   }
@@ -933,9 +933,9 @@ async function runMccsSyncImpl(isActive) {
   }
 
   if (mccsCycleDeviceList.length === 0 || mccsSyncOffset >= mccsCycleDeviceList.length) {
-    if (mccsCycleStats.cycleStartedAt > 0) {
+    if (mccsCycleStats.cycleStartedAt !== null) {
       mccsCompletedCycles++;
-      const cycleDuration = Date.now() - mccsCycleStats.cycleStartedAt;
+      const cycleDuration = Math.round(performance.now() - mccsCycleStats.cycleStartedAt);
       logger.info(`[MccsWorker] cycle completed: ${mccsCycleStats.fetchedThisCycle}/${mccsCycleStats.totalDevices} in ${cycleDuration}ms`);
 
       const covered = mspfIds.filter(id => mccsStore.has(id)).length;
@@ -972,11 +972,11 @@ async function runMccsSyncImpl(isActive) {
 
     mccsCycleDeviceList = mspfIds.filter(id => !mccsPausedDevices.has(id));
     mccsSyncOffset = 0;
-    mccsFirstFullAt = 0;
+    mccsFirstFullAt = null;
     mccsCycleStats = {
       totalDevices: mccsCycleDeviceList.length,
       fetchedThisCycle: 0,
-      cycleStartedAt: Date.now(),
+      cycleStartedAt: performance.now(),
       timeToFullMs: 0,
     };
   }
@@ -1024,7 +1024,7 @@ async function runMccsSyncImpl(isActive) {
         if (existing && existing.reactivatedOnce) {
           const pauseDurationMs = getRandomPauseDuration();
           mccsPausedDevices.set(id, {
-            pausedAt: Date.now(),
+            pausedAt: performance.now(),
             pauseDurationMs,
             lastDeviceTime: lastT,
             reactivatedOnce: true,
@@ -1033,7 +1033,7 @@ async function runMccsSyncImpl(isActive) {
           logger.info(`[MccsWorker] device ${id} still empty_data after reactivation, entering full pause (${Math.round(pauseDurationMs / 60000)}m)`);
         } else {
           mccsPausedDevices.set(id, {
-            pausedAt: Date.now(),
+            pausedAt: performance.now(),
             pauseDurationMs: getRandomPauseDuration(),
             lastDeviceTime: lastT,
             reactivatedOnce: false,
@@ -1050,9 +1050,9 @@ async function runMccsSyncImpl(isActive) {
 
   const covered = mspfIds.filter(id => mccsStore.has(id)).length;
   const targetCoverage = mspfIds.filter(id => !mccsPausedDevices.has(id)).length;
-  if (mccsFirstFullAt === 0 && covered >= targetCoverage && targetCoverage > 0) {
-    mccsFirstFullAt = Date.now();
-    mccsCycleStats.timeToFullMs = mccsFirstFullAt - mccsCycleStats.cycleStartedAt;
+  if (mccsFirstFullAt === null && covered >= targetCoverage && targetCoverage > 0) {
+    mccsFirstFullAt = performance.now();
+    mccsCycleStats.timeToFullMs = Math.round(mccsFirstFullAt - mccsCycleStats.cycleStartedAt);
     logger.info(`[MccsWorker] 100% coverage reached in ${mccsCycleStats.timeToFullMs}ms`);
   }
 
@@ -1116,7 +1116,7 @@ function getMccsStats() {
     offset: mccsSyncOffset,
     coverage: mccsCycleStats.fetchedThisCycle,
     totalDevices: mccsCycleStats.totalDevices,
-    cycleStartedAt: mccsCycleStats.cycleStartedAt,
+    cycleStartedAt: mccsCycleStats.cycleStartedAt ?? 0,
     maxAgeMs: maxAge,
     minAgeMs: minAge,
     staleCount,
@@ -1134,8 +1134,8 @@ function resetMccsWorkerState() {
   guardedMccsSync._resetForTests?.();
   mccsSyncOffset = 0;
   mccsCompletedCycles = 0;
-  mccsCycleStats = { totalDevices: 0, fetchedThisCycle: 0, cycleStartedAt: 0, timeToFullMs: 0 };
-  mccsFirstFullAt = 0;
+  mccsCycleStats = { totalDevices: 0, fetchedThisCycle: 0, cycleStartedAt: null, timeToFullMs: 0 };
+  mccsFirstFullAt = null;
   mccsStore.clear();
   mccsFetchTimes.clear();
   mccsFailureStats = createEmptyFailureStats();

@@ -12,11 +12,11 @@ const { guardedJob } = require('../utils/guardedJob');
 
 const SYNC_REQUEST_TIMEOUT_MS = 10000;
 
-const mspfBcCache = { ids: [], ts: 0 };
+const mspfBcCache = { ids: [], ts: null };
 const MSPF_BC_CACHE_TTL = 300000;
 
 let emitHooks = { onPosition: null, onStatus: null };
-let lastHeartbeatAt = 0;
+let lastHeartbeatAt = null;
 
 function getActiveSyncCount() {
   return guardedSync.isRunning() ? 1 : 0;
@@ -59,12 +59,14 @@ function normalizePosition(p) {
 }
 
 async function getBcIdsFallback() {
-  if (Date.now() - mspfBcCache.ts < MSPF_BC_CACHE_TTL) return mspfBcCache.ids;
+  if (mspfBcCache.ts !== null && (performance.now() - mspfBcCache.ts) < MSPF_BC_CACHE_TTL) {
+    return mspfBcCache.ids;
+  }
   try {
     const bcs = await mspf.getBcList({}, { timeout: SYNC_REQUEST_TIMEOUT_MS });
     const ids = (bcs?.data || bcs || []).map(b => b.id).filter(Boolean);
     mspfBcCache.ids = ids;
-    mspfBcCache.ts = Date.now();
+    mspfBcCache.ts = performance.now();
     logger.info(`[PositionSync] BC IDs from API: ${ids.join(', ')}`);
     return ids;
   } catch { return []; }
@@ -120,9 +122,9 @@ async function evaluateOffline() {
 function maybeHeartbeat() {
   if (!emitHooks.onStatus) return;
   if (config.live.heartbeatMs <= 0) return;
-  const now = Date.now();
-  if (now - lastHeartbeatAt < config.live.heartbeatMs) return;
-  lastHeartbeatAt = now;
+  const nowMono = performance.now();
+  if (lastHeartbeatAt !== null && (nowMono - lastHeartbeatAt) < config.live.heartbeatMs) return;
+  lastHeartbeatAt = nowMono;
   const devices = statusTracker.heartbeatDevices();
   for (const d of devices) {
     try {
@@ -284,4 +286,19 @@ async function startPositionSync() {
   setInterval(syncPositions, 10000);
 }
 
-module.exports = { startPositionSync, syncPositions, setEmitHooks, getActiveSyncCount };
+function _resetForTests() {
+  mspfBcCache.ids = [];
+  mspfBcCache.ts = null;
+  lastHeartbeatAt = null;
+  guardedSync._resetForTests?.();
+}
+
+module.exports = {
+  startPositionSync,
+  syncPositions,
+  setEmitHooks,
+  getActiveSyncCount,
+  getBcIdsFallback,
+  maybeHeartbeat,
+  _resetForTests,
+};
