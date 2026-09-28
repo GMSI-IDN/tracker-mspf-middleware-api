@@ -6,11 +6,11 @@ function guardedJob({ name, timeoutMs, jobFn }) {
   if (typeof jobFn !== 'function') throw new TypeError('guardedJob: jobFn must be a function');
 
   let currentRunId = null;
-  let startedAt = 0;
+  let startedAt = null;
 
   async function run(...args) {
-    if (currentRunId !== null) {
-      const elapsed = Date.now() - startedAt;
+    if (currentRunId !== null && startedAt !== null) {
+      const elapsed = Math.round(performance.now() - startedAt);
       if (elapsed < timeoutMs) {
         const { logger } = require('../middleware/logger');
         logger.warn(`[${name}] previous run still in progress (${elapsed}ms), skipping tick`);
@@ -23,7 +23,7 @@ function guardedJob({ name, timeoutMs, jobFn }) {
 
     const runId = Symbol(name);
     currentRunId = runId;
-    startedAt = Date.now();
+    startedAt = performance.now();
 
     let watchdogTimer = null;
     let wasOwner = false;
@@ -52,7 +52,7 @@ function guardedJob({ name, timeoutMs, jobFn }) {
     } finally {
       if (wasOwner) {
         if (watchdogTimer) clearTimeout(watchdogTimer);
-        const duration = Date.now() - startedAt;
+        const duration = Math.round(performance.now() - startedAt);
         currentRunId = null;
         const { logger } = require('../middleware/logger');
         logger.info(`[${name}] completed in ${duration}ms`);
@@ -61,9 +61,9 @@ function guardedJob({ name, timeoutMs, jobFn }) {
   }
 
   run.isRunning = () => currentRunId !== null;
-  run.getElapsed = () => (currentRunId !== null ? Date.now() - startedAt : 0);
+  run.getElapsed = () => (currentRunId !== null && startedAt !== null ? Math.round(performance.now() - startedAt) : 0);
   // Hanya untuk keperluan unit test/teardown — DILARANG digunakan di kode aplikasi produksi
-  run._resetForTests = () => { currentRunId = null; startedAt = 0; };
+  run._resetForTests = () => { currentRunId = null; startedAt = null; };
 
   return run;
 }
