@@ -58,25 +58,36 @@ Tiga commit telah dibuat di branch `development`, **BELUM diuji di staging/produ
 
 ---
 
-## 3. Masalah TERBUKA
+## 3. Analisis Worst-Case Sync & Keputusan Watchdog 180 s
 
-1. **3a — Watchdog Pilar 1: ✅ SELESAI (lokal, belum commit)**
-   - Dibuat helper `src/utils/guardedJob.js`: mutex + watchdog + token kepemilikan (Symbol per run).
-   - `positionSync.js` direfaktor: manual `isSyncing` → `guardedJob`, 3 titik `isActive()` guard.
-   - 9 unit test guardedJob + 5 integration test positionSync.
-2. **3b — Rotasi MCCS & 3d — guardedJob Worker MCCS: ✅ SELESAI (lokal, belum commit)**
-   - NodeCache (TTL 30–60s) diganti persistent Map store + fetch-time tracking.
-   - Menggunakan helper `guardedJob` (`timeoutMs: 60000`, name: `MccsWorker`).
-   - Boundary purge: hapus device yang tidak lagi ada di `devices:merged` setiap awal siklus.
-   - Warning & tracking `staleCount` (>5 min) dan `missingCount` (device tanpa MCCS setelah putaran 1 selesai).
-   - 23 chunks × 7s = 161s per cycle, max age 154s < 180s.
-   - ~7,1 req/s ke MSPF. Tes di `src/__tests__` menggunakan fake timers (~3,6s).
-   - Script pembuktian delay 500ms di `load-tests/scripts/prove-mccs-coverage.js`.
-3. **3c — Audit Pemanggil `getPositions`: ✅ SELESAI**
-   - Satu-satunya pemanggil production untuk `mspf.getPositions` adalah `positionSync.js`.
-   - Endpoint HTTP `/api/positions` membaca dari cache `positions:merged`.
-   - Fitur lain yang butuh MCCS (`enrichDevice`, `getDeviceRoute`) memanggil endpoint upstream khusus langsung (`/data/history`), bukan via `getPositions`.
-   - Kesimpulan: Default `fetchMccs: false` 100% aman dan data dari `mccsStore` (umur maks 2,7 menit) cukup untuk seluruh kebutuhan live tracking.
+### Tabel Akumulasi Waktu Terburuk Satu Siklus Sync:
+
+| Komponen | Sifat | Halaman / Request | Timeout | Waktu Terburuk |
+|---|---|---|---|---|
+| **BC Fallback** | Sekuensial (jika cache kosong) | 1 req `/v2/bc` | 10 s | 10 s |
+| **Fetch Positions Upstream** | Paralel `Promise.allSettled` | Traccar (1) + Fox (1) + MSPF (2 hal.) | 10 s | 20 s (bottleneck MSPF) |
+| **Enrich Status MSPF** | Sekuensial (`do..while`) | 6 halaman (1.109 dev ÷ 200) | 10 s | 60 s |
+| **Device Rebuild** (jika cache habis) | Paralel `Promise.allSettled` | Traccar (1) + Fox (1) + MSPF (6 hal.) | 10 s | 60 s (bottleneck MSPF) |
+
+- **Siklus Normal (tanpa rebuild):** $20\text{s (positions)} + 60\text{s (status)} = \mathbf{80\text{ detik}}$ (atau **90 s** jika ditambah BC fallback).
+- **Siklus Ekstrem (sync lambat + device cache habis):** $80\text{s} + 60\text{s} = \mathbf{140\text{ detik}}$ (atau **150 s** jika ditambah BC fallback).
+- **Retry 401:** Menambah $+20\text{ s}$ per kejadian refresh + retry.
+
+**Alasan Memilih Watchdog 180 s:**
+1. Menampung skenario ekstrem (140–150 s) dengan *headroom* aman ~30 s tanpa risiko false timeout yang memutus sync valid.
+2. Sangat sederhana dan minim risiko regresi dibanding memotong timeout per request menjadi terlalu agresif (<5s) yang rentan terputus saat network jitter.
+3. **Catatan Pilar 2:** Setelah Pilar 2 diterapkan (*stale-while-revalidate* pada `devices:merged`), proses device rebuild akan sepenuhnya keluar dari jalur sync posisi. Worst-case sync posisi akan otomatis turun ke $\sim 80\text{--}90\text{ s}$, dan batas watchdog dapat ditinjau ulang untuk diturunkan kembali saat itu.
+
+---
+
+## 3b. Status Pilar 1 & Pilar 3 (3a–3e)
+
+**Status:** ✅ **Pilar 1 + Pilar 3 (3a–3e) SELESAI LENGKAP**, siap diuji di staging.
+- **3a:** Token kepemilikan sync watchdog (`guardedJob`).
+- **3b:** Persistent store MCCS Map, boundary purge, rotasi ~2,7 menit (7s interval, ~7,1 req/s).
+- **3c:** Audit pemanggil `getPositions` membuktikan default `fetchMccs: false` aman bagi seluruh endpoint.
+- **3d:** `guardedJob` pada worker MCCS + warning `missingCount` jika ada device tanpa MCCS setelah putaran 1.
+- **3e:** Timeout request jalur sync diturunkan ke 10 s, watchdog disesuaikan ke 180 s, `_resetForTests` aman.
 
 ---
 
@@ -122,6 +133,7 @@ Tiga commit telah dibuat di branch `development`, **BELUM diuji di staging/produ
 2. **Retry 401 tanpa penanda anti-loop:** Interceptor MSPF dan FoxLogger melakukan `await axios(err.config)` pada 401. Jika token baru juga 401 (misal client credentials revoked), ini bisa infinite loop. Perlu penanda `_retry` di config atau batas 1x retry.
 3. **Batas jumlah halaman di loop pagination:** `getDevices`, `getDeviceMccsHistory`, `getDeviceStatsReports`, `getBcStatsReports` — semua loop `do/while(start)`. Jika upstream mengembalikan `next` tak terhingga, loop tak berhenti. Perlu batas max pages (misal 100).
 4. **Device baru terhitung missingCount sampai rotasi mencapainya:** Jika device baru ditambahkan ke `devices:merged` saat aplikasi berjalan, device tersebut dapat terhitung sebagai `missingCount` sementara sampai rotasi background MCCS menjangkaunya (warning palsu sementara, prioritas rendah).
+5. **Paralelisasi pagination status MSPF:** Pemanggilan status MSPF di `enrichPositions` saat ini berjalan sekuensial (6 halaman berurutan). Jika upstream API MSPF mendukung paging paralel via start/offset, pengambilan status berpotensi diparalelkan untuk memangkas waktu dari ~60s ke ~10s (prioritas rendah).
 
 ---
 
@@ -161,8 +173,5 @@ Tiga commit telah dibuat di branch `development`, **BELUM diuji di staging/produ
 
 ## 8. Langkah Berikutnya untuk Sesi Baru
 
-1. ~~Perbaiki poin **3a** (token kepemilikan sync watchdog).~~ ✅ Selesai (`d9b0e2a`).
-2. ~~Selesaikan **3b & 3d** (rotasi MCCS, persistent store, guardedJob, missingCount, tes).~~ ✅ Selesai (siap commit).
-3. ~~Perbaiki poin **3c** (audit pemanggil `getPositions`).~~ ✅ Selesai (audit membuktikan tidak perlu perubahan kode).
-4. Deploy dan uji commit di staging, pantau log `[PositionSync]` dan `[MccsWorker]`.
-5. Kerjakan Pilar 2 (`devices:merged` Stale-While-Revalidate & Single-Flight Rebuild).
+1. **Uji di Staging:** Deploy dan pantau log container (`[PositionSync]`, `[MccsWorker]`) terhadap warning timeout, durasi siklus, dan kelengkapan data.
+2. **Pilar 2 di Session Baru:** Implementasikan *Stale-While-Revalidate* + *Single-Flight Rebuild* pada `devices:merged`. Setelah Pilar 2 aktif, rebuild device tidak lagi membebani jalur sync posisi, dan batas watchdog dapat ditinjau ulang kembali ke ~90–120 s.
