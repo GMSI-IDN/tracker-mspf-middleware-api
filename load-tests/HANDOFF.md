@@ -9,15 +9,15 @@ Dokumen serah terima teknis untuk agent sesi berikutnya. Tanpa pujian, padat fak
 | Iterasi | Status | File Diubah |
 |---|---|---|
 | **3a** | ✅ Commit `d9b0e2a` | `src/utils/guardedJob.js`, `src/services/positionSync.js`, `src/__tests__/guardedJob.test.js`, `src/__tests__/positionSyncGuard.test.js`, `src/__tests__/positionSyncMetrics.test.js` |
-| **3b & 3d** | ✅ Commit `f659556` | `src/services/mspf.js`, `src/utils/guardedJob.js`, `src/__tests__/mccsWorkerCoverage.test.js`, `load-tests/scripts/prove-mccs-coverage.js` |
+| **3b & 3d** | ✅ Commit `c519381` | `src/services/mspf.js`, `src/utils/guardedJob.js`, `src/__tests__/mccsWorkerCoverage.test.js`, `load-tests/scripts/prove-mccs-coverage.js` |
 | **3c** | ✅ Audit selesai | Tidak ada kode diubah (semua pemanggil aman) |
-| **3e** | ✅ Selesai, siap commit | `src/services/positionSync.js`, `src/services/traccar.js`, `src/services/foxlogger.js`, `src/services/mspf.js`, `src/utils/guardedJob.js`, `src/__tests__/positionSyncGuard.test.js`, `src/__tests__/mccsDecoupling.test.js` |
+| **3e** | ✅ Commit `7759324` & `65f4aee` | `src/services/positionSync.js`, `src/services/traccar.js`, `src/services/foxlogger.js`, `src/services/mspf.js`, `src/utils/guardedJob.js`, `src/__tests__/positionSyncGuard.test.js`, `src/__tests__/mccsDecoupling.test.js` |
 
 ---
 
 ## 1. Status Commit Git (Local Development Branch)
 
-Tiga commit telah dibuat di branch `development`, **BELUM diuji di staging/production**:
+Commit fondasi dan Pilar 1+3 telah dibuat di branch `development`, **BELUM diuji di staging/production**:
 1. `4f645d6` — `perf(cache): disable useClones with safe shallow-copy boundaries`
    - `useClones: false` di `src/services/cache.js`.
    - Shallow copy di titik mutasi: `groupMembership.js` (`customGroups`), `positions.js`, `reports.js` (`master.devices`), `engineControl.js` (`transitionSeen`, `updateMergedDeviceCache`).
@@ -29,10 +29,16 @@ Tiga commit telah dibuat di branch `development`, **BELUM diuji di staging/produ
    - Pilar 1: `isSyncing` guard + watchdog timeout 120s di `positionSync.js`.
    - Pilar 3: Fast position sync (positions + status, tanpa MCCS history) + background MCCS worker (chunk 50, interval 15s, jittered TTL 30–60s).
    - Unit test `positionSyncGuard.test.js` dan `mccsDecoupling.test.js`.
+4. `d9b0e2a` — `fix(sync): guarded job with ownership token for position sync (3a)`
+   - Helper `guardedJob` dengan token kepemilikan dan timeout watchdog untuk mencegah tumpang tindih sync dan race condition.
+5. `c519381` — `fix(mccs): persistent MCCS store, guardedJob worker, missingCount (3b+3d)`
+   - Redesign worker MCCS: persistent store (tanpa TTL), fetch-time tracking, `guardedJob` wrapper dengan token kepemilikan, boundary purge, tracking `missingCount` & `staleCount`, cycle stats.
+6. `7759324` — `fix(sync): 10s request timeout on position sync path (3e)`
+   - Batas timeout 10s untuk pemanggilan upstream di jalur sync posisi agar skenario worst-case terkendali.
+7. `65f4aee` — `fix(sync): raise position sync watchdog to 180s (3e follow-up)`
+   - Watchdog dinaikkan ke 180s untuk memberikan headroom aman bagi worst-case sync (rebuild device + enrich status + network jitter) tanpa false timeout.
 
-**Perubahan lokal (belum commit):**
-- **3b & 3d**: Redesign worker MCCS — persistent store (tanpa TTL), fetch-time tracking, `guardedJob` wrapper dengan ownership token, boundary purge, tracking `missingCount` & `staleCount`, cycle stats.
-- **3c**: Audit pemanggil `getPositions` selesai — tidak ada kode yang perlu diubah.
+**Working tree:** Bersih (`working tree clean`). Semua perubahan kode Pilar 1 + 3 (3a–3e) sudah ter-commit.
 
 ---
 
@@ -41,9 +47,12 @@ Tiga commit telah dibuat di branch `development`, **BELUM diuji di staging/produ
 1. **Jalur A (Cache Endpoints):**
    - Sebelum (`useClones: true`): p95 1.863 ms (20 RPS), jenuh di 100 RPS (p95 4.676 ms), kapasitas aman 35–50 RPS.
    - Sesudah (`useClones: false`): p95 7,9 ms (20 RPS), 12,1 ms (50 RPS), 12–30 ms (100 RPS), 125–232 ms (200 RPS). Jenuh di 250–300 RPS. Kapasitas aman naik ke 150–180 RPS.
-2. **Fase C (WebSocket Concurrency):**
-   - Lolos sampai 1.000 soket (handshake p95 28 ms, fan-out p95 185 ms, siklus p95 401 ms, error 0%).
+2. **Fase C (WebSocket Concurrency) & Hasil C4 Terkini:**
+   - Lolos sampai 1.000 soket pada pengujian awal (handshake p95 28 ms, fan-out p95 185 ms, siklus p95 401 ms, error 0%).
    - Tingkat 2.000 user **TIDAK VALID**: CPU runner load tester mencapai 90%, handshake 10,3 s, error 4,85%.
+   - **Temuan Verifikasi C4 @150 user (Mock Realistis):** Waktu siklus p95 naik dari 60–203 ms ke **1.923 ms**. Penyebab: mock lama hanya menggerakkan kendaraan di sebagian grup (~7 vs ~96 event/client/siklus), sehingga hasil Fase C sebelumnya terlalu optimis.
+   - **Perkiraan di server (~2x lebih lambat):** Pada 150 user, waktu siklus p95 di server berpotensi melewati ambang batas SLA 3 detik (3.000 ms). Beban produksi saat ini (~50 user) masih berada dalam batas aman.
+   - **Penyesuaian Ambang Batas Backlog:** Pemicu optimasi emit diturunkan ke **~100 user bersamaan**. Tangga WebSocket (C2–C3) perlu diulang dengan mock realistis sebelum jumlah user mendekati angka tersebut.
 3. **C5a (Thundering Herd 5 detik):**
    - 50 user: Handshake p95 44 ms, HTTP p95 < 27 ms (Lolos).
    - 150 user: Handshake p95 37 ms, HTTP p95 < 22 ms (Lolos).
@@ -122,7 +131,8 @@ Tiga commit telah dibuat di branch `development`, **BELUM diuji di staging/produ
 - Pemeriksaan log production untuk pola `concurrent execution detected`.
 - Skrip benchmark CPU (`cpu-bench.js`) pembanding laptop vs server.
 - Pengujian beban Jalur B (upstream reports & commands).
-- Soak test ulang 15–20 menit dengan mock moving ratio merata setelah perbaikan poin 3.
+- Soak test ulang 15–20 menit dengan mock moving ratio merata: ✅ Selesai (15 menit @150 VU, 1,3 juta event, 0 disconnect, 0 error, RSS stabil 342,6 $\to$ 354,4 MB).
+- Pengujian ulang tangga WebSocket (C2–C3) dengan mock realistis sebelum user mendekati ~100.
 - Backlog di `load-tests/PLAYBOOK.md`.
 
 ---
