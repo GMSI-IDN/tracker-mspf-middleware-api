@@ -35,7 +35,7 @@ function populateDevices(count) {
   for (let i = 1; i <= count; i++) {
     devices.push({ id: i, source: 'mspf', group: 'mspf_1' });
   }
-  cache.set('devices:merged', devices, 600);
+  cache.set('devices:merged', devices, 86400);
 }
 
 describe('3b: MCCS Worker Coverage (fake timers, no real delays)', () => {
@@ -189,34 +189,31 @@ describe('3b: MCCS Worker Coverage (fake timers, no real delays)', () => {
     expect(stats.timeToFullMs).toBe(0);
   });
 
-  test('missingCount: devices that never got MCCS data are counted after first cycle', async () => {
+  test('missingCount: devices that fail with genuine errors are counted as missing', async () => {
     populateDevices(100);
 
-    // Mock API returns 404/null for devices > 80
     apiSpy.mockReturnValue({
       get: jest.fn(async (url) => {
         await new Promise(r => setTimeout(r, MOCK_DELAY_MS));
         const match = url.match(/\/device\/(\d+)\/data\/history/);
         const devId = match ? parseInt(match[1], 10) : 0;
-        if (devId > 80) return { data: { data: [] } };
+        if (devId > 80) throw new Error('upstream timeout');
         return { data: { data: [{ tid: 1, kph: 20 }] } };
       }),
       interceptors: { response: { use: jest.fn() } },
     });
 
-    // Before cycle completes (tick 1 of 2): missingCount is 0
     await runTicks(1);
     expect(mspf.getMccsStats().missingCount).toBe(0);
 
-    // Complete cycle (tick 2 of 2): now cycle 1 is done
     await runTicks(1);
     const stats = mspf.getMccsStats();
     expect(stats.storeSize).toBe(80);
-    // Devices 81..100 (20 devices) never got data -> missingCount = 20
     expect(stats.missingCount).toBe(20);
+    expect(stats.pausedCount).toBe(0);
   }, 15000);
 
-  test('failure classification and sample collection per category in getMccsStats', async () => {
+  test('failure classification and sample collection per category in getMccsStats (Iterasi 3f)', async () => {
     populateDevices(50);
 
     apiSpy.mockReturnValue({
@@ -225,22 +222,22 @@ describe('3b: MCCS Worker Coverage (fake timers, no real delays)', () => {
         const match = url.match(/\/device\/(\d+)\/data\/history/);
         const devId = match ? parseInt(match[1], 10) : 0;
         if (devId <= 10) return { data: { data: [] } };
-        if (devId <= 17) {
+        if (devId <= 15) {
           const err = new Error('Not Found');
           err.status = 404;
           throw err;
         }
-        if (devId <= 22) {
+        if (devId <= 20) {
           const err = new Error('Too Many Requests');
           err.status = 429;
           throw err;
         }
-        if (devId <= 27) {
+        if (devId <= 25) {
           const err = new Error('timeout of 10000ms exceeded');
           err.code = 'ECONNABORTED';
           throw err;
         }
-        if (devId <= 32) {
+        if (devId <= 30) {
           const err = new Error('Internal Server Error');
           err.status = 500;
           throw err;
@@ -257,22 +254,21 @@ describe('3b: MCCS Worker Coverage (fake timers, no real delays)', () => {
 
     const stats = mspf.getMccsStats();
     expect(stats.storeSize).toBe(15);
-    expect(stats.failures.empty_data).toBe(10);
-    expect(stats.failures.http_404).toBe(7);
+    expect(stats.pausedCount).toBe(10);
+    expect(stats.failures.http_404).toBe(5);
     expect(stats.failures.http_429).toBe(5);
     expect(stats.failures.timeout).toBe(5);
     expect(stats.failures.http_5xx).toBe(5);
-    expect(stats.failures.other).toBe(3);
+    expect(stats.failures.other).toBe(5);
 
-    expect(stats.failureSamples.empty_data).toEqual([1, 2, 3, 4, 5]);
     expect(stats.failureSamples.http_404).toEqual([11, 12, 13, 14, 15]);
-    expect(stats.failureSamples.http_429).toEqual([18, 19, 20, 21, 22]);
-    expect(stats.failureSamples.timeout).toEqual([23, 24, 25, 26, 27]);
-    expect(stats.failureSamples.http_5xx).toEqual([28, 29, 30, 31, 32]);
-    expect(stats.failureSamples.other).toEqual([33, 34, 35]);
+    expect(stats.failureSamples.http_429).toEqual([16, 17, 18, 19, 20]);
+    expect(stats.failureSamples.timeout).toEqual([21, 22, 23, 24, 25]);
+    expect(stats.failureSamples.http_5xx).toEqual([26, 27, 28, 29, 30]);
+    expect(stats.failureSamples.other).toEqual([31, 32, 33, 34, 35]);
   }, 15000);
 
-  test('cycle failure summary and missing warning log once per full cycle, not per batch', async () => {
+  test('empty_data enters jeda, does not trigger missing/stale warning, logs info with data and paused count', async () => {
     const { logger } = require('../middleware/logger');
     const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
     const infoSpy = jest.spyOn(logger, 'info').mockImplementation(() => {});
@@ -286,39 +282,211 @@ describe('3b: MCCS Worker Coverage (fake timers, no real delays)', () => {
           const match = url.match(/\/device\/(\d+)\/data\/history/);
           const devId = match ? parseInt(match[1], 10) : 0;
           if (devId > 80) return { data: { data: [] } };
-          return { data: { data: [{ tid: 1, kph: 20 }] } };
+          return { data: { data: [{ tid: devId, kph: 20 }] } };
         }),
         interceptors: { response: { use: jest.fn() } },
       });
 
+      await runTicks(2);
       await runTicks(1);
-      const batch1MissingWarns = warnSpy.mock.calls.filter(([msg]) =>
+
+      const stats = mspf.getMccsStats();
+      expect(stats.storeSize).toBe(80);
+      expect(stats.pausedCount).toBe(20);
+      expect(stats.missingCount).toBe(0);
+      expect(stats.staleCount).toBe(0);
+
+      const missingWarns = warnSpy.mock.calls.filter(([msg]) =>
         typeof msg === 'string' && msg.includes('missing MCCS data')
       );
-      expect(batch1MissingWarns.length).toBe(0);
+      expect(missingWarns.length).toBe(0);
 
-      await runTicks(1);
-      const batch2MissingWarns = warnSpy.mock.calls.filter(([msg]) =>
-        typeof msg === 'string' && msg.includes('missing MCCS data')
-      );
-      expect(batch2MissingWarns.length).toBe(0);
-
-      await runTicks(1);
-      const cycleBoundaryMissingWarns = warnSpy.mock.calls.filter(([msg]) =>
-        typeof msg === 'string' && msg.includes('missing MCCS data')
-      );
-      expect(cycleBoundaryMissingWarns.length).toBe(1);
-      expect(cycleBoundaryMissingWarns[0][0]).toContain('20 device(s) missing MCCS data after full cycle');
-
-      const cycleFailuresLog = warnSpy.mock.calls.filter(([msg]) =>
+      const failureWarns = warnSpy.mock.calls.filter(([msg]) =>
         typeof msg === 'string' && msg.includes('cycle failures')
       );
-      expect(cycleFailuresLog.length).toBe(1);
-      expect(cycleFailuresLog[0][0]).toContain('empty_data=20');
-      expect(cycleFailuresLog[0][0]).toContain('samples: 81, 82, 83, 84, 85');
+      expect(failureWarns.length).toBe(0);
+
+      const cycleDevicesInfo = infoSpy.mock.calls.filter(([msg]) =>
+        typeof msg === 'string' && msg.includes('cycle devices:')
+      );
+      expect(cycleDevicesInfo.length).toBeGreaterThanOrEqual(1);
+      expect(cycleDevicesInfo[0][0]).toContain('80 with data, 20 paused');
     } finally {
       warnSpy.mockRestore();
       infoSpy.mockRestore();
     }
   }, 15000);
+
+  test('device in jeda is skipped in subsequent cycles and retried after 30 minutes', async () => {
+    populateDevices(100);
+
+    const callRecord = [];
+    apiSpy.mockReturnValue({
+      get: jest.fn(async (url) => {
+        await new Promise(r => setTimeout(r, MOCK_DELAY_MS));
+        const match = url.match(/\/device\/(\d+)\/data\/history/);
+        const devId = match ? parseInt(match[1], 10) : 0;
+        callRecord.push(devId);
+        if (devId > 80) return { data: { data: [] } };
+        return { data: { data: [{ tid: devId, kph: 20 }] } };
+      }),
+      interceptors: { response: { use: jest.fn() } },
+    });
+
+    // Cycle 1: queries devices 1..100 (2 ticks: 1..50, 51..100)
+    await runTicks(2);
+    expect(mspf.getMccsStats().pausedCount).toBe(20);
+
+    // Cycle 2 starts on tick 3
+    callRecord.length = 0;
+    // Cycle 2 has only 80 unpaused devices (takes 2 ticks: 1..50, 51..80)
+    await runTicks(2);
+
+    // Verify devices 81..100 were NOT called in Cycle 2
+    const queriedOver80 = callRecord.filter(id => id > 80);
+    expect(queriedOver80.length).toBe(0);
+    expect(callRecord.length).toBe(80);
+
+    // Fast-forward past max randomized pause (36 minutes)
+    await jest.advanceTimersByTimeAsync(36 * 60 * 1000);
+
+    // Cycle 3 starts: paused devices are unpaused and retried
+    callRecord.length = 0;
+    await runTicks(2);
+    const retriedOver80 = callRecord.filter(id => id > 80);
+    expect(retriedOver80.length).toBeGreaterThan(0);
+  }, 30000);
+
+  test('reactivation: device in jeda with newer deviceTime is unpaused and prioritized in next batch', async () => {
+    populateDevices(100);
+
+    const callOrder = [];
+    let device95HasData = false;
+    apiSpy.mockReturnValue({
+      get: jest.fn(async (url) => {
+        await new Promise(r => setTimeout(r, MOCK_DELAY_MS));
+        const match = url.match(/\/device\/(\d+)\/data\/history/);
+        const devId = match ? parseInt(match[1], 10) : 0;
+        callOrder.push(devId);
+        if (devId > 80) {
+          if (devId === 95 && device95HasData) {
+            return { data: { data: [{ tid: 95, kph: 20 }] } };
+          }
+          return { data: { data: [] } };
+        }
+        return { data: { data: [{ tid: devId, kph: 20 }] } };
+      }),
+      interceptors: { response: { use: jest.fn() } },
+    });
+
+    // Run cycle 1 so devices 81..100 enter jeda
+    await runTicks(2);
+    expect(mspf.getMccsStats().pausedCount).toBe(20);
+
+    // Device 95 now starts reporting MCCS data upstream
+    device95HasData = true;
+
+    // Simulate position sync receiving newer deviceTime for device 95
+    const baseTime = Date.now() + 60000;
+    mspf.notifyDevicePosition(95, new Date(baseTime).toISOString());
+
+    // Device 95 is queued for priority
+    const statsAfterReactivation = mspf.getMccsStats();
+    expect(statsAfterReactivation.priorityQueueLength).toBe(1);
+
+    // Clear call order and run next tick
+    callOrder.length = 0;
+    await runTicks(1);
+
+    // Device 95 must be at the very front of the next batch!
+    expect(callOrder[0]).toBe(95);
+
+    // Since mock returned valid data for 95, it is unpaused and in store!
+    const statsAfterSuccess = mspf.getMccsStats();
+    expect(statsAfterSuccess.pausedCount).toBe(19);
+    expect(mspf.getMccsForDevice(95)).toBeDefined();
+  }, 20000);
+
+  test('prevents repeated reactivation loop: device with empty_data enters full pause after 1 reactivation and ignores deviceTime', async () => {
+    populateDevices(50);
+
+    const queriedDeviceIds = [];
+    apiSpy.mockReturnValue({
+      get: jest.fn(async (url) => {
+        await new Promise(r => setTimeout(r, MOCK_DELAY_MS));
+        const match = url.match(/\/device\/(\d+)\/data\/history/);
+        const devId = match ? parseInt(match[1], 10) : 0;
+        queriedDeviceIds.push(devId);
+        // Device 50 has active GPS pings but NO MCCS data (always empty)
+        return { data: { data: [] } };
+      }),
+      interceptors: { response: { use: jest.fn() } },
+    });
+
+    // Tick 1: all 50 devices return empty_data and enter jeda
+    await runTicks(1);
+    expect(mspf.getMccsStats().pausedCount).toBe(50);
+
+    // 1st reactivation: GPS position sync sends fresh deviceTime for device 50
+    mspf.notifyDevicePosition(50, new Date(Date.now() + 10000).toISOString());
+    expect(mspf.getMccsStats().priorityQueueLength).toBe(1);
+
+    // Next tick runs: queries device 50 from priority queue
+    queriedDeviceIds.length = 0;
+    await runTicks(1);
+    expect(queriedDeviceIds).toContain(50);
+
+    // Device 50 returned empty_data again -> MUST enter full pause (hardJeda)
+    expect(mspf.getMccsStats().priorityQueueLength).toBe(0);
+
+    // Continuous GPS updates keep arriving for device 50 every 10 seconds
+    mspf.notifyDevicePosition(50, new Date(Date.now() + 20000).toISOString());
+    mspf.notifyDevicePosition(50, new Date(Date.now() + 30000).toISOString());
+    mspf.notifyDevicePosition(50, new Date(Date.now() + 40000).toISOString());
+
+    // Device 50 signals MUST be ignored! It must NOT be added to priorityQueue
+    expect(mspf.getMccsStats().priorityQueueLength).toBe(0);
+
+    // Run next tick: device 50 should NOT be queried
+    queriedDeviceIds.length = 0;
+    await runTicks(1);
+    expect(queriedDeviceIds).not.toContain(50);
+
+    // After full pause expires (36 minutes later), device 50 is unpaused and retried
+    await jest.advanceTimersByTimeAsync(36 * 60 * 1000);
+    queriedDeviceIds.length = 0;
+    await runTicks(1);
+    expect(queriedDeviceIds).toContain(50);
+  }, 25000);
+
+  test('prior MCCS data remains in store when device later enters jeda', async () => {
+    populateDevices(50);
+
+    let shouldReturnEmpty = false;
+    apiSpy.mockReturnValue({
+      get: jest.fn(async (url) => {
+        await new Promise(r => setTimeout(r, MOCK_DELAY_MS));
+        if (shouldReturnEmpty) return { data: { data: [] } };
+        return { data: { data: [{ tid: 101, kph: 45, volt: 12.8 }] } };
+      }),
+      interceptors: { response: { use: jest.fn() } },
+    });
+
+    // Cycle 1: device 1 gets valid MCCS data
+    await runTicks(1);
+    const initialData = mspf.getMccsForDevice(1);
+    expect(initialData).toBeDefined();
+    expect(initialData.kph).toBe(45);
+
+    // Fast-forward past max randomized pause (36 minutes), now mock returns empty_data
+    await jest.advanceTimersByTimeAsync(36 * 60 * 1000);
+    shouldReturnEmpty = true;
+
+    await runTicks(1);
+    // Device enters jeda, but prior MCCS data is preserved!
+    expect(mspf.getMccsStats().pausedCount).toBe(50);
+    const preservedData = mspf.getMccsForDevice(1);
+    expect(preservedData).toBeDefined();
+    expect(preservedData.kph).toBe(45);
+  }, 20000);
 });

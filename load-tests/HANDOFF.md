@@ -144,6 +144,7 @@ Commit fondasi dan Pilar 1+3 telah dibuat di branch `development`, **BELUM diuji
 3. **Batas jumlah halaman di loop pagination:** `getDevices`, `getDeviceMccsHistory`, `getDeviceStatsReports`, `getBcStatsReports` — semua loop `do/while(start)`. Jika upstream mengembalikan `next` tak terhingga, loop tak berhenti. Perlu batas max pages (misal 100).
 4. **Device baru terhitung missingCount sampai rotasi mencapainya:** Jika device baru ditambahkan ke `devices:merged` saat aplikasi berjalan, device tersebut dapat terhitung sebagai `missingCount` sementara sampai rotasi background MCCS menjangkaunya (warning palsu sementara, prioritas rendah).
 5. **Paralelisasi pagination status MSPF:** Pemanggilan status MSPF di `enrichPositions` saat ini berjalan sekuensial (6 halaman berurutan). Jika upstream API MSPF mendukung paging paralel via start/offset, pengambilan status berpotensi diparalelkan untuk memangkas waktu dari ~60s ke ~10s (prioritas rendah).
+6. **Penyaringan device tidak aktif berbulan-bulan (keputusan produk, jangan dikerjakan):** ~40% device (~450 unit) tidak aktif berbulan-bulan (90–367 hari) tetapi tetap dimuat di `devices:merged`, `/api/devices`, dan `/api/positions`. Opsi menyembunyikan atau memisahkan device yang tidak aktif > N hari dapat mengurangi payload HTTP/WS ~40% dan menghemat memori.
 
 ---
 
