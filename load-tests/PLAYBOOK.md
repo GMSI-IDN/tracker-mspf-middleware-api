@@ -281,7 +281,7 @@ Rencana perbaikan (satu per iterasi):
 
 ### Backlog (dikerjakan hanya jika tes atau pertumbuhan user menunjukkan kebutuhan)
 
-- Optimasi emit WebSocket (hanya yang berubah sudah ada; berikutnya emit per grup lewat room atau batch per siklus). Pemicu: user bersamaan mendekati ~200–250, atau waktu siklus di production > 1 detik.
+- Optimasi emit WebSocket (hanya yang berubah sudah ada; berikutnya emit per grup lewat room atau batch per siklus). Pemicu: diturunkan ke ~100 user bersamaan (waktu siklus C4 @150 user naik dari 60–203 ms ke 1.923 ms di laptop dengan mock realistis karena mock lama hanya menggerakkan kendaraan di sebagian grup; di server ~2x lebih lambat, 150 user bisa melewati batas SLA 3 s, sementara 50 user saat ini masih aman). Tangga WebSocket (C2–C3) perlu diulang dengan mock realistis sebelum user mendekati angka itu.
 - Aktifkan `compression`, diukur sebagai iterasi terpisah. Cek dulu reverse proxy di production.
 - Cache `device_groups` dengan TTL atau invalidasi berbasis event.
 - Response cache `/api/positions` 2–3 detik. Kunci cache wajib per user atau cakupan device, tidak boleh per role.
