@@ -138,7 +138,7 @@ function maybeHeartbeat() {
 
 const guardedSync = guardedJob({
   name: 'PositionSync',
-  timeoutMs: 120000,
+  timeoutMs: 180000,
   jobFn: syncPositionsImpl,
 });
 
