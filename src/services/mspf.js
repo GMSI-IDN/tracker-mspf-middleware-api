@@ -154,7 +154,46 @@ const MCCS_CHUNK_SIZE = 50;
 const MCCS_CONCURRENCY = 10;
 const MCCS_WORKER_INTERVAL_MS = 7000;
 
-async function getLatestMccsData(deviceId) {
+function createEmptyFailureStats() {
+  return {
+    empty_data: { count: 0, sampleIds: [] },
+    timeout: { count: 0, sampleIds: [] },
+    http_404: { count: 0, sampleIds: [] },
+    http_429: { count: 0, sampleIds: [] },
+    http_5xx: { count: 0, sampleIds: [] },
+    other: { count: 0, sampleIds: [] },
+  };
+}
+
+let mccsFailureStats = createEmptyFailureStats();
+let mccsLastCycleFailures = null;
+
+function recordMccsFailure(category, deviceId) {
+  const key = mccsFailureStats[category] ? category : 'other';
+  mccsFailureStats[key].count++;
+  if (mccsFailureStats[key].sampleIds.length < 5) {
+    mccsFailureStats[key].sampleIds.push(deviceId);
+  }
+}
+
+function classifyMccsError(err) {
+  if (!err || typeof err !== 'object') return 'other';
+  if (
+    err.code === 'ECONNABORTED' ||
+    err.code === 'ERR_TIMEOUT' ||
+    err.status === 504 ||
+    (typeof err.message === 'string' && err.message.toLowerCase().includes('timeout'))
+  ) {
+    return 'timeout';
+  }
+  const status = err.status || err.response?.status;
+  if (status === 404) return 'http_404';
+  if (status === 429) return 'http_429';
+  if (status >= 500 && status < 600) return 'http_5xx';
+  return 'other';
+}
+
+async function fetchLatestMccsRecord(deviceId) {
   try {
     const res = await getApi().get(`/v2/device/${deviceId}/data/history`, {
       params: { to: new Date().toISOString(), limit: 5 },
@@ -162,12 +201,17 @@ async function getLatestMccsData(deviceId) {
     });
     const items = res.data?.data;
     if (items && items.length > 0) {
-      return items[items.length - 1];
+      return { ok: true, data: items[items.length - 1] };
     }
-    return null;
-  } catch {
-    return null;
+    return { ok: false, errorType: 'empty_data' };
+  } catch (err) {
+    return { ok: false, errorType: classifyMccsError(err), error: err };
   }
+}
+
+async function getLatestMccsData(deviceId) {
+  const result = await fetchLatestMccsRecord(deviceId);
+  return result.ok ? result.data : null;
 }
 
 function getMccsForDevice(deviceId) {
@@ -795,6 +839,33 @@ async function runMccsSyncImpl(isActive) {
       mccsCompletedCycles++;
       const cycleDuration = Date.now() - mccsCycleStats.cycleStartedAt;
       logger.info(`[MccsWorker] cycle completed: ${mccsCycleStats.fetchedThisCycle}/${mccsCycleStats.totalDevices} in ${cycleDuration}ms`);
+
+      const failureParts = [];
+      for (const [category, data] of Object.entries(mccsFailureStats)) {
+        if (data.count > 0) {
+          const samples = data.sampleIds.length > 0 ? ` (samples: ${data.sampleIds.join(', ')})` : '';
+          failureParts.push(`${category}=${data.count}${samples}`);
+        }
+      }
+      if (failureParts.length > 0) {
+        logger.warn(`[MccsWorker] cycle failures: ${failureParts.join('; ')}`);
+      }
+
+      const staleCount = mspfIds.filter(id => {
+        const t = mccsFetchTimes.get(id);
+        return t && (Date.now() - t) > MCCS_STALE_THRESHOLD_MS;
+      }).length;
+      const missingCount = mspfIds.filter(id => !mccsFetchTimes.has(id)).length;
+
+      if (staleCount > 0) {
+        logger.warn(`[MccsWorker] ${staleCount} device(s) with stale MCCS data (>5min)`);
+      }
+      if (missingCount > 0) {
+        logger.warn(`[MccsWorker] ${missingCount} device(s) missing MCCS data after full cycle`);
+      }
+
+      mccsLastCycleFailures = JSON.parse(JSON.stringify(mccsFailureStats));
+      mccsFailureStats = createEmptyFailureStats();
     }
     const activeSet = new Set(mspfIds);
     for (const id of mccsStore.keys()) {
@@ -818,14 +889,18 @@ async function runMccsSyncImpl(isActive) {
   let successCount = 0;
   for (let i = 0; i < slice.length; i += MCCS_CONCURRENCY) {
     const batch = slice.slice(i, i + MCCS_CONCURRENCY);
-    const fetched = await Promise.allSettled(batch.map(id => getLatestMccsData(id)));
+    const fetched = await Promise.allSettled(batch.map(id => fetchLatestMccsRecord(id)));
     for (let j = 0; j < batch.length; j++) {
       const id = batch[j];
-      const data = fetched[j].status === 'fulfilled' ? fetched[j].value : null;
-      if (data && isActive()) {
-        mccsStore.set(id, data);
+      const outcome = fetched[j].status === 'fulfilled'
+        ? fetched[j].value
+        : { ok: false, errorType: classifyMccsError(fetched[j].reason) };
+      if (outcome.ok && outcome.data && isActive()) {
+        mccsStore.set(id, outcome.data);
         mccsFetchTimes.set(id, Date.now());
         successCount++;
+      } else {
+        recordMccsFailure(outcome.errorType || 'other', id);
       }
     }
   }
@@ -838,21 +913,7 @@ async function runMccsSyncImpl(isActive) {
     mccsCycleStats.timeToFullMs = mccsFirstFullAt - mccsCycleStats.cycleStartedAt;
     logger.info(`[MccsWorker] 100% coverage reached in ${mccsCycleStats.timeToFullMs}ms`);
   }
-  const staleCount = mspfIds.filter(id => {
-    const t = mccsFetchTimes.get(id);
-    return t && (Date.now() - t) > MCCS_STALE_THRESHOLD_MS;
-  }).length;
-  const isFirstCycleDone = mccsCompletedCycles >= 1 || (mccsSyncOffset >= mspfIds.length && mspfIds.length > 0);
-  const missingCount = isFirstCycleDone
-    ? mspfIds.filter(id => !mccsFetchTimes.has(id)).length
-    : 0;
 
-  if (staleCount > 0) {
-    logger.warn(`[MccsWorker] ${staleCount} device(s) with stale MCCS data (>5min)`);
-  }
-  if (missingCount > 0) {
-    logger.warn(`[MccsWorker] ${missingCount} device(s) missing MCCS data after full cycle`);
-  }
   logger.info(`[MccsWorker] batch ${slice.length} devs, ${successCount} ok, coverage ${covered}/${mspfIds.length}`);
 }
 
@@ -889,6 +950,18 @@ function getMccsStats() {
     ? mspfIds.filter(id => !mccsFetchTimes.has(id)).length
     : 0;
 
+  const currentFailuresTotal = Object.values(mccsFailureStats).reduce((sum, f) => sum + f.count, 0);
+  const activeFailures = (currentFailuresTotal === 0 && mccsLastCycleFailures)
+    ? mccsLastCycleFailures
+    : mccsFailureStats;
+
+  const failures = {};
+  const failureSamples = {};
+  for (const [k, v] of Object.entries(activeFailures)) {
+    failures[k] = v.count;
+    failureSamples[k] = [...v.sampleIds];
+  }
+
   return {
     storeSize: mccsStore.size,
     isSyncing: guardedMccsSync.isRunning(),
@@ -902,6 +975,8 @@ function getMccsStats() {
     missingCount,
     timeToFullMs: mccsCycleStats.timeToFullMs,
     completedCycles: mccsCompletedCycles,
+    failures,
+    failureSamples,
   };
 }
 
@@ -913,6 +988,8 @@ function resetMccsWorkerState() {
   mccsFirstFullAt = 0;
   mccsStore.clear();
   mccsFetchTimes.clear();
+  mccsFailureStats = createEmptyFailureStats();
+  mccsLastCycleFailures = null;
 }
 
 module.exports = {
