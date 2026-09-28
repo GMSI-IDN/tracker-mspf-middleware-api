@@ -1025,14 +1025,38 @@ describe('Admin Custom Groups', () => {
     expect(res.body.code).toBe('ERR_CONFLICT');
   });
 
-  test('GET /api/admin/device-groups returns list with device_name', async () => {
-    const res = await request(app)
-      .get('/api/admin/device-groups')
+  test('GET /api/admin/device-groups returns list with deviceName', async () => {
+    const groupRes = await request(app)
+      .get('/api/admin/groups')
       .set('Authorization', `Bearer ${token}`);
-    expect(res.status).toBe(200);
-    expect(Array.isArray(res.body.deviceGroups)).toBe(true);
-    if (res.body.deviceGroups.length > 0) {
-      expect(res.body.deviceGroups[0]).toHaveProperty('device_name');
+    const gId = groupRes.body.groups.find(g => g.name === 'test_group')?.id || 1;
+
+    const testDevId = 9991;
+    const cache = require('../services/cache');
+    cache.set('devices:merged', [
+      { id: testDevId, name: 'Test Vehicle 9991', source: 'traccar' },
+    ], 60);
+
+    await db('device_groups').where({ device_id: testDevId, source: 'traccar' }).delete();
+    await db('device_groups').insert({
+      device_id: testDevId,
+      source: 'traccar',
+      group_id: gId,
+    });
+
+    try {
+      const res = await request(app)
+        .get('/api/admin/device-groups')
+        .set('Authorization', `Bearer ${token}`);
+      expect(res.status).toBe(200);
+      expect(Array.isArray(res.body.deviceGroups)).toBe(true);
+      expect(res.body.deviceGroups.length).toBeGreaterThan(0);
+      const item = res.body.deviceGroups.find(dg => dg.deviceId === testDevId);
+      expect(item).toBeDefined();
+      expect(item).toHaveProperty('deviceName');
+      expect(item.deviceName).toBe('Test Vehicle 9991');
+    } finally {
+      await db('device_groups').where({ device_id: testDevId, source: 'traccar' }).delete();
     }
   });
 
