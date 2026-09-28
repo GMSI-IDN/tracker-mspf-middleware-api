@@ -61,7 +61,7 @@ describe('Pilar 1: PositionSync GuardedJob Integration', () => {
     expect(traccar.getPositions).toHaveBeenCalledTimes(2);
   });
 
-  test('watchdog membuka kunci setelah timeout 120s', async () => {
+  test('watchdog membuka kunci setelah timeout 180s', async () => {
     jest.useFakeTimers();
     try {
       mspf.getPositions.mockImplementationOnce(() => new Promise(() => {}));
@@ -72,7 +72,7 @@ describe('Pilar 1: PositionSync GuardedJob Integration', () => {
       await positionSync.syncPositions();
       expect(traccar.getPositions).toHaveBeenCalledTimes(1);
 
-      await jest.advanceTimersByTimeAsync(121000);
+      await jest.advanceTimersByTimeAsync(181000);
 
       await positionSync.syncPositions();
       expect(traccar.getPositions).toHaveBeenCalledTimes(2);
@@ -92,7 +92,7 @@ describe('Pilar 1: PositionSync GuardedJob Integration', () => {
 
       const stalePromise = positionSync.syncPositions();
 
-      await jest.advanceTimersByTimeAsync(121000);
+      await jest.advanceTimersByTimeAsync(181000);
 
       traccar.getPositions.mockResolvedValueOnce([
         { deviceId: 101, source: 'traccar', speed: 10, latitude: -6.2, longitude: 106.8 },
@@ -128,7 +128,7 @@ describe('Pilar 1: PositionSync GuardedJob Integration', () => {
 
       const p1 = positionSync.syncPositions();
 
-      await jest.advanceTimersByTimeAsync(121000);
+      await jest.advanceTimersByTimeAsync(181000);
 
       let resolve2;
       traccar.getPositions.mockResolvedValueOnce([
