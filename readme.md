@@ -31,7 +31,7 @@ Semua data dari **MSPF dinormalisasi ke format Traccar** agar FE tidak perlu han
 | Position list | `{ data: [{ deviceId, position: {...} }] }` | Flat array `[{id, deviceId, latitude, ...}]` |
 
 Field tambahan khusus Gateway (ada di semua device):
-- `source: 'traccar' | 'mspf'` — asal data
+- `source: 'traccar' | 'mspf' | 'foxlogger'` — asal data
 - `group: 'traccar_5' | 'mspf_3'` — composite ID
 
 ## Document Revisions (v1.0.0 → v1.1.0)
@@ -66,7 +66,7 @@ The gateway acts as a Backend for Frontend (BFF) that abstracts away the complex
 
 | Requirement | Priority | Description |
 |-------------|----------|-------------|
-| Unified API | Critical | Single middleware API that aggregates device data from both Traccar and MSPF servers |
+| Unified API | Critical | Single middleware API that aggregates device data from Traccar, MSPF, and FoxLogger servers |
 | No Data Duplication | Critical | Historical GPS data remains only in respective source systems; Gateway stores only FE user credentials |
 | Zero MSPF Changes | Critical | No modifications to the MSPF server code required |
 | Centralized Authentication | High | Single sign-on mechanism for all API consumers |
@@ -86,7 +86,7 @@ The gateway acts as a Backend for Frontend (BFF) that abstracts away the complex
 | Stateless Architecture | No session persistence; all state managed via JWT |
 | Stateless GPS Proxy | Gateway uses memory/Redis to cache active device lists temporarily for pagination, ensuring no permanent GPS storage |
 | MSPF API Limitations | Gateway adapts to existing API structure; cannot modify MSPF system |
-| Network Requirements | Gateway must have network access to both backend systems |
+| Network Requirements | Gateway must have network access to all upstream backend systems |
 
 ---
 
@@ -625,20 +625,25 @@ interface Activation {
 
 ### 7.1 Caching Strategy
 
-| Aspect | Node-Cache (Development) | Redis (Production) |
-|--------|-------------------------|-------------------|
-| Setup | Zero configuration, in-process | Requires Redis server instance |
-| Data Persistence | Lost on restart | Persistent (RDB/AOF) |
-| Scalability | Single process only | Shared across multiple instances |
+| Aspect | Node-Cache (Development & Single-Instance Prod) | Redis (Multi-Instance Production) |
+|--------|-----------------------------------------------|-----------------------------------|
+| Setup | Zero configuration, in-process memory | Requires Redis server instance |
+| Object Cloning | `useClones: false` (Zero deep-clone overhead) | Serialized JSON strings |
+| Data Persistence | Ephemeral (rebuilt via background sync) | Persistent (RDB/AOF) |
+| Scalability | Single process only (~1 core Node.js) | Shared across multiple instances |
 | Use Case | Local dev, single-container Docker | Multi-replica K8s, high availability |
 
-**Recommendation:** Use Node-Cache for development and single-instance deployments. Use Redis for production deployments with multiple replicas to ensure cache consistency.
+**Catatan Invariant Cache:**
+- `src/services/cache.js` dikonfigurasi dengan `useClones: false` untuk mengeliminasi beban deep-clone (yang sebelumnya memakan 81% CPU pada profil `/api/positions`).
+- Referensi objek dari `cache.get()` **dilarang dimutasi langsung**. Wajib membuat shallow-copy sebelum modifikasi.
+- Telemetri MCCS disimpan secara persisten di in-memory `Map` terpisah (`mccsStore`) oleh background worker `MccsWorker` untuk memisahkan I/O MCCS dari jalur sinkronisasi posisi 10 detik.
 
 ### 7.2 Environment Variables (.env)
 
 | Variable | Required | Description | Example |
 |----------|----------|-------------|---------|
 | PORT | Yes | Gateway Application port | 3000 |
+| DB_DRIVER | No | Database driver: sqlite3 or pg | pg |
 | DB_HOST | Yes | Gateway Auth DB Host | localhost |
 | DB_PORT | No | Gateway Auth DB Port | 5432 |
 | DB_NAME | Yes | Gateway Auth DB Name | gateway_users |
@@ -653,10 +658,13 @@ interface Activation {
 | MSPF_CLIENT_ID | Yes | MSPF OAuth2 client ID | your_client_id |
 | MSPF_CLIENT_SECRET | Yes | MSPF OAuth2 client secret | your_client_secret |
 | MSPF_TOKEN_URL | No | Custom token URL (default: from MSPF_URL) | |
-| CACHE_TTL | No | Cache TTL in seconds | 300 |
+| FOXLOGGER_EMAIL | No | FoxLogger account email | user@example.com |
+| FOXLOGGER_PASSWORD | No | FoxLogger account password | secure_password |
+| CACHE_DEVICE_TTL | No | Device Cache TTL in seconds | 120 |
 | CACHE_PROVIDER | No | Cache backend: node-cache or redis | node-cache |
+| CACHE_FREEZE | No | Enable deep freeze on cache sets (for testing) | 0 atau 1 |
 | WEBSOCKET_PATH | No | WebSocket path | /api/ws |
-| MSPF_POLL_INTERVAL | No | MSPF polling interval (ms) | 10000 |
+| POLL_INTERVAL | No | Position sync poll interval (ms) | 10000 |
 | RATE_LIMIT_WINDOW_MS | No | Rate limit window (ms) | 60000 |
 | RATE_LIMIT_MAX | No | Max requests per window | 100 |
 | RATE_LIMIT_AUTH_MAX | No | Max login attempts per window | 20 |
@@ -672,7 +680,7 @@ interface Activation {
 | Transport | HTTPS | All API communication encrypted |
 | Authentication | JWT (Gateway DB) | Stateless token-based authentication against Gateway's own database |
 | Authorization | Role-based + Group/BC | User roles: admin, customer. Customers restricted to assigned groups/BCs |
-| M2M Auth | Basic Auth (Traccar) + OAuth2 (MSPF) | Traccar: Basic Auth via username/password. MSPF: OAuth2 client_credentials → Bearer token + auto-refresh |
+| M2M Auth | Traccar, MSPF, FoxLogger Auth | Traccar: Basic Auth. MSPF: OAuth2 client_credentials. FoxLogger: Basic Auth → JWT Bearer Token. |
 | Request Validation | Schema validation | Input validation using Joi/express-validator |
 | Rate Limiting | express-rate-limit | Prevent abuse and DDoS |
 | CORS | Configured origins | Restrict allowed domains |

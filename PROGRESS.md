@@ -247,6 +247,36 @@
 | **Integration Tests** — 4 test di `src/__tests__/customGroupSync.test.js` memverifikasi multi-sync, add mandiri, deduplikasi, dan trigger sync instan (total 238 test pass) | ✅ |
 | **Dokumentasi Invariant** — Dicatat di `AGENTS.md`, `CHANGELOG.md`, `API_REFERENCE.md`, `USER_GUIDE.md`, dan `PROGRESS.md` | ✅ |
 
+## Phase 10 — Core Performance Optimization, Upstream Decoupling & High-Concurrency Hardening (Pilar 1 + 3): ✅
+
+> **Status:** Selesai (✅) & **SUDAH AKTIF DI STAGING DAN PRODUCTION**.
+
+### 1. Rincian Pekerjaan Implementasi
+| Task | Status | Deskripsi |
+|------|:------:|-----------|
+| **Eliminasi Deep Clone CPU Overhead (`useClones: false`)** | ✅ | Profiling CPU pada `/api/positions` sebelumnya membuktikan **81% waktu CPU terbuang untuk deep clone** di NodeCache. Diperbaiki dengan `useClones: false` dan shallow-copy batas aman di titik mutasi (commit `4f645d6`). |
+| **Strict Mode & Linter Hardening** | ✅ | Menambahkan `'use strict'` di seluruh file `src/` dan menegakkan aturan ESLint `strict: ["error", "global"]` (commit `b9c75cc`). |
+| **Guarded Background Jobs (`guardedJob`)** | ✅ | Mencegah tumpukan eksekusi sync posisi (`positionSync`) menggunakan token kepemilikan unik (`Symbol`) dan watchdog timer 180s (commit `24035ae`, `d9b0e2a`, `65f4aee`). |
+| **Pemisahan (Decoupling) Worker MCCS** | ✅ | Pengambilan telemetri MCCS dipisahkan sepenuhnya dari jalur kritis sinkronisasi posisi ke worker mandiri (`MccsWorker`) dengan persistent `Map` store (`mccsStore`) (commit `24035ae`, `c519381`). |
+| **Batas Waktu Request Sync Path 10 Detik** | ✅ | Menyetel timeout 10s pada request sync Traccar, MSPF, dan FoxLogger agar kegagalan jaringan tidak memblokir siklus sync (commit `7759324`). |
+| **Jeda Device `empty_data` & Reaktivasi Dinamis** | ✅ | ~450 unit pasif (tidak aktif 90–367 hari) dijeda 25–35 menit dari rotasi worker. Unit diaktifkan kembali otomatis jika mengirimkan `deviceTime` baru (maksimal 1x per masa jeda) (commit `844f277`). |
+| **Klasifikasi Kegagalan MCCS** | ✅ | Mengklasifikasi error fetch MCCS (`timeout`, `404`, `429`, `5xx`, `other`) dan mencatat log ringkasan 1 baris per putaran siklus (commit `5795590`). |
+| **Ketahanan Jam Monoton (`performance.now()`)** | ✅ | Mengganti seluruh pengukuran durasi, elapsed time, watchdog, dan jeda ke `performance.now()` dengan sentinel awal `null` untuk mencegah false timeout akibat NTP sync/WSL2 drift (commit `5659af1`). |
+| **Perbaikan Tes `device-groups`** | ✅ | Mengoreksi assertion usang `device_name` menjadi `deviceName` di `src/__tests__/gateway.test.js` serta menerapkan deterministic seeding data (commit `d03b51e`). |
+
+### 2. Hasil Verifikasi Aktual di Server STAGING
+- **Durasi Sinkronisasi Posisi:** Selesai teratur dalam **4–8 detik** (turun drastis dari sebelumnya yang mencapai ~57 detik).
+- **Kesiapan Pasca-Restart:** Server siap menerima koneksi dalam **~2 detik** dan data posisi armada pertama kali tersedia dalam **~12 detik** (sebelumnya ~57 detik).
+- **Kinerja MCCS Worker:** Konsisten melaporkan `627 with data, ~456 paused` per putaran **~1,5 menit** tanpa cycle failure. Reaktivasi device aktif kembali dibatasi maksimal 1x per masa jeda.
+- **WebSocket & Frontend:** Koneksi WebSocket terverifikasi stabil, armada live bergerak di peta, dan waktu muat antarmuka web jauh lebih responsif.
+
+### 3. Hasil Pengujian Beban di Lingkungan LAPTOP (i5-12450HX, WSL2, Mock Upstream)
+*(Catatan: Angka di bawah adalah hasil di LAPTOP; perkiraan kapasitas server adalah ~setengahnya dan belum diukur langsung).*
+- **Jalur A (Cache Endpoints):** Kapasitas aman naik dari 35–50 RPS menjadi **150–180 RPS** (titik jenuh 250–300 RPS) dengan latensi p95 berkisar 12–30 ms pada 100 RPS.
+- **WebSocket Concurrency:** Lolos hingga 1.000 koneksi bersamaan pada pengujian awal.
+- **WebSocket C4 (Hybrid 150 VU, Mock Realistis):** Waktu siklus p95 mencapai **1.923 ms** di laptop, menunjukkan potensi mendekati batas SLA 3s jika di server, sehingga ambang batas pemicu optimasi emit diturunkan ke ~100 user.
+- **Soak Test (150 Soket, 45 Menit):** Memori RSS stabil (342,6 $\to$ 354,4 MB), 0 disconnect, 0 error.
+
 ## Phase 9 — Unified Command Mapping & MSPF engineResume Bug Fix: ✅
 
 | Task | Status |
@@ -358,4 +388,13 @@
   - *Alasan:* `resolveGroup` hanya fungsi alias passthrough untuk `getGroupSource` tanpa penambahan logika apa pun.
 - [ ] **Hapus inline `require('../services/cache')` di `src/routes/deviceGroups.js`**
   - *Alasan:* File tersebut sudah mengimpor `const cache = require('../services/cache')` di line 5. Pemanggilan ulang require di dalam scope fungsi bersifat redundan.
+
+### 4. Backlog Teknis & Temuan Baru
+- [ ] **Metrik `[WS Metrics]` selalu bernilai 0:** Log event loop monitor mencatat `messages=0 devices=0 positions=0 events=0` karena counter hanya di-increment oleh pesan WS Traccar langsung, sedangkan broadcast posisi mayoritas dipancarkan via `positionSync` (MSPF & FoxLogger).
+- [ ] **Pembersihan cache `devices:merged` pada tes `device-groups`:** `src/__tests__/gateway.test.js` memodifikasi cache `devices:merged` untuk fixture uji tanpa menyimpan dan mengembalikan state cache sebelumnya, berpotensi memengaruhi tes berikutnya jika urutan eksekusi berubah.
+- [ ] **Fallback `course` ke `dir` MCCS:** Pada `enrichPositions`, jika koordinat posisi tidak menyediakan `course`, nilainya mengambil `dir` MCCS yang berpotensi memicu emisi posisi berubah pada `emitChangeOnly`.
+- [ ] **Voltase kendaraan parkir tidak ter-update via WebSocket:** Filter `emitChangeOnly` menyaring kendaraan diam/parkir sehingga pembaruan atribut baterai/voltase pada kendaraan parkir tidak terkirim via event `position` sampai kendaraan bergerak atau halaman di-refresh.
+- [ ] **Log warning startup `GET /v2/bc/1 404`:** Panggilan `syncSourceGroupNames` di `autoSync.js` mencoba mengambil detail BC per ID numerik `/v2/bc/:id` yang tidak tersedia pada upstream MSPF (hanya `/v2/bc` list yang valid).
+- [ ] **Penanganan Open Handle Jest tanpa Branching `NODE_ENV`:** Modul tidak memulai worker latar belakang otomatis saat di-require, melainkan dimulai eksplisit dari `server.js` dan menyediakan fungsi stop/teardown untuk `afterAll`.
+
 

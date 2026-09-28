@@ -2,24 +2,37 @@
 
 ## Project Overview
 
-API Gateway yang menggabungkan data dari 2 server GPS — **Traccar** dan **MSPF** — menjadi 1 API endpoint untuk Frontend.
+API Gateway yang menggabungkan data dari 3 server GPS — **Traccar**, **MSPF**, dan **FoxLogger** — menjadi 1 API endpoint terpadu untuk Frontend.
 
 > Baca `readme.md` untuk spesifikasi arsitektur lengkap.
 > Baca `USER_GUIDE.md` untuk panduan dari sisi user.
+> Baca `load-tests/PLAYBOOK.md` untuk panduan load testing dan optimalisasi performa.
 
 ---
 
 ## Project Structure
 
 ```
-middleware-api-gps/
-├── src/                    # Source code (akan dibuat)
-│   ├── config/             # Konfigurasi (env, constants)
-│   ├── middleware/          # Express middleware (auth, logging, etc)
-│   ├── routes/             # Route handlers
-│   ├── services/           # Business logic (Traccar, MSPF, Gateway)
-│   ├── utils/              # Helper functions
-│   └── app.js              # Express app entry point
+tracker-mspf-middleware-api/
+├── src/                    # Source code
+│   ├── config/             # Konfigurasi (env, constants, driver DB)
+│   ├── db/                 # Knex connection & query builder
+│   ├── middleware/         # Express middleware (auth, rateLimiter, error, logging)
+│   ├── routes/             # Route handlers (devices, positions, reports, commands, dsb)
+│   ├── scripts/            # Migration & seed runner
+│   ├── services/           # Business logic (traccar, mspf, foxlogger, cache, positionSync)
+│   ├── utils/              # Helper functions (guardedJob, sanitizer, engineControl, dsb)
+│   ├── websocket/          # Socket.io server & event emitters
+│   ├── app.js              # Express app definition
+│   └── server.js           # Server bootstrap & background workers initialization
+├── load-tests/             # Load testing harness & mock upstream
+│   ├── mock-upstream/      # Mock server Traccar, MSPF, FoxLogger lokal
+│   ├── scripts/            # Script skenario Artillery, WebSocket runner, & preflight check
+│   ├── results/            # Laporan hasil uji beban lokal (gitignored)
+│   ├── PLAYBOOK.md         # Playbook & SOP load testing
+│   ├── HANDOFF.md          # Dokumen serah terima teknis
+│   └── README.md           # Panduan eksekusi load test
+├── migrations/             # Knex append-only migration files
 ├── mspf.yml                # MSPF OpenAPI spec (referensi)
 ├── traccar.yaml            # Traccar OpenAPI spec (referensi)
 ├── readme.md               # Spesifikasi arsitektur teknis
@@ -32,8 +45,6 @@ middleware-api-gps/
 
 ## Setup & Running
 
-*(Akan diisi setelah implementasi dimulai)*
-
 ```bash
 # Install dependencies
 npm install
@@ -41,11 +52,23 @@ npm install
 # Copy environment
 cp .env.example .env
 
+# Jalankan migrasi database
+npm run migrate
+
+# (Opsional) Jalankan seeding awal data admin & dummy
+npm run seed
+
 # Run development
 npm run dev
 
 # Run production
 npm start
+
+# Menjalankan unit & integration tests (selalu gunakan batas waktu)
+timeout 300 npm test
+
+# Menjalankan test dengan pelacak open handle jika menggantung
+timeout 300 npx jest --detectOpenHandles --forceExit
 ```
 
 ---
@@ -54,28 +77,64 @@ npm start
 
 | Library | Versi | Kegunaan |
 |---------|-------|----------|
-| Express.js | ^4.18 | Web framework |
-| Axios | ^1.5 | HTTP client ke Traccar & MSPF |
+| Express.js | ^5.x | Web framework |
+| Axios | ^1.x | HTTP client ke Traccar, MSPF, FoxLogger (timeout 10s pada sync path) |
 | jsonwebtoken | ^9.0 | JWT auth |
 | bcryptjs | ^2.4 | Password hashing |
-| Socket.io | ^4.x | WebSocket server |
-| Node-Cache | ^5.x | In-memory cache (dev) |
-| dotenv | ^16.3 | Env config |
-| Morgan + Winston | - | Logging |
-| Helmet | ^7.0 | Security headers |
-| cors | ^2.8 | CORS |
+| Socket.io | ^4.x | WebSocket server real-time position & status stream |
+| Node-Cache | ^5.x | In-memory cache (`useClones: false`, deepFreeze saat testing) |
+| Knex | ^3.x | Query builder & schema migration (SQLite dev, PostgreSQL prod) |
+| pg | ^8.x | PostgreSQL driver (BIGINT support) |
+| dotenv | ^16.x | Env configuration |
+| Winston | ^3.x | Structured JSON logger |
+| Helmet | ^7.x | Security headers |
+| cors | ^2.8 | CORS middleware |
+| express-rate-limit | ^8.x | Rate limiting API |
 
 ---
 
 ## API Reference Points
 
-| Endpoint | Backend Source |
-|----------|---------------|
-| `GET /api/groups` | Traccar `GET /groups` + MSPF `GET /v2/bc` |
-| `GET /api/devices` | Traccar `GET /devices` + MSPF `GET /v3/devices` |
-| `GET /api/positions` | Traccar `GET /positions` + MSPF `GET /v3/devices/positions` / `GET /v3/devices/{id}/route` |
-| `POST /api/commands` | Traccar `POST /commands/send` |
+| Endpoint | Backend Source / Mekanisme |
+|----------|---------------------------|
+| `GET /api/groups` | Traccar `GET /groups` + MSPF `GET /v2/bc` + Custom Groups DB |
+| `GET /api/devices` | In-memory cache `devices:merged` (Traccar, MSPF, FoxLogger) |
+| `GET /api/positions` | In-memory cache `positions:merged` (diperbarui worker tiap 10s) |
+| `POST /api/commands` | Traccar `POST /commands/send` & MSPF `PUT /activation` |
 | `PUT /api/devices/:id/activation` | MSPF `PUT /v3/devices/{id}/activation` |
+| `GET /api/reports/*` | Route playback, summary, events, parking, idle, trips |
+| `GET /api/admin/device-groups` | Relasi manual device ke custom group (`deviceName` format) |
+| `GET /health` & `/health/detailed` | Status sistem & upstream (Traccar, MSPF, FoxLogger) |
+
+---
+
+## Background Workers & Upstream Decoupling
+
+Untuk mencegah blocking pada event loop dan memastikan respon instan pada request client:
+
+1. **`positionSync` Worker:**
+   - Berjalan berkala setiap 10 detik.
+   - Dibungkus dengan `guardedJob` (token kepemilikan `Symbol` dan watchdog 180 detik).
+   - Memanggil endpoint positions Traccar, MSPF, dan FoxLogger dengan batas timeout request **10 detik**.
+   - Menyimpan hasil ke in-memory cache `positions:merged` (TTL 30 detik) dan memancarkan event WebSocket (`position`, `device-status`).
+2. **`MccsWorker` Background Worker (MSPF):**
+   - Didecouple sepenuhnya dari jalur kritis sinkronisasi posisi.
+   - Menyimpan data telemetri tambahan MCCS ke dalam persistent `Map` store (`mccsStore`).
+   - Melakukan rotasi batch secara mandiri.
+   - **Jeda Otomatis:** Perangkat yang mengembalikan data kosong (`empty_data` karena unit pasif 90–367 hari) secara otomatis dijeda selama **25–35 menit** dari rotasi worker.
+   - **Reaktivasi Dinamis:** Jika unit yang dijeda mengirimkan `deviceTime` baru saat posisi sync, unit tersebut langsung diaktifkan kembali ke antrean prioritas (maksimal 1 kali per masa jeda).
+3. **Pengukuran Waktu & Jam Monoton:**
+   - Seluruh durasi, timeout, dan interval jeda diukur menggunakan `performance.now()` dengan sentinel awal bernilai `null` agar kebal terhadap pergeseran jam sistem (NTP sync/WSL2 drift).
+
+---
+
+## Load Testing & Safety Harness (`load-tests/`)
+
+Proyek menyediakan harness pengujian beban mandiri di folder `load-tests/`:
+- **Mock Upstream:** Server mock lokal (`load-tests/mock-upstream/server.js`) mensimulasikan armada ~1.200 unit kendaraan.
+- **Safety Preflight (`load-tests/scripts/preflight.js`):** Membatalkan eksekusi secara otomatis jika mendeteksi URL non-localhost demi keselamatan server produksi dan staging pihak ketiga.
+- **Isolasi Docker:** `docker-compose.loadtest.yml` menyediakan container dengan batas resource terukur (2 vCPU, 2GB RAM).
+- Panduan lengkap eksekusi dan analisis beban tersedia di `load-tests/PLAYBOOK.md` dan `load-tests/README.md`.
 
 ---
 
@@ -113,7 +172,11 @@ Workflow deploy di `.github/workflows/ci-cd.yml` berjalan secara terisolasi dan 
 
 ## Catatan Penting
 
-- **Tidak ada prefix ID** — Device ID adalah integer, routing via group/BC atau device→source mapping di cache
-- **Gateway readonly untuk tracking** — Hanya activation (mematikan kendaraan) yang write ke MSPF
-- **Filter akses di sisi Gateway** — Customer hanya lihat device di Group/BC yang di-assign
-- **Selalu cek dokumentasi library via Context7 MCP** sebelum implementasi
+- **Immutabilitas Cache (`useClones: false`)** — Pembacaan cache tidak meng-clone objek. DILARANG memutasi objek atau array hasil `cache.get()`. Selalu buat shallow-copy sebelum memodifikasi data.
+- **Background Worker & Guard** — Semua worker berkala wajib dibungkus `guardedJob` dengan token kepemilikan dan watchdog.
+- **Pengukuran Waktu** — Gunakan `performance.now()` untuk durasi, timeout, dan jeda (dengan sentinel `null`). Hindari `Date.now()` untuk timing.
+- **Tidak ada prefix ID** — Device ID adalah integer, routing via group/BC atau device→source mapping di cache.
+- **Gateway readonly untuk tracking** — Hanya activation (mematikan kendaraan) yang write ke MSPF.
+- **Filter akses di sisi Gateway** — Customer hanya lihat device di Group/BC yang di-assign.
+- **Selalu jalankan test dengan batas waktu** — Gunakan `timeout 300 npm test` dan deteksi open handle bila perlu.
+- **Selalu cek dokumentasi library via Context7 MCP** sebelum implementasi.

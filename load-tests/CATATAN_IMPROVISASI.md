@@ -1,38 +1,33 @@
 # Catatan Rekomendasi & Improvisasi Performa (Berdasarkan Hasil Load Test Jalur A)
 
 **Dokumen Referensi:** Hasil Stress Test Jalur A (`load-tests/results/stress-report-jalur-a.md`)  
-**Status Implementasi:** Usulan / Backlog (Belum Diterapkan pada Kode Aplikasi)
+**Status Implementasi:** 
+- **Prioritas 1 (Akar Masalah Nyata):** Selesai diimplementasikan via commit `4f645d6` (`useClones: false`) dan `b9c75cc` (`'use strict'`). Profiling CPU membuktikan dugaan awal 1.200 serial await keliru; 81% waktu CPU terbuang untuk deep clone NodeCache.
+- **Prioritas 2–5:** Backlog / Usulan Teknis masa depan.
 
 ---
 
-## Ringkasan Diagnosa
+## Ringkasan Diagnosa & Klarifikasi Profiling
 
-Dari pengujian beban pada Jalur A (`/api/devices` & `/api/positions`) dengan armada 1.200 unit kendaraan, titik jenuh tercapai pada **100 RPS / 100 Virtual Users bersamaan** dengan kapasitas aman operasional di **35 – 50 RPS**.
+Pada pengujian beban awal Jalur A (`/api/devices` & `/api/positions`) dengan konfigurasi lama, titik jenuh tercapai pada **100 RPS / 100 Virtual Users bersamaan** dengan kapasitas aman operasional di **35 – 50 RPS**.
 
-Akar masalah utama adalah **CPU-bound Event Loop blockage** akibat serialisasi JSON berukuran besar dan operasi asinkron serial berulang, bukan karena keterbatasan I/O database.
+> **Pelajaran Penting dari Profiling CPU:**
+> Dugaan awal bahwa kelambatan diakibatkan oleh 1.200 `await` serial terbukti **tidak akurat**. Hasil profiling CPU (`node --cpu-prof`) membuktikan **81% waktu CPU habis untuk proses deep-cloning objek** di dalam library NodeCache akibat opsi bawaan `useClones: true`.
+> Setelah opsi diubah menjadi `useClones: false` (commit `4f645d6`), kapasitas aman melonjak menjadi **150–180 RPS** (titik jenuh 250–300 RPS) pada laptop lokal.
 
-Berikut adalah 5 rekomendasi perbaikan terstruktur berdasarkan skala prioritas (*impact vs effort*):
+Berikut adalah evaluasi 5 rekomendasi perbaikan terstruktur berdasarkan skala prioritas (*impact vs effort*):
 
 ---
 
-## 1. Prioritas 1 (Kritis): Optimasi Looping Serial di `applyCustomAttributes`
+## 1. Prioritas 1: Optimasi Cache Cloning & Looping di `applyCustomAttributes`
 
-### Masalah
-Di `src/routes/positions.js`, fungsi `applyCustomAttributes` melakukan iterasi array 1.200 posisi dengan memanggil `await` di setiap perulangan:
-```javascript
-for (let i = 0; i < positions.length; i++) {
-  const pos = positions[i];
-  if (!pos.deviceId) continue;
-  enrichPositions([pos], null);
-  const rules = await getDeviceRules(pos.deviceId, pos.source); // 1.200 await serial!
-  ...
-}
-```
-Meskipun `getDeviceRules` memiliki cache internal, mengeksekusi 1.200 `await` (promise microtask) secara serial pada setiap request memakan waktu ~700 ms – 2.000 ms pada CPU single-thread. Saat 100 user memanggilnya bersamaan, event loop langsung macet.
+### Masalah Awal & Temuan Riil
+Di `src/routes/positions.js`, fungsi `applyCustomAttributes` melakukan iterasi array 1.200 posisi. Namun bukan microtask promise yang mendominasi, melainkan proses clone objek di NodeCache setiap kali `cache.get()` dipanggil.
 
-### Solusi / Usulan Improvisasi
-Ubah pendekatan dari *per-device query* menjadi **Batch Rules Lookup Map**:
-Ambil seluruh rule aktif sekaligus (atau buat Map lookup di memory cache), lalu terapkan secara **murni sinkron (synchronous)** tanpa `await` di dalam loop:
+### Solusi yang Telah Diterapkan
+1. Konfigurasi `cache.js` disetel ke `useClones: false`, mengeliminasi 81% overhead CPU secara instan.
+2. Seluruh file `src/` diamankan dengan `'use strict'` dan batas shallow-copy eksplisit di titik mutasi untuk menjaga integritas data cache.
+3. Objek cache dibekukan otomatis (`deepFreeze`) saat testing/load testing integritas (`CACHE_FREEZE=1`).
 
 ```javascript
 // Usulan refactor: Murni sinkron tanpa await di dalam loop
@@ -119,7 +114,10 @@ async function getManualDeviceGroups() {
 
 ### Solusi / Usulan Improvisasi
 1. **Dukungan Paginasi:** Terapkan `offset` dan `limit` pada response posisi (seperti pada `/api/devices`), atau parameter `view=compact` jika FE hanya membutuhkan `[id, lat, lon, speed, course]`.
-2. **Short-lived Response Cache:** Cache output JSON yang sudah disanitasi selama 2–3 detik untuk role yang sama. Jika ada 100 request masuk dalam 1 detik, server cukup menserialisasi 1 kali dan mengembalikan buffer cache untuk 99 request sisanya.
+2. **Short-lived Response Cache:** Cache output JSON yang sudah disanitasi selama 2–3 detik.
+   > **⚠️ PERINGATAN KEAMANAN (CRITICAL INVARIANT):**
+   > Kunci response cache **WAJIB PER USER ATAU CAKUPAN DEVICE** (misal `positions:user:${req.user.id}` atau hash dari `allowedDeviceIds`).
+   > **DILARANG KERAS** membuat cache response per role (contoh: `positions:customer`), karena customer A dan customer B memiliki custom groups dan filter kendaraan yang berbeda. Caching per role akan membocorkan data armada antar-customer secara fatal!
 
 ---
 
@@ -130,7 +128,11 @@ Node.js secara default berjalan pada **1 thread (1 core CPU)**. Pada server prod
 
 ### Solusi / Usulan Improvisasi
 - Di production (Docker/PM2), jalankan aplikasi dengan **Cluster Mode** (`instances: 'max'` atau sejumlah vCPU server).
-- Arsitektur middleware saat ini sudah siap untuk clustering karena Socket.io sudah mendukung Redis adapter (`@socket.io/redis-adapter`) dan state session berbasis JWT.
+- **Prasyarat Wajib Sebelum Cluster Mode:**
+  1. `positionSync` dan `MccsWorker` hanya boleh berjalan di 1 proses/worker utama agar tidak melakukan sync berulang ke upstream secara paralel.
+  2. Cache `devices:merged` dan `positions:merged` harus menggunakan Redis atau mekanisme sinkronisasi antar-proses.
+  3. Connection pool PostgreSQL Knex harus dihitung ulang agar tidak melebihi batas koneksi server.
+  4. Socket.io memerlukan sticky-session dan Redis adapter aktif.
 
 **Estimasi Dampak:** Peningkatan throughput linear:
 - 1 Core: ~50–70 RPS aman.

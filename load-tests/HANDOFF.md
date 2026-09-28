@@ -64,35 +64,38 @@ Daftar seluruh commit Pilar 1 + 3 (fondasi, optimasi, hardening, dan perbaikan t
 
 ---
 
-## 3. Hasil Verifikasi Staging & Produksi
+## 3. Hasil Verifikasi Lapangan di Server STAGING
 
-Verifikasi aktual pada server staging (armada ~1.083 MSPF + 90 Traccar + 1 FoxLogger):
-1. **Durasi Sync Posisi:** Berjalan sangat cepat dan teratur di **4–8 detik** (turun drastis dari sebelumnya ~57 detik).
-2. **Ketersediaan Posisi Pasca-Restart:** Posisi pertama siap melayani REST dan WebSocket dalam **~12 detik** setelah container aktif.
+Verifikasi aktual pada server **STAGING** (armada riil ~1.083 MSPF + 90 Traccar + 1 FoxLogger):
+1. **Durasi Sync Posisi:** Berjalan sangat cepat dan teratur di **4–8 detik** dengan interval yang konsisten (turun drastis dari sebelumnya yang mencapai ~57 detik).
+2. **Kesiapan Server & Ketersediaan Posisi Pasca-Restart:** Server siap menerima koneksi dalam **~2 detik**, dan posisi pertama siap melayani REST serta WebSocket dalam **~12 detik** setelah container aktif (sebelumnya client harus menunggu ~57 detik).
 3. **Kinerja MCCS Worker:**
    - Melaporkan secara konsisten: `627 with data, ~456 paused` per putaran **~1,5 menit** (turun dari ~2,6 menit).
    - **0 cycle failures**, tidak ada warning palsu missing/stale.
-   - Reaktivasi device aktif kembali dibatasi maksimal 1x per masa jeda per device.
+   - Reaktivasi device aktif kembali dibatasi maksimal 1x per masa jeda (maksimal 1x per jam) per device.
+   - Pengecekan manual membuktikan ~450 device `empty_data` adalah unit kendaraan yang memang tidak aktif selama 90–367 hari, bukan error pada API upstream MSPF.
 4. **WebSocket & Frontend:** Koneksi ke staging terverifikasi stabil, armada bergerak real-time di peta, dan antarmuka web frontend terasa jauh lebih responsif.
 
 ---
 
-## 4. Hasil Pengujian Kunci & Keterbatasan Lokal
+## 4. Hasil Pengujian Kunci & Keterbatasan Lokal (LAPTOP)
 
-1. **Jalur A (Cache Endpoints):**
+*(Catatan: Seluruh angka kapasitas di bawah adalah hasil pengujian di **LAPTOP (i5-12450HX, WSL2, mock upstream)**. Perkiraan kapasitas di server adalah ~setengahnya dan belum diukur langsung).*
+
+1. **Jalur A (Cache Endpoints — Hasil di LAPTOP):**
    - Sebelum (`useClones: true`): p95 1.863 ms (20 RPS), jenuh di 100 RPS (p95 4.676 ms), kapasitas aman 35–50 RPS.
    - Sesudah (`useClones: false`): p95 7,9 ms (20 RPS), 12,1 ms (50 RPS), 12–30 ms (100 RPS), 125–232 ms (200 RPS). Jenuh di 250–300 RPS. Kapasitas aman naik ke 150–180 RPS.
-2. **Fase C (WebSocket Concurrency) & Hasil C4 Terkini:**
-   - Lolos sampai 1.000 soket pada pengujian awal (handshake p95 28 ms, fan-out p95 185 ms, siklus p95 401 ms, error 0%).
+2. **Fase C (WebSocket Concurrency & C4 Hybrid — Hasil di LAPTOP):**
+   - Lolos sampai 1.000 soket pada pengujian awal di laptop (handshake p95 28 ms, fan-out p95 185 ms, siklus p95 401 ms, error 0%).
    - Tingkat 2.000 user **TIDAK VALID**: CPU runner load tester mencapai 90%, handshake 10,3 s, error 4,85%.
-   - **Temuan Verifikasi C4 @150 user (Mock Realistis):** Waktu siklus p95 naik dari 60–203 ms ke **1.923 ms**. Penyebab: mock lama hanya menggerakkan kendaraan di sebagian grup (~7 vs ~96 event/client/siklus), sehingga hasil Fase C sebelumnya terlalu optimis.
+   - **Temuan Verifikasi C4 @150 user (Mock Realistis di LAPTOP):** Waktu siklus p95 naik dari 60–203 ms ke **1.923 ms**. Penyebab: mock lama hanya menggerakkan kendaraan di sebagian grup (~7 vs ~96 event/client/siklus), sehingga hasil Fase C sebelumnya terlalu optimis.
    - **Perkiraan di server (~2x lebih lambat):** Pada 150 user, waktu siklus p95 di server berpotensi melewati ambang batas SLA 3 detik (3.000 ms). Beban produksi saat ini (~50 user) masih berada dalam batas aman.
    - **Penyesuaian Ambang Batas Backlog:** Pemicu optimasi emit diturunkan ke **~100 user bersamaan**. Tangga WebSocket (C2–C3) perlu diulang dengan mock realistis sebelum jumlah user mendekati angka tersebut.
-3. **C5a (Thundering Herd 5 detik):**
+3. **C5a (Thundering Herd 5 detik — Hasil di LAPTOP):**
    - 50 user: Handshake p95 44 ms, HTTP p95 < 27 ms (Lolos).
    - 150 user: Handshake p95 37 ms, HTTP p95 < 22 ms (Lolos).
    - 500 user: Gagal target (handshake p95 3,6 s, HTTP p95 3,3 s).
-4. **Soak Test (150 Soket, 15 & 45 Menit):**
+4. **Soak Test (150 Soket, 15 & 45 Menit — Hasil di LAPTOP):**
    - Memori stabil: RSS 342,6 $\to$ 354,4 MB (flat, delta +11,8 MB dalam 15 menit dan 1,3 juta event), 0 disconnect, 0 error.
 
 ---
@@ -143,7 +146,6 @@ Verifikasi aktual pada server staging (armada ~1.083 MSPF + 90 Traccar + 1 FoxLo
 
 ## 7. Status & Tugas Berikutnya untuk Sesi Baru
 
-1. **Status Saat Ini:** Pilar 1 + Pilar 3 SUDAH aktif di production dan terbukti stabil.
+1. **Status Saat Ini:** Pilar 1 + Pilar 3 SUDAH aktif di staging dan production serta terbukti stabil. Dokumentasi proyek (.md) telah diperbarui secara menyeluruh.
 2. **Tugas Berikutnya:**
-   - **Audit dan Pembaruan Dokumentasi:** Lakukan sinkronisasi menyeluruh pada seluruh dokumentasi `.md` proyek (`PROGRESS.md`, `CHANGELOG.md`, `API_REFERENCE.md`, `README.md`, `PLAYBOOK.md`) agar mencerminkan arsitektur Pilar 1+3 yang telah beroperasi di production.
-   - **Pilar 2:** Setelah dokumentasi selesai diperbarui, mulai pengerjaan **Pilar 2: `devices:merged` Stale-While-Revalidate & Single-Flight Rebuild**.
+   - Memulai pengerjaan **Pilar 2: `devices:merged` Stale-While-Revalidate & Single-Flight Rebuild**.

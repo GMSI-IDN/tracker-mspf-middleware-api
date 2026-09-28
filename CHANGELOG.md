@@ -2,6 +2,40 @@
 
 > Semua perubahan signifikan dicatat di file ini.
 
+## 2026-09-28
+
+### Core Performance Optimization, Upstream Decoupling & High-Concurrency Hardening (Pilar 1 + 3)
+
+#### Dampak bagi Tim & Pengguna (Bahasa Sederhana)
+Pembaruan ini menuntaskan implementasi **Pilar 1 dan Pilar 3** yang saat ini **SUDAH AKTIF DI STAGING DAN PRODUCTION**:
+- **Sinkronisasi Posisi Jauh Lebih Cepat & Teratur:** Siklus pembaruan posisi kendaraan tidak lagi tersendat atau bertumpuk. Pada verifikasi aktual di server **STAGING**, proses sinkronisasi kini selesai teratur dalam **4–8 detik** (turun drastis dari sebelumnya yang mencapai ~57 detik).
+- **Waktu Kesiapan Pasca-Restart Sangat Cepat:** Server siap menerima koneksi dalam **~2 detik**, dan data posisi armada pertama kali siap disajikan ke REST API serta WebSocket dalam **~12 detik** setelah server aktif (sebelumnya client harus menunggu hingga ~57 detik).
+- **Pengalaman Frontend Lebih Responsif & Peta Live Bergerak:** Beban CPU backend berkurang drastis sehingga waktu muat (*load time*) antarmuka web jauh lebih cepat dan pergerakan armada di peta terpantau live secara stabil.
+- **Kapasitas Cache Melonjak (Hasil Pengujian di LAPTOP):** Pengujian beban pada laptop pengembang (i5-12450HX, WSL2, mock) menunjukkan kapasitas aman endpoint cache (Jalur A) melonjak dari 35–50 RPS menjadi **150–180 RPS** (titik jenuh 250–300 RPS) dengan latensi p95 terpangkas dari ribuan milidetik ke belasan milidetik. Perkiraan kapasitas di server adalah ~setengahnya dan belum diukur langsung.
+
+#### Detail Teknis Singkat
+- **Pilar 1 — Concurrency Guard pada Sync Posisi (`src/utils/guardedJob.js` & `src/services/positionSync.js`):**
+  - Mencegah eksekusi bertumpuk (*overlapping sync*) dengan membungkus proses sinkronisasi ke dalam `guardedJob` berbasis token kepemilikan unik (`Symbol`) dan watchdog timer 180 detik. Jika sync sebelumnya masih berjalan, tick berikutnya dilewati (*skipped*) secara aman tanpa risiko lock tersangkut.
+  - Menerapkan batas timeout request HTTP upstream sebesar **10 detik** pada seluruh jalur sinkronisasi (`traccar`, `mspf`, `foxlogger`).
+- **Pilar 3 — Pemisahan (Decoupling) Worker MCCS (`src/services/mspf.js`):**
+  - Pengambilan telemetri tambahan MCCS dipisahkan sepenuhnya dari jalur kritis sinkronisasi posisi ke worker latar belakang mandiri (`MccsWorker`).
+  - Menyimpan telemetri ke dalam persistent in-memory `Map` store (`mccsStore`) dengan rotasi batch mandiri.
+  - **Mekanisme Jeda Unit Pasif:** Sebanyak ~450 unit yang mengembalikan data kosong (`empty_data`) secara otomatis dijeda selama 25–35 menit dari rotasi worker. Pengecekan manual membuktikan kendaraan-kendaraan tersebut tidak aktif selama 90–367 hari (bukan error API MSPF).
+  - **Reaktivasi Dinamis:** Jika unit yang dijeda mengirimkan `deviceTime` baru pada sinkronisasi posisi, unit langsung diprioritaskan di antrean terdepan (maksimal 1 kali reaktivasi per masa jeda).
+  - Pada verifikasi di **STAGING**, worker MCCS berjalan konsisten mencatat `627 with data, ~456 paused` per putaran (~1,5 menit) dengan **0 cycle failure**.
+- **Optimasi Memori & CPU Cache (`src/services/cache.js`):**
+  - Profiling CPU pada `/api/positions` menunjukkan **81% waktu CPU terbuang untuk deep clone** akibat konfigurasi `useClones: true` di NodeCache. Biaya komputasi tersebut dihilangkan sepenuhnya dengan menyetel `useClones: false` dan menerapkan batasan shallow-copy yang aman di seluruh titik mutasi.
+  - Menerapkan `'use strict'` di seluruh file `src/` dan menegakkan aturan ESLint `strict: ["error", "global"]`.
+  - Mengaktifkan pengaman `deepFreeze` otomatis pada objek cache saat `NODE_ENV=test` atau `CACHE_FREEZE=1`.
+- **Ketahanan Jam Monoton (`performance.now()`):**
+  - Seluruh pengukuran durasi, elapsed time, watchdog, dan interval jeda dimigrasikan dari `Date.now()` ke jam monoton `performance.now()` untuk mencegah durasi negatif atau false timeout akibat NTP sync/WSL2 clock drift. Variabel penanda awal menggunakan sentinel eksplisit `null`.
+- **Perbaikan Test Suite Device Groups (`src/__tests__/gateway.test.js`):**
+  - Memperbaiki assertion pengujian `GET /api/admin/device-groups` yang sebelumnya memeriksa `device_name` usang menjadi `deviceName` (sesuai kontrak API sejak awal dibuat) dan menerapkan deterministic seeding data.
+- **Keputusan Penundaan Open Handle Jest:**
+  - Penanganan open handle Jest sengaja ditunda agar tidak memasukkan branching `NODE_ENV` ke dalam kode aplikasi produksi; penanganan arsitektural bersih dicatat di backlog.
+
+---
+
 ## 2026-09-20
 
 ### Route Playback Historical Running Status Fix

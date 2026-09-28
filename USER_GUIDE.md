@@ -1,8 +1,8 @@
 # API Gateway - User Guide
 
-Selamat datang di API Gateway! API ini adalah satu pintu akses untuk mengambil data kendaraan dari dua server GPS — **Traccar** dan **MSPF** — cukup melalui satu alamat API.
+Selamat datang di API Gateway! API ini adalah satu pintu akses untuk mengambil data kendaraan dari tiga server GPS — **Traccar**, **MSPF**, dan **FoxLogger** — cukup melalui satu alamat API.
 
-> **Format data** yang dikeluarkan Gateway mengikuti format **Traccar API**. Data dari MSPF dinormalisasi secara otomatis, jadi FE tidak perlu handle perbedaan struktur data antara kedua sumber.
+> **Format data** yang dikeluarkan Gateway mengikuti format standar Traccar API. Data dari MSPF dan FoxLogger dinormalisasi secara otomatis, sehingga Frontend tidak perlu menangani perbedaan struktur data antar server.
 
 ---
 
@@ -69,7 +69,7 @@ Authorization: Bearer <token>
 
 | Role | Akses |
 |------|-------|
-| **Admin (Internal)** | Melihat **semua** kendaraan dari Traccar dan MSPF, semua Group dan BC |
+| **Admin (Internal)** | Melihat **semua** kendaraan dari Traccar, MSPF, dan FoxLogger, semua Group dan BC |
 | **Customer** | Hanya melihat kendaraan yang berada di **Group** (Traccar) atau **BC** (MSPF) yang di-assign ke akunnya |
 
 **Aturan:**

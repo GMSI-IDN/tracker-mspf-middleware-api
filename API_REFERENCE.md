@@ -2037,7 +2037,8 @@ Mengembalikan ringkasan dashboard untuk tampilan awal aplikasi. Menggabungkan de
   "status": "healthy",
   "dependencies": [
     { "name": "traccar", "status": "healthy" },
-    { "name": "mspf", "status": "healthy" }
+    { "name": "mspf", "status": "healthy" },
+    { "name": "foxlogger", "status": "healthy" }
   ]
 }
 ```

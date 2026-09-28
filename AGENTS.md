@@ -55,6 +55,37 @@ Gunakan **Context7 MCP** (`context7_resolve-library-id` + `context7_query-docs`)
    - Setiap perubahan skema (tambah tabel, tambah/ubah kolom, index) **WAJIB SELALU MEMBUAT FILE MIGRASI BARU** (format: `YYYYMMDD_deskripsi.js`).
    - Untuk tabel yang sudah memiliki data, penambahan kolom baru **wajib** memiliki `defaultTo(...)` atau `nullable()`.
    - Selalu sertakan fungsi `exports.down` untuk keselamatan rollback.
+10. **Aturan Cache Immutability (`useClones: false`):**
+    - Cache di `src/services/cache.js` dikonfigurasi dengan `useClones: false` demi efisiensi CPU (mengeliminasi 81% overhead clone). `cache.get()` mengembalikan referensi objek langsung di memori.
+    - **DILARANG KERAS memutasi objek atau array hasil `cache.get()` secara langsung.**
+    - Jika perlu mengubah properti atau meng-enrich data, **wajib membuat shallow-copy** terlebih dahulu (contoh: `{ ...item, attributes: { ...item.attributes } }`).
+    - Objek cache di-freeze otomatis (`deepFreeze`) saat `NODE_ENV=test` atau `CACHE_FREEZE=1` untuk memicu error eksplisit jika terjadi mutasi ilegal.
+11. **Job Latar Belakang Wajib `guardedJob`:**
+    - Seluruh proses berkala dan worker latar belakang (seperti `positionSync` dan `MccsWorker`) **wajib dibungkus dengan `guardedJob`** (`src/utils/guardedJob.js`).
+    - Gunakan token kepemilikan (`Symbol`) dan watchdog timer agar eksekusi tidak pernah bertumpuk (*no overlapping execution*) dan flag status tidak bisa tersangkut (*no stuck lock*).
+12. **Pengukuran Waktu & Jam Monoton:**
+    - Seluruh pengukuran durasi, elapsed time, timeout watchdog, dan interval jeda **wajib menggunakan jam monoton `performance.now()`** (bukan `Date.now()`).
+    - Hal ini untuk menghindari durasi negatif atau false timeout saat sinkronisasi jam dinding (NTP sync / WSL2 time-drift).
+    - Variabel penanda waktu awal **wajib bernilai `null`** (bukan `0`) sebagai sentinel eksplisit agar evaluasi pertama pasca-startup langsung mengeksekusi tugas. `Date.now()` hanya digunakan untuk timestamp telemetri dunia nyata (`deviceTime`, `mccsFetchTimes`).
+13. **Siklus Hidup Timer & Graceful Teardown (Wajib untuk Kode Baru):**
+    - Timer jangka panjang (`setInterval`, `setTimeout`) wajib memanggil `.unref()` agar tidak menahan proses Node.js keluar saat shutdown atau unit test.
+    - Modul yang memiliki worker latar belakang wajib mengekspor fungsi `stop()` eksplisit (contoh: `stopMccsWorker()`) untuk pembersihan saat shutdown atau pengujian.
+    - *(Catatan: kode lama belum sepenuhnya patuh dan tercatat di backlog).*
+14. **Integritas Perilaku Kode Aplikasi:**
+    - Dilarang menonaktifkan atau mengubah perilaku fungsional (koneksi upstream, worker, timer) berdasarkan `NODE_ENV`. Pengaman tambahan khusus tes yang tidak mengubah perilaku, seperti deep freeze di `cache.js`, diperbolehkan.
+15. **Integritas Test Assertion:**
+    - Dilarang menaruh assertion `expect(...)` di dalam blok `if` yang bisa dilewati secara diam-diam jika data kosong.
+    - Setiap test wajib melakukan seeding data uji secara deterministik sebelum assertion dijalankan, dan membersihkan data di blok `finally` / `afterAll`.
+16. **Batas Waktu Eksekusi Test:**
+    - Selalu jalankan Jest dengan batas waktu eksekusi (`timeout 300 npm test`) agar tidak menggantung tanpa batas waktu jika terdapat open handle. Gunakan flag `--detectOpenHandles` untuk mendeteksi timer atau koneksi yang belum ditutup.
+
+## Invariant: Cache Immutability & Decoupled Background Workers
+
+1. **Zero-Clone In-Memory Cache:**
+   - Seluruh pembacaan `devices:merged` dan `positions:merged` menggunakan referensi langsung (`useClones: false`). Seluruh kode di `src/` beroperasi di bawah `'use strict'` dan dilarang memutasi objek cache.
+2. **Decoupled MCCS Background Worker:**
+   - MCCS didecouple sepenuhnya dari jalur kritis `positionSync`. MCCS memiliki persistent store in-memory (`mccsStore`), rotasi mandiri per chunk, jeda 25–35 menit untuk device `empty_data` (unit pasif 90–367 hari), dan reaktivasi dinamis maksimal 1x per masa jeda.
+   - Panggilan `positionSync` dibatasi timeout 10 detik per request upstream dengan watchdog 180 detik.
 
 ## Invariant: Custom Groups Hybrid Sync & Strict Customer Deduplication
 
