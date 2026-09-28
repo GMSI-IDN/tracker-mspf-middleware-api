@@ -150,6 +150,88 @@ describe('guardedJob — reusable concurrency guard', () => {
     expect(run.getElapsed()).toBe(0);
   });
 
+  test('monotonic clock: Date.now() jumping forward does not cause premature timeout or false elapsed', async () => {
+    jest.useFakeTimers();
+    const realDateNow = Date.now;
+    let clockOffset = 0;
+    Date.now = jest.fn(() => realDateNow() + clockOffset);
+
+    try {
+      let resolveJob;
+      const run = guardedJob({
+        name: 'test-jump-forward',
+        timeoutMs: 5000,
+        jobFn: async () => new Promise(r => { resolveJob = r; }),
+      });
+
+      const p1 = run();
+      expect(run.isRunning()).toBe(true);
+
+      // Advance timers by 500ms
+      await jest.advanceTimersByTimeAsync(500);
+
+      // Simulate wall-clock jumping 1 hour into the future (e.g. NTP or WSL2 jump)
+      clockOffset = 3600 * 1000;
+
+      // Elapsed should be based on performance.now() (~500ms), NOT 1 hour (3600500ms)!
+      const elapsed = run.getElapsed();
+      expect(elapsed).toBeLessThan(1000);
+      expect(elapsed).toBeGreaterThanOrEqual(100);
+
+      // Second call during this time: should be skipped as already_running (< 5000ms), NOT timed out!
+      const p2 = run();
+      const r2 = await p2;
+      expect(r2).toEqual({ status: 'skipped', reason: 'already_running' });
+
+      resolveJob('done');
+      const r1 = await p1;
+      expect(r1.status).toBe('completed');
+    } finally {
+      Date.now = realDateNow;
+      jest.useRealTimers();
+    }
+  });
+
+  test('monotonic clock: Date.now() jumping backward does not produce negative duration', async () => {
+    jest.useFakeTimers();
+    const realDateNow = Date.now;
+    let clockOffset = 0;
+    Date.now = jest.fn(() => realDateNow() + clockOffset);
+
+    try {
+      let resolveJob;
+      const run = guardedJob({
+        name: 'test-jump-backward',
+        timeoutMs: 5000,
+        jobFn: async () => new Promise(r => { resolveJob = r; }),
+      });
+
+      const p1 = run();
+      await jest.advanceTimersByTimeAsync(500);
+
+      // Simulate wall-clock jumping 1 hour into the past
+      clockOffset = -3600 * 1000;
+
+      // Elapsed must stay positive and accurate (~500ms), NOT negative (-3,599,500ms)
+      expect(run.getElapsed()).toBeGreaterThanOrEqual(100);
+      expect(run.getElapsed()).toBeLessThan(1000);
+
+      resolveJob('ok');
+      const r1 = await p1;
+      expect(r1.status).toBe('completed');
+
+      // Verify logger logged positive duration
+      const infoCalls = silentLogger.info.mock.calls.map(([msg]) => msg);
+      const completionLog = infoCalls.find(msg => typeof msg === 'string' && msg.includes('[test-jump-backward] completed in'));
+      expect(completionLog).toBeDefined();
+      expect(completionLog).toMatch(/completed in \d+ms/);
+      expect(completionLog).not.toMatch(/completed in -\d+/);
+    } finally {
+      Date.now = realDateNow;
+      jest.useRealTimers();
+    }
+  });
+
   test('throws on invalid parameters', () => {
     expect(() => guardedJob({ timeoutMs: 5000, jobFn: async () => {} })).toThrow(TypeError);
     expect(() => guardedJob({ name: 'x', timeoutMs: -1, jobFn: async () => {} })).toThrow(TypeError);

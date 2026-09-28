@@ -489,4 +489,43 @@ describe('3b: MCCS Worker Coverage (fake timers, no real delays)', () => {
     expect(preservedData).toBeDefined();
     expect(preservedData.kph).toBe(45);
   }, 20000);
+
+  test('monotonic clock: Date.now() jumping forward or backward does not affect masa jeda (pausedAt/pauseDurationMs)', async () => {
+    populateDevices(50);
+
+    const realDateNow = Date.now;
+    let clockOffset = 0;
+    Date.now = jest.fn(() => realDateNow() + clockOffset);
+
+    try {
+      apiSpy.mockReturnValue({
+        get: jest.fn(async () => ({ data: { data: [] } })),
+        interceptors: { response: { use: jest.fn() } },
+      });
+
+      // Tick 1: devices enter jeda
+      await runTicks(1);
+      expect(mspf.getMccsStats().pausedCount).toBe(50);
+
+      // Simulate wall clock jumping 2 hours into the future, but only 10s of real time passed
+      clockOffset = 2 * 3600 * 1000;
+      await runTicks(1);
+
+      // Devices must STILL be paused (monotonic time has not reached 25-35 minutes)!
+      expect(mspf.getMccsStats().pausedCount).toBe(50);
+
+      // Advance monotonic timers past 36 minutes (past the max pause)
+      await jest.advanceTimersByTimeAsync(36 * 60 * 1000);
+
+      // And simulate wall clock jumping backward by 2 hours
+      clockOffset = -2 * 3600 * 1000;
+
+      // Devices should properly unpause now because performance.now() elapsed >= pauseDurationMs
+      await runTicks(1);
+      const stats = mspf.getMccsStats();
+      expect(stats.completedCycles).toBeGreaterThanOrEqual(1);
+    } finally {
+      Date.now = realDateNow;
+    }
+  }, 25000);
 });

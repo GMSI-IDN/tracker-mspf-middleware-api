@@ -22,7 +22,7 @@ const cache = require('../services/cache');
 const traccar = require('../services/traccar');
 const mspf = require('../services/mspf');
 const foxlogger = require('../services/foxlogger');
-const { syncPositions, setEmitHooks } = require('../services/positionSync');
+const { syncPositions, setEmitHooks, getBcIdsFallback, maybeHeartbeat, _resetForTests } = require('../services/positionSync');
 const { statusTracker } = require('../utils/liveStatus');
 
 describe('positionSync — emit hooks (live tracking)', () => {
@@ -91,5 +91,45 @@ describe('positionSync — emit hooks (live tracking)', () => {
     await syncPositions();
 
     expect(onStatus).toHaveBeenCalledWith(expect.objectContaining({ deviceId: 2, source: 'mspf', status: 'offline' }));
+  });
+
+  test('right after startup (performance.now() near 0), BC cache is fetched on first use and cached thereafter', async () => {
+    _resetForTests();
+    cache.del('devices:merged');
+    mspf.getBcList.mockResolvedValue({ data: [{ id: 101 }, { id: 102 }] });
+
+    // First use: must fetch from API because ts is null (sentinel)
+    const ids = await getBcIdsFallback();
+    expect(mspf.getBcList).toHaveBeenCalledTimes(1);
+    expect(ids).toEqual([101, 102]);
+
+    // Second use within TTL: returns cached without calling API
+    const idsCached = await getBcIdsFallback();
+    expect(mspf.getBcList).toHaveBeenCalledTimes(1);
+    expect(idsCached).toEqual([101, 102]);
+  });
+
+  test('right after startup (performance.now() near 0), first heartbeat fires immediately', () => {
+    _resetForTests();
+
+    statusTracker.setStatus(1, 'traccar', 'online', Date.now());
+
+    const onStatus = jest.fn();
+    setEmitHooks({ onPosition: jest.fn(), onStatus });
+
+    // Calling maybeHeartbeat right after startup when lastHeartbeatAt is null
+    maybeHeartbeat();
+
+    expect(onStatus).toHaveBeenCalledTimes(1);
+    expect(onStatus).toHaveBeenCalledWith(expect.objectContaining({
+      deviceId: 1,
+      source: 'traccar',
+      status: 'online',
+    }));
+
+    // Second call immediately: should NOT fire because cooldown is now active
+    onStatus.mockClear();
+    maybeHeartbeat();
+    expect(onStatus).toHaveBeenCalledTimes(0);
   });
 });
