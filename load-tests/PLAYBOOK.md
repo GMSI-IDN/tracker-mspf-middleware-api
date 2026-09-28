@@ -260,9 +260,14 @@ Rencana perbaikan (satu per iterasi):
 
 ### Status
 
-- Commit `4f645d6` (useClones), `b9c75cc` ('use strict'), dan `24035ae` (Pilar 1 + Pilar 3) belum diuji di staging.
-- `24035ae` punya 4 masalah terbuka yang wajib diperbaiki sebelum staging: watchdog tanpa token kepemilikan, rotasi MCCS lebih lama dari TTL cache, default `fetchMccs: false` berlaku untuk semua pemanggil, dan worker MCCS tanpa guard. Detail di `HANDOFF.md` bagian 3.
-- Pilar 2 dan Pilar 4 belum dikerjakan.
+- Commit terdahulu `4f645d6` (useClones) dan `b9c75cc` ('use strict') belum diuji di staging.
+- Masalah terbuka 3a–3d pada commit `24035ae` sudah diperbaiki:
+  - **3a**: Token kepemilikan watchdog `guardedJob` pada `positionSync` (commit `d9b0e2a`).
+  - **3b & 3d**: Persistent MCCS Map store, boundary purge, `missingCount`, dan worker `guardedJob` (commit `c519381`).
+  - **3c**: Audit pemanggil `getPositions` selesai (terbukti aman tanpa perubahan kode).
+- **3e**: Timeout request jalur sync 10 s (commit `7759324`) selesai dengan watchdog dinaikkan ke 180 s.
+- **Pilar 1 + Pilar 3** siap diuji di staging.
+- **Pilar 2 dan Pilar 4** belum dikerjakan.
 
 ### Pekerjaan tertunda
 
