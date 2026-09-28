@@ -215,4 +215,110 @@ describe('3b: MCCS Worker Coverage (fake timers, no real delays)', () => {
     // Devices 81..100 (20 devices) never got data -> missingCount = 20
     expect(stats.missingCount).toBe(20);
   }, 15000);
+
+  test('failure classification and sample collection per category in getMccsStats', async () => {
+    populateDevices(50);
+
+    apiSpy.mockReturnValue({
+      get: jest.fn(async (url) => {
+        await new Promise(r => setTimeout(r, MOCK_DELAY_MS));
+        const match = url.match(/\/device\/(\d+)\/data\/history/);
+        const devId = match ? parseInt(match[1], 10) : 0;
+        if (devId <= 10) return { data: { data: [] } };
+        if (devId <= 17) {
+          const err = new Error('Not Found');
+          err.status = 404;
+          throw err;
+        }
+        if (devId <= 22) {
+          const err = new Error('Too Many Requests');
+          err.status = 429;
+          throw err;
+        }
+        if (devId <= 27) {
+          const err = new Error('timeout of 10000ms exceeded');
+          err.code = 'ECONNABORTED';
+          throw err;
+        }
+        if (devId <= 32) {
+          const err = new Error('Internal Server Error');
+          err.status = 500;
+          throw err;
+        }
+        if (devId <= 35) {
+          throw new Error('generic network error');
+        }
+        return { data: { data: [{ tid: devId, kph: 20 }] } };
+      }),
+      interceptors: { response: { use: jest.fn() } },
+    });
+
+    await runTicks(1);
+
+    const stats = mspf.getMccsStats();
+    expect(stats.storeSize).toBe(15);
+    expect(stats.failures.empty_data).toBe(10);
+    expect(stats.failures.http_404).toBe(7);
+    expect(stats.failures.http_429).toBe(5);
+    expect(stats.failures.timeout).toBe(5);
+    expect(stats.failures.http_5xx).toBe(5);
+    expect(stats.failures.other).toBe(3);
+
+    expect(stats.failureSamples.empty_data).toEqual([1, 2, 3, 4, 5]);
+    expect(stats.failureSamples.http_404).toEqual([11, 12, 13, 14, 15]);
+    expect(stats.failureSamples.http_429).toEqual([18, 19, 20, 21, 22]);
+    expect(stats.failureSamples.timeout).toEqual([23, 24, 25, 26, 27]);
+    expect(stats.failureSamples.http_5xx).toEqual([28, 29, 30, 31, 32]);
+    expect(stats.failureSamples.other).toEqual([33, 34, 35]);
+  }, 15000);
+
+  test('cycle failure summary and missing warning log once per full cycle, not per batch', async () => {
+    const { logger } = require('../middleware/logger');
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    const infoSpy = jest.spyOn(logger, 'info').mockImplementation(() => {});
+
+    try {
+      populateDevices(100);
+
+      apiSpy.mockReturnValue({
+        get: jest.fn(async (url) => {
+          await new Promise(r => setTimeout(r, MOCK_DELAY_MS));
+          const match = url.match(/\/device\/(\d+)\/data\/history/);
+          const devId = match ? parseInt(match[1], 10) : 0;
+          if (devId > 80) return { data: { data: [] } };
+          return { data: { data: [{ tid: 1, kph: 20 }] } };
+        }),
+        interceptors: { response: { use: jest.fn() } },
+      });
+
+      await runTicks(1);
+      const batch1MissingWarns = warnSpy.mock.calls.filter(([msg]) =>
+        typeof msg === 'string' && msg.includes('missing MCCS data')
+      );
+      expect(batch1MissingWarns.length).toBe(0);
+
+      await runTicks(1);
+      const batch2MissingWarns = warnSpy.mock.calls.filter(([msg]) =>
+        typeof msg === 'string' && msg.includes('missing MCCS data')
+      );
+      expect(batch2MissingWarns.length).toBe(0);
+
+      await runTicks(1);
+      const cycleBoundaryMissingWarns = warnSpy.mock.calls.filter(([msg]) =>
+        typeof msg === 'string' && msg.includes('missing MCCS data')
+      );
+      expect(cycleBoundaryMissingWarns.length).toBe(1);
+      expect(cycleBoundaryMissingWarns[0][0]).toContain('20 device(s) missing MCCS data after full cycle');
+
+      const cycleFailuresLog = warnSpy.mock.calls.filter(([msg]) =>
+        typeof msg === 'string' && msg.includes('cycle failures')
+      );
+      expect(cycleFailuresLog.length).toBe(1);
+      expect(cycleFailuresLog[0][0]).toContain('empty_data=20');
+      expect(cycleFailuresLog[0][0]).toContain('samples: 81, 82, 83, 84, 85');
+    } finally {
+      warnSpy.mockRestore();
+      infoSpy.mockRestore();
+    }
+  }, 15000);
 });
