@@ -1,0 +1,10 @@
+{
+  "disableDefaultAgents": true,
+  "fallbackSubagent": "none",
+  "maxConcurrent": 1,
+  "worktreeIsolation": false,
+  "workflowsEnabled": false,
+  "showModel": true,
+  "showCost": true,
+  "reportUsage": true
+}
