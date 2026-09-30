@@ -218,3 +218,12 @@ Service: `src/services/foxlogger.js`
 - `src/services/positionSync.js` — Position sync fetches FoxLogger positions every 10s
 - `src/routes/health.js` — Health check dependency (`/health/detailed`)
 - `.env` — `FOXLOGGER_EMAIL`, `FOXLOGGER_PASSWORD`
+
+## Aturan commit (menggantikan aturan lama "agent tidak commit")
+- Hanya agent KOORDINATOR (kepala) yang boleh commit lokal. Worker tetap dilarang commit.
+- Commit hanya di branch `agent/*`, tidak pernah langsung di `development`.
+- `git add <file>` satu per satu. Dilarang `git add .` dan `git add -A`.
+- Commit hanya setelah pemeriksaan murah lolos dan diff sesuai lingkup task.
+- Boleh `--amend` atau `reset --soft HEAD~1` hanya untuk commit buatan sendiri yang belum di-push (cek `git status -sb`).
+- Dilarang: push (semua bentuk), merge ke development, `--no-verify`, `reset --hard`, `rebase`, force apa pun, menghapus branch.
+- File kerja `load-tests/tasks/` tidak boleh di-commit.
