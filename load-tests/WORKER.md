@@ -11,7 +11,7 @@ Kamu adalah WORKER. Kerjakan tepat satu task dari file spesifikasi yang ditunjuk
 - Jangan baca file md lain di load-tests/ selain file task dan file ini.
 - Baca file seperlunya; jangan baca file besar utuh kalau hanya butuh satu bagian.
 - Tes selalu `timeout 300 npm test`. Jangan `npx jest` langsung. Kalau sebuah perintah menggantung, hentikan (Ctrl+C), cek `pgrep -fa jest`, lalu laporkan.
-- ESLint untuk setiap file yang kamu ubah atau tambah.
+- Lint: `npx --yes eslint@8 <file yang kamu ubah/tambah> --max-warnings=0; echo exit=$?` (ESLint belum terpasang di package.json; jangan dipasang, jangan pakai versi lain). Lint saat ini hanya memeriksa aturan `strict`, jadi file tes baru wajib diawali 'use strict'. Jika lint tidak bisa dijalankan, tulis "TIDAK BISA DIJALANKAN: <pesan asli>" di ESLINT dan RISIKO; jangan menulis lolos.
 - Error yang sama muncul 2 kali dan penyebab belum jelas: berhenti dan laporkan. Jangan menebak berulang.
 - Butuh keputusan desain yang tidak ada di spesifikasi: berhenti, STATUS: butuh keputusan.
 
@@ -22,7 +22,7 @@ Perbarui load-tests/tasks/<taskId>.md (bagian "Checkpoint") setelah setiap langk
 Kepala hanya menilai bukti di laporanmu. Jalankan:
 1. `timeout 300 npm test > /tmp/<taskId>-test.log 2>&1; echo "exit=$?"` lalu `tail -40 /tmp/<taskId>-test.log`.
    Jika ada tes gagal, ambil juga blok kegagalannya (nama tes, Expected/Received atau pesan error) dengan `grep -n -A12 "●" /tmp/<taskId>-test.log | head -80`.
-2. ESLint untuk file yang kamu ubah/tambah.
+2. Lint dengan perintah di atas untuk file yang kamu ubah/tambah; tempel output dan exit code.
 3. `git status --porcelain` dan `git diff --stat`.
 4. Cek setiap kriteria selesai satu per satu.
 
@@ -48,7 +48,7 @@ DIFF PENTING (hanya jika ada perubahan; maks ~80 baris, apa adanya):
 
 OUTPUT TES (apa adanya): exit code + tail + blok kegagalan
 PENYEBAB KEGAGALAN TES (jika ada yang gagal): assertion | error import | timeout | lainnya: <bukti>
-ESLINT (apa adanya):
+ESLINT (apa adanya, termasuk exit code):
 ANGKA/METRIK (jika ada): <nilai asli + asalnya>
 
 FAKTA vs DUGAAN: dugaan ditandai "DUGAAN:".
@@ -62,3 +62,5 @@ PERTANYAAN: <jika STATUS = butuh keputusan>
 - Jangan tulis "lolos" tanpa output tes asli.
 - Kriteria tidak terpenuhi ditulis "tidak terpenuhi", tidak diperhalus.
 - Laporan tidak lengkap akan dikembalikan; melengkapinya sekarang lebih murah.
+- Kriteria yang hanya sebagian atau disiapkan ditulis "sebagian". RINGKASAN tidak boleh menulis "semua kriteria terpenuhi" jika ada yang bukan "terpenuhi".
+- Kegagalan alat yang tidak terkait lingkup (lint, perintah, dsb.) dicatat di TEMUAN DI LUAR LINGKUP.
