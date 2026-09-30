@@ -2,6 +2,38 @@
 
 > Semua perubahan signifikan dicatat di file ini.
 
+## 2026-09-30
+
+### Pilar 2 — Device Cache Stale-While-Revalidate (SWR) & Single-Flight Rebuild
+
+#### Dampak bagi Tim & Pengguna (Bahasa Sederhana)
+Pembaruan ini menuntaskan implementasi **Pilar 2** pada branch `agent/p2-devices-merged`:
+- **Armada Tidak Lagi Hilang Saat Cache Kedaluwarsa:** Sebelumnya saat cache kedaluwarsa (120 detik) atau upstream mengalami gangguan sementara, pengguna dapat melihat 0 kendaraan di dashboard/daftar armada. Kini dengan pola *Stale-While-Revalidate* dan hard TTL 24 jam, data armada lama tetap disajikan seketika dan tidak pernah ditimpa array kosong. Pengecualian: saat cold start atau setelah hard TTL 24 jam habis, jika upstream juga gagal, belum ada data lama untuk disajikan.
+- **Pencegahan Beban Ganda ke Server Upstream (Single-Flight Rebuild):** Request konkuren yang masuk bersamaan saat data kedaluwarsa digabungkan menjadi **1 kali pemanggilan ke server upstream** (*promise coalescing*), termasuk antara rute `/api/devices` dan `positionSync` (diuji dengan 3–5 pemanggil bersamaan pada mock upstream; belum diukur di staging).
+- **Toleransi Gangguan Parsial Vendor:** Jika salah satu vendor GPS (misal MSPF) gagal atau lambat, armada dari vendor lain (Traccar & FoxLogger) tetap diperbarui secara normal, dan data armada lama dari vendor yang gagal tetap dipertahankan tanpa melenyapkan kendaraan dari tampilan pengguna.
+
+#### Detail Teknis Singkat
+- **Modul Sentralisasi Cache Armada (`src/services/deviceCache.js`):**
+  - Menyediakan API terpusat: `getOrBuildDeviceCache()`, `setDevices(devices)`, `getDevices()`, `invalidate()`, `triggerRebuild()`, `normalizeTraccarDevice()`, dan `stop()`.
+  - Menerapkan **Hard TTL 24 jam** (`86400 detik`) pada `node-cache` dan evaluasi kesegaran **Soft TTL 120 detik** (`freshUntil`) berbasis jam monoton `performance.now()`.
+  - Mengimplementasikan **Single-Flight Rebuild** menggunakan variabel `inFlightRebuildPromise` dengan pembersihan deterministik di blok `finally`.
+  - **Ketahanan Kegagalan Upstream:** Jika seluruh upstream gagal, snapshot data lama dipertahankan, cache tidak pernah ditimpa dengan array kosong `[]`, dan retry diberi jeda backoff 10 detik. Jika terjadi kegagalan parsial (sebagian vendor gagal), gateway mempertahankan data lama khusus untuk vendor yang gagal (*source-level partial merge*).
+  - Menerapkan batas timeout request HTTP upstream sebesar **10 detik** (`REBUILD_REQUEST_TIMEOUT_MS = 10000`) pada seluruh pemanggilan upstream (`traccar`, `mspf`, `foxlogger`) saat rebuild.
+- **Sentralisasi Seluruh Penulis Cache ke `deviceCache.js`:**
+  - `src/routes/devices.js`: Logika duplikat lokal dihapus dan dialihkan sepenuhnya ke `getOrBuildDeviceCache()`.
+  - `src/server.js`: Fungsi `buildDeviceCache()` kini memanggil `deviceCache.getOrBuildDeviceCache()`, mengeliminasi duplikasi logika rebuild saat startup.
+  - `src/services/positionSync.js`: Blok rebuild mandiri lokal (baris 198–239) dan penulisan cache lokal ber-TTL 120 detik diganti dengan `await deviceCache.getOrBuildDeviceCache()`.
+  - `src/utils/engineControl.js`: Pembaruan status mesin (`updateMergedDeviceCache`) dialihkan menggunakan `deviceCache.setDevices(newMerged)`.
+  - Seluruh pemanggilan `cache.set('devices:merged')` ber-TTL 120 detik di luar modul berhasil dieliminasi 100%.
+- **Penghapusan Event Listener Reaktif:**
+  - Listener event `cache.on('set')`, `cache.on('del')`, dan `cache.on('expired')` pada `src/services/deviceCache.js` dihapus bersih setelah semua penulis dialihkan ke API eksplisit.
+- **Perubahan Perilaku yang Terlihat:**
+  - **(a) Normalisasi Traccar Konsisten Sejak Startup:** Kendaraan Traccar pada cache startup (`server.js`) kini konsisten membawa field opsional `phone`, `model`, `voltage`, `internalBattery` (dari `addr_IB`), `batteryLevel`, dan `ignition` (sama persis dengan yang dikembalikan rute `/api/devices`).
+  - **(b) Batas Waktu Request Rebuild Terproteksi:** Pemanggilan rebuild melalui rute `/api/devices` kini memiliki batas timeout 10 detik per request upstream, mencegah request client tertahan tanpa batas saat upstream lambat.
+  - **(c) Sinkronisasi Mapping Router Real-Time:** `setDevices()` otomatis membangun ulang pemetaan perangkat (`deviceRouter.buildDeviceMap`) setiap kali status mesin di-patch oleh `engineControl`.
+
+---
+
 ## 2026-09-28
 
 ### Core Performance Optimization, Upstream Decoupling & High-Concurrency Hardening (Pilar 1 + 3)

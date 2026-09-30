@@ -247,6 +247,23 @@
 | **Integration Tests** — 4 test di `src/__tests__/customGroupSync.test.js` memverifikasi multi-sync, add mandiri, deduplikasi, dan trigger sync instan (total 238 test pass) | ✅ |
 | **Dokumentasi Invariant** — Dicatat di `AGENTS.md`, `CHANGELOG.md`, `API_REFERENCE.md`, `USER_GUIDE.md`, dan `PROGRESS.md` | ✅ |
 
+## Phase 11 — Stale-While-Revalidate & Single-Flight Device Cache (Pilar 2): 🔄 Selesai di Branch (Menunggu Merge Staging)
+
+> **Status:** Selesai di branch `agent/p2-devices-merged` (✅), menunggu merge ke development/staging dan verifikasi lapangan.
+
+### 1. Rincian Pekerjaan Implementasi
+| Task | Status | Deskripsi |
+|------|:------:|-----------|
+| **Modul Sentralisasi `deviceCache` (`src/services/deviceCache.js`)** | ✅ | Mengimplementasikan pola Stale-While-Revalidate (SWR) dan Single-Flight in-flight promise coalescing untuk `devices:merged`. |
+| **Hard TTL 24 Jam & Soft TTL 120 Detik** | ✅ | Menyetel hard TTL 86400 detik (24 jam) di `node-cache` dan evaluasi kesegaran 120 detik (`freshUntil`) menggunakan jam monoton `performance.now()`. |
+| **Proteksi Data Lama saat Upstream Gagal** | ✅ | Gateway mempertahankan data lama (`lastGoodDevices`) saat upstream gagal dan tidak pernah menimpa cache dengan array kosong `[]`. |
+| **Penggabungan Parsial Antar-Vendor (*Partial Merge*)** | ✅ | Jika salah satu vendor upstream gagal (misal MSPF 503), armada dari vendor yang berhasil diperbarui dan armada vendor yang gagal dipertahankan dari snapshot lama. |
+| **Batas Waktu Request Upstream 10 Detik (`REBUILD_REQUEST_TIMEOUT_MS`)** | ✅ | Meneruskan opsi `{ timeout: 10000 }` pada seluruh panggilan upstream (`traccar`, `mspf`, `foxlogger`) saat rebuild di `doRebuild()`. |
+| **Pengalihan Seluruh Penulis Cache ke API Eksplisit** | ✅ | Mengalihkan `src/routes/devices.js`, `src/server.js`, `src/services/positionSync.js`, dan `src/utils/engineControl.js` ke `deviceCache.getOrBuildDeviceCache()` dan `deviceCache.setDevices()`. |
+| **Eliminasi Penulisan Cache 120s di Luar Modul** | ✅ | Menghapus seluruh pemanggilan `cache.set('devices:merged', ..., 120)` di luar `deviceCache.js`. |
+| **Pembersihan Listener Reaktif** | ✅ | Menghapus seluruh listener event `cache.on('set')`, `cache.on('del')`, dan `cache.on('expired')` di `deviceCache.js`. |
+| **Suite Pengujian Komprehensif** | ✅ | 6 file test suite memverifikasi SWR, writers, positionSync, readers, timeout 10s, dan listeners (total 32 test suites, 365 test pass). |
+
 ## Phase 10 — Core Performance Optimization, Upstream Decoupling & High-Concurrency Hardening (Pilar 1 + 3): ✅
 
 > **Status:** Selesai (✅) & **SUDAH AKTIF DI STAGING DAN PRODUCTION**.

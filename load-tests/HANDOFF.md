@@ -16,6 +16,7 @@ Dokumen serah terima teknis untuk agent sesi berikutnya. Tanpa pujian, padat fak
 | **3f** | ✅ Commit `5795590` & `844f277` | `src/services/mspf.js`, `src/__tests__/mccsWorkerCoverage.test.js` |
 | **3g** | ✅ Commit `5659af1` | `src/utils/guardedJob.js`, `src/services/positionSync.js`, `src/services/mspf.js`, `src/__tests__/guardedJob.test.js`, `src/__tests__/positionSync.test.js`, `src/__tests__/mccsWorkerCoverage.test.js` |
 | **Perbaikan Tes device-groups** | ✅ Commit `d03b51e` | `src/__tests__/gateway.test.js` |
+| **Pilar 2 (T2, T3a, T3b, T3c, T3c2, T3d)** | 🔄 Selesai di Branch `agent/p2-devices-merged` (`8f911b5`, `8d96726`, `3c22d66`, `62003ba`, `ee75ab1`, `555d3ad`) | `src/services/deviceCache.js`, `src/routes/devices.js`, `src/server.js`, `src/services/positionSync.js`, `src/utils/engineControl.js`, `src/__tests__/devicesMergedStale.test.js`, `src/__tests__/deviceCacheWriters.test.js`, `src/__tests__/positionSyncDeviceCache.test.js`, `src/__tests__/devicesMergedReaders.test.js`, `src/__tests__/deviceCacheTimeout.test.js`, `src/__tests__/deviceCacheListeners.test.js` |
 
 ---
 
@@ -103,9 +104,22 @@ Verifikasi aktual pada server **STAGING** (armada riil ~1.083 MSPF + 90 Traccar 
 ## 5. Rencana Pilar Tersisa
 
 1. **Pilar 2: `devices:merged` Stale-While-Revalidate & Single-Flight Rebuild:**
-   - Soft TTL 120s, Hard TTL 24 jam. Jika soft TTL habis, kembalikan data lama seketika, picu background rebuild.
-   - Single-flight mutex (`activeRebuildPromise`): puluhan request bersamaan hanya memicu 1x fetch upstream.
-   - Memisahkan device rebuild sepenuhnya dari jalur sync posisi.
+   - **Status:** Selesai di branch `agent/p2-devices-merged` (commit `8f911b5`, `8d96726`, `3c22d66`, `62003ba`, `ee75ab1`, `555d3ad`), menunggu merge ke development/staging + verifikasi staging.
+   - **Fitur yang Diimplementasikan:**
+     - Sentralisasi cache di `src/services/deviceCache.js`: SWR + single-flight in-flight promise coalescing.
+     - Hard TTL 24 jam (86400s) di `node-cache` + Soft TTL 120s (`freshUntil`) berbasis jam monoton `performance.now()`.
+     - Ketahanan kegagalan upstream: tidak pernah menimpa cache dengan array kosong `[]`; kegagalan sebagian mempertahankan snapshot vendor yang gagal (*partial merge*).
+     - Seluruh penulis (`routes/devices.js`, `server.js`, `positionSync.js`, `utils/engineControl.js`) dialihkan ke `deviceCache.js` (eliminasi 100% penulisan TTL 120s di luar modul).
+     - Batas timeout 10 detik per-request upstream (`REBUILD_REQUEST_TIMEOUT_MS = 10000`).
+     - Listener event `cache.on` dihapus sepenuhnya.
+   - **Keterbatasan yang Tersisa:**
+     - (i) `positionSync` masih menunggu rebuild saat cache benar-benar kosong (cold start / hard TTL habis) — pemisahan penuh belum;
+     - (ii) tidak ada batas total waktu untuk satu rebuild (hanya 10 s per request; `waitForInit` 15 s; akumulasi terburuk teoretis ~25 s);
+     - (iii) hard TTL ditegakkan oleh `node-cache` dengan jam dinding.
+   - **Checklist Verifikasi Staging (setelah merge & deploy):**
+     - [ ] Setelah running >120 detik, tidak ada log `[PositionSync] device cache expired, rebuilding...` pada putaran sync posisi normal.
+     - [ ] Dashboard customer tidak pernah menampilkan 0 kendaraan saat upstream lambat atau mengalami gangguan sementara.
+     - [ ] Hanya tercatat satu log `Device cache built` per siklus rebuild, membuktikan single-flight aktif di produksi.
 2. **Pilar 4: Snapshot Posisi saat Connect & First Full Sync:**
    - Emit snapshot posisi saat client connect (mirip status snapshot) agar kendaraan parkir tidak hilang pada client yang terlambat connect.
 
@@ -137,7 +151,7 @@ Verifikasi aktual pada server **STAGING** (armada riil ~1.083 MSPF + 90 Traccar 
      - Modul mengekspor fungsi stop/teardown yang dapat dipanggil secara eksplisit oleh unit test di blok `afterAll`.
      - Semua timer/interval latar belakang wajib memakai `.unref()`.
 8. **Metrik `[WS Metrics]` selalu bernilai 0:** Log event loop monitor mencatat `messages=0 devices=0 positions=0 events=0` karena counter hanya di-increment oleh pesan WS Traccar langsung, sedangkan broadcast posisi mayoritas dipancarkan via `positionSync` (MSPF & FoxLogger).
-9. **Tes `device-groups` memutasi `devices:merged` tanpa pemulihan:** `src/__tests__/gateway.test.js` memanggil `cache.set('devices:merged', ...)` untuk fixture uji tanpa menyimpan dan mengembalikan state cache sebelumnya, berpotensi memengaruhi tes berikutnya jika urutan berubah.
+9. **Tes `device-groups` memutasi `devices:merged` tanpa pemulihan (MASIH TERBUKA):** `src/__tests__/gateway.test.js` memanggil `cache.set('devices:merged', ...)` (7 kali) untuk fixture uji tanpa menyimpan dan mengembalikan state cache sebelumnya di `afterAll`, berpotensi memengaruhi tes berikutnya jika urutan berubah.
 10. **Fallback `course` ke `dir` MCCS:** Pada `enrichPositions`, jika koordinat posisi tidak menyediakan course, nilainya mengambil `dir` MCCS yang berpotensi memicu emisi posisi berubah pada `emitChangeOnly`.
 11. **Voltase kendaraan parkir tidak ter-update via WebSocket:** Karena `emitChangeOnly` menyaring posisi kendaraan yang diam/parkir, pembaruan atribut baterai/voltase pada kendaraan parkir tidak terkirim via event `position` sampai kendaraan bergerak atau halaman di-refresh.
 12. **Log warning `GET /v2/bc/1 404` saat startup:** Panggilan `syncSourceGroupNames` di `autoSync.js` mencoba mengambil detail BC per ID numerik, namun endpoint `/v2/bc/:id` mengembalikan 404 pada upstream MSPF (hanya `/v2/bc` list yang valid).
@@ -146,6 +160,10 @@ Verifikasi aktual pada server **STAGING** (armada riil ~1.083 MSPF + 90 Traccar 
 
 ## 7. Status & Tugas Berikutnya untuk Sesi Baru
 
-1. **Status Saat Ini:** Pilar 1 + Pilar 3 SUDAH aktif di staging dan production serta terbukti stabil. Dokumentasi proyek (.md) telah diperbarui secara menyeluruh.
+1. **Status Saat Ini:**
+   - Pilar 1 + Pilar 3 SUDAH aktif di staging dan production.
+   - Pilar 2 SUDAH SELESAI di branch `agent/p2-devices-merged` (32 test suites, 365 tests pass) dan siap untuk merge + verifikasi staging.
 2. **Tugas Berikutnya:**
-   - Memulai pengerjaan **Pilar 2: `devices:merged` Stale-While-Revalidate & Single-Flight Rebuild**.
+   - Merge branch `agent/p2-devices-merged` ke `development` dan deploy ke `staging`.
+   - Jalankan verifikasi checklist staging Pilar 2.
+   - Memulai persiapan **Pilar 4: Snapshot Posisi saat Connect & First Full Sync**.
