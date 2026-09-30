@@ -21,6 +21,10 @@ const {
   enrichAndFilterDevices,
   isDeviceAllowedForGroups,
 } = require('../services/groupMembership');
+const {
+  getOrBuildDeviceCache,
+  normalizeTraccarDevice,
+} = require('../services/deviceCache');
 
 const router = express.Router();
 
@@ -37,21 +41,6 @@ function overlayLiveStatus(devices) {
     const s = statusTracker.getStatus(d.id, d.source);
     if (s) d.status = s;
   }
-}
-
-function normalizeTraccarDevice(d) {
-  return {
-    id: d.id, name: d.name, uniqueId: d.uniqueId,
-    status: d.status || 'offline',
-    phone: d.phone || undefined, model: d.model || undefined,
-    source: 'traccar', group: `traccar_${d.groupId}`,
-    lastUpdate: d.lastUpdate || (d.attributes?.motionTime ? new Date(d.attributes.motionTime).toISOString() : undefined),
-    voltage: d.attributes?.power ?? undefined,
-    internalBattery: d.attributes?.addr_IB ?? undefined,
-    batteryLevel: d.attributes?.batteryLevel ?? undefined,
-    ignition: d.attributes?.ignition ?? undefined,
-    attributes: d.attributes || {},
-  };
 }
 
 async function enrichMetadata(devices) {
@@ -82,55 +71,6 @@ async function enrichMetadata(devices) {
     d.metadata = merged;
     d.metadataOwners = owners;
   }
-}
-
-async function getOrBuildDeviceCache() {
-  const cacheKey = 'devices:merged';
-  let merged = require('../services/cache').get(cacheKey);
-
-  if (!merged) {
-    const mspfPromise = mspf.waitForInit ? mspf.waitForInit().then(() => mspf.getDevices()) : mspf.getDevices();
-    const foxloggerPromise = foxlogger.waitForInit ? foxlogger.waitForInit().then(() => foxlogger.getDevices()) : foxlogger.getDevices();
-
-    const [traccarResult, mspfResult, foxloggerResult] = await Promise.allSettled([
-      traccar.getDevices({ all: true }),
-      mspfPromise,
-      foxloggerPromise,
-    ]);
-
-    merged = [];
-    let traccarCount = 0, mspfCount = 0, foxCount = 0;
-    if (traccarResult.status === 'fulfilled' && traccarResult.value) {
-      const mapped = traccarResult.value.map(normalizeTraccarDevice);
-      merged.push(...mapped);
-      traccarCount = mapped.length;
-    }
-    if (mspfResult.status === 'fulfilled' && mspfResult.value?.data) {
-      merged.push(...mspfResult.value.data);
-      mspfCount = mspfResult.value.data.length;
-    }
-    if (foxloggerResult.status === 'fulfilled' && foxloggerResult.value?.data) {
-      merged.push(...foxloggerResult.value.data);
-      foxCount = foxloggerResult.value.data.length;
-    }
-
-    logger.info(`Device cache built: ${traccarCount} Traccar + ${mspfCount} MSPF + ${foxCount} FoxLogger = ${merged.length} total`);
-
-    merged.sort((a, b) => {
-      const aId = String(a.id).padStart(20, '0');
-      const bId = String(b.id).padStart(20, '0');
-      if (aId !== bId) return aId < bId ? -1 : 1;
-      if (a.source < b.source) return -1;
-      if (a.source > b.source) return 1;
-      return 0;
-    });
-
-    deviceRouter.buildDeviceMap(merged);
-    require('../services/cache').set(cacheKey, merged, config.cache.ttl || 120);
-    Promise.resolve(runAutoSync?.()).catch(() => {});
-  }
-
-  return merged;
 }
 
 router.get('/', async (req, res, next) => {
