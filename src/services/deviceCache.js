@@ -241,9 +241,41 @@ function _resetForTests() {
   freshUntil = null;
 }
 
+function setDevices(devices) {
+  if (!Array.isArray(devices) || devices.length === 0) {
+    logger.warn('[DeviceCache] setDevices rejected empty or non-array argument; preserving existing data');
+    return getCachedDevices() || [];
+  }
+
+  const safeList = devices.map((d) => ({ ...d }));
+
+  deviceRouter.buildDeviceMap(safeList);
+  cache.set('devices:merged', safeList, HARD_TTL_SECONDS);
+  lastGoodDevices = safeList;
+  lastFetchedMonotonic = performance.now();
+  lastFetchedAt = Date.now();
+  freshUntil = performance.now() + FRESH_TTL_MS;
+
+  return safeList;
+}
+
+function getDevices() {
+  return cache.get('devices:merged');
+}
+
+function invalidate() {
+  cache.del('devices:merged');
+  freshUntil = null;
+  lastGoodDevices = null;
+  lastFetchedMonotonic = null;
+  lastFetchedAt = null;
+}
+
 module.exports = {
   getOrBuildDeviceCache,
-  getDevices: getOrBuildDeviceCache,
+  getDevices,
+  setDevices,
+  invalidate,
   normalizeTraccarDevice,
   triggerRebuild,
   stop,

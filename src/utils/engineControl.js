@@ -2,6 +2,7 @@
 
 // ponytail: engineControl state derivation ceiling: polling-based state reconciliation without hardware bi-directional ACK stream -> upgrade path: dedicated IoT device shadow / digital twin state engine
 const cache = require('../services/cache');
+const deviceCache = require('../services/deviceCache');
 
 const RECONCILE_TIMEOUT_MS = 60000;
 
@@ -51,7 +52,7 @@ function updateMergedDeviceCache(deviceId, source, patch) {
       };
       const newMerged = [...merged];
       newMerged[idx] = updated;
-      cache.set('devices:merged', newMerged, config.cache.ttl || 120);
+      deviceCache.setDevices(newMerged);
     }
   } catch {}
 }
