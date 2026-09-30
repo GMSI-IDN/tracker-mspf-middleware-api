@@ -14,6 +14,7 @@ const HARD_TTL_MS = HARD_TTL_SECONDS * 1000;
 const FRESH_TTL_SECONDS = config.cache.ttl || 120;
 const FRESH_TTL_MS = FRESH_TTL_SECONDS * 1000;
 const RETRY_BACKOFF_MS = 10 * 1000; // 10 detik jeda saat seluruh upstream gagal
+const REBUILD_REQUEST_TIMEOUT_MS = 10 * 1000; // 10 detik per request upstream
 
 let inFlightRebuildPromise = null;
 let lastGoodDevices = null;
@@ -89,15 +90,16 @@ function isFresh() {
 }
 
 async function doRebuild() {
+  const reqOpts = { timeout: REBUILD_REQUEST_TIMEOUT_MS };
   const mspfPromise = mspf.waitForInit
-    ? mspf.waitForInit().then(() => mspf.getDevices())
-    : mspf.getDevices();
+    ? mspf.waitForInit().then(() => mspf.getDevices({}, reqOpts))
+    : mspf.getDevices({}, reqOpts);
   const foxloggerPromise = foxlogger.waitForInit
-    ? foxlogger.waitForInit().then(() => foxlogger.getDevices())
-    : foxlogger.getDevices();
+    ? foxlogger.waitForInit().then(() => foxlogger.getDevices({}, reqOpts))
+    : foxlogger.getDevices({}, reqOpts);
 
   const [traccarResult, mspfResult, foxloggerResult] = await Promise.allSettled([
-    traccar.getDevices({ all: true }),
+    traccar.getDevices({ all: true }, reqOpts),
     mspfPromise,
     foxloggerPromise,
   ]);
