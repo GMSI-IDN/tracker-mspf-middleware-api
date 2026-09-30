@@ -4,7 +4,7 @@ const cache = require('./cache');
 const traccar = require('./traccar');
 const mspf = require('./mspf');
 const foxlogger = require('./foxlogger');
-const deviceRouter = require('./deviceRouter');
+const deviceCache = require('./deviceCache');
 const config = require('../config');
 const { logger } = require('../middleware/logger');
 const { statusTracker } = require('../utils/liveStatus');
@@ -208,27 +208,7 @@ async function syncPositionsImpl(isActive) {
           return;
         }
         logger.warn('[PositionSync] device cache expired, rebuilding...');
-        const [t, m, f] = await Promise.allSettled([
-          traccar.getDevices({ all: true }, { timeout: SYNC_REQUEST_TIMEOUT_MS }),
-          mspf.waitForInit().then(() => mspf.getDevices({}, { timeout: SYNC_REQUEST_TIMEOUT_MS })),
-          foxlogger.waitForInit().then(() => foxlogger.getDevices({}, { timeout: SYNC_REQUEST_TIMEOUT_MS })),
-        ]);
-        const rebuild = [];
-        if (t.status === 'fulfilled' && t.value) {
-          for (const d of t.value) rebuild.push({ id: d.id, name: d.name, uniqueId: d.uniqueId, status: d.status || 'offline', source: 'traccar', group: `traccar_${d.groupId}`, lastUpdate: d.lastUpdate || (d.attributes?.motionTime ? new Date(d.attributes.motionTime).toISOString() : undefined), voltage: d.attributes?.power ?? undefined, attributes: d.attributes || {} });
-        }
-        if (m.status === 'fulfilled' && m.value?.data) rebuild.push(...m.value.data);
-        if (f.status === 'fulfilled' && f.value?.data) rebuild.push(...f.value.data);
-        rebuild.sort((a, b) => {
-          const aId = String(a.id).padStart(20, '0');
-          const bId = String(b.id).padStart(20, '0');
-          if (aId !== bId) return aId < bId ? -1 : 1;
-          if (a.source < b.source) return -1;
-          if (a.source > b.source) return 1;
-          return 0;
-        });
-        deviceRouter.buildDeviceMap(rebuild);
-        cache.set('devices:merged', rebuild, config.cache.ttl || 120);
+        const rebuild = await deviceCache.getOrBuildDeviceCache();
         logger.info(`Device cache rebuilt: ${rebuild.length} devices`);
         merged = rebuild;
         expT = merged.filter(d => d.source === 'traccar').length;

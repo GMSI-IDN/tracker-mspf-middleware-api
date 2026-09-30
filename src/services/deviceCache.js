@@ -210,7 +210,7 @@ function triggerRebuild() {
 }
 
 async function getOrBuildDeviceCache() {
-  const cached = getCachedDevices();
+  const cached = cache.get('devices:merged');
 
   // 1. Data ada dan masih segar (fresh hit)
   if (cached && isFresh()) {
