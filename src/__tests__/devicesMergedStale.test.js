@@ -30,7 +30,7 @@ const cache = require('../services/cache');
 const traccar = require('../services/traccar');
 const mspf = require('../services/mspf');
 const foxlogger = require('../services/foxlogger');
-const { triggerRebuild, _resetForTests } = require('../services/deviceCache');
+const { setDevices, triggerRebuild, _resetForTests } = require('../services/deviceCache');
 const app = require('../app');
 
 jest.setTimeout(10000);
@@ -74,7 +74,7 @@ describe('P2-T1 Reproduction: devices:merged stale-while-revalidate & single-fli
       { id: 101, name: 'Vehicle 101', uniqueId: 'v101', source: 'traccar', group: 'traccar_1', attributes: {} },
       { id: 102, name: 'Vehicle 102', uniqueId: 'v102', source: 'traccar', group: 'traccar_1', attributes: {} },
     ];
-    cache.set('devices:merged', oldDevices, 120);
+    setDevices(oldDevices);
 
     // Pastikan data lama ada sebelum kedaluwarsa
     expect(cache.get('devices:merged')).toHaveLength(2);
@@ -140,7 +140,7 @@ describe('P2-T1 Reproduction: devices:merged stale-while-revalidate & single-fli
       { id: 303, name: 'MSPF Old 1', uniqueId: 'm303', source: 'mspf', group: 'mspf_1', attributes: {} },
       { id: 304, name: 'MSPF Old 2', uniqueId: 'm304', source: 'mspf', group: 'mspf_1', attributes: {} },
     ];
-    cache.set('devices:merged', oldDevices, 120);
+    setDevices(oldDevices);
 
     // Rebuild dipicu: Traccar berhasil memberikan armada baru, MSPF gagal (503), FoxLogger kosong
     traccar.getDevices.mockResolvedValue([
@@ -222,7 +222,7 @@ describe('P2-T1 Reproduction: devices:merged stale-while-revalidate & single-fli
     const initialDevices = [
       { id: 501, name: 'Vehicle Init 1', uniqueId: 'v501', source: 'traccar', group: 'traccar_1', attributes: {} },
     ];
-    cache.set('devices:merged', initialDevices, 120);
+    setDevices(initialDevices);
 
     // 2. Upstream gagal saat rebuild pertama
     traccar.getDevices.mockRejectedValue(new Error('Temporary upstream glitch'));

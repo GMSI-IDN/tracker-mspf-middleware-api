@@ -22,33 +22,6 @@ let lastFetchedMonotonic = null; // sentinel null untuk jam monoton
 let lastFetchedAt = null;        // Date.now() untuk pencatatan umur data di log
 let freshUntil = null;           // sentinel null untuk penanda kesegaran
 
-// Listeners untuk sinkronisasi jika cache dimanipulasi dari luar modul
-cache.on('set', (key, val) => {
-  if (key === 'devices:merged' && Array.isArray(val) && val.length > 0) {
-    lastGoodDevices = val;
-    lastFetchedMonotonic = performance.now();
-    lastFetchedAt = Date.now();
-    if (freshUntil === null) {
-      freshUntil = performance.now() + FRESH_TTL_MS;
-    }
-  }
-});
-
-cache.on('del', (key) => {
-  if (key === 'devices:merged') {
-    freshUntil = null;
-  }
-});
-
-cache.on('expired', (key) => {
-  if (key === 'devices:merged') {
-    freshUntil = null;
-    if (isWithinHardTtl() && Array.isArray(lastGoodDevices) && lastGoodDevices.length > 0) {
-      cache.set('devices:merged', lastGoodDevices, HARD_TTL_SECONDS);
-    }
-  }
-});
-
 function isWithinHardTtl() {
   if (lastFetchedMonotonic === null) return false;
   return (performance.now() - lastFetchedMonotonic) <= HARD_TTL_MS;
