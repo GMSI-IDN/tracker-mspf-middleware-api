@@ -42,7 +42,7 @@ Gunakan **Context7 MCP** (`context7_resolve-library-id` + `context7_query-docs`)
 2. **Ikuti pola kode yang sudah ada** — konsisten dengan konvensi proyek
 3. **Gunakan library standar industri** — hindari kode manual jika ada library yang mature
 4. **Jangan tambahkan komentar** di kode kecuali diminta
-5. **Jangan commit** perubahan kecuali diperintahkan
+5. **Jangan commit** perubahan kecuali diperintahkan. Pengecualian tunggal: lihat bagian "Aturan commit" di bawah (hanya agent KOORDINATOR, hanya di branch `agent/*`). Worker tidak pernah commit.
 6. **Gunakan tools yang ada** — prefer edit/write over bash untuk file, prefer grep/glob over find/grep
 7. **Jalankan test** setelah selesai implementasi: `npm test`
 8. **Update dokumentasi** setiap selesai implementasi — minimal:
