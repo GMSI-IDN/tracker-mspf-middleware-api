@@ -20,6 +20,7 @@
       "./src/__tests__/jest.setup.js"
     ],
     "globalSetup": "./src/__tests__/globalSetup.js",
+    "globalTeardown": "./src/__tests__/globalTeardown.js",
     "testEnvironment": "node",
     "roots": [
       "src/__tests__"
@@ -27,7 +28,8 @@
     "testPathIgnorePatterns": [
       "/node_modules/",
       "jest.setup.js",
-      "globalSetup.js"
+      "globalSetup.js",
+      "globalTeardown.js"
     ],
     "transform": {}
   },
