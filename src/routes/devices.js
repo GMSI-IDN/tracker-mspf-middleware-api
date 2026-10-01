@@ -21,6 +21,10 @@ const {
   enrichAndFilterDevices,
   isDeviceAllowedForGroups,
 } = require('../services/groupMembership');
+const {
+  getOrBuildDeviceCache,
+  normalizeTraccarDevice,
+} = require('../services/deviceCache');
 
 const router = express.Router();
 
@@ -37,21 +41,6 @@ function overlayLiveStatus(devices) {
     const s = statusTracker.getStatus(d.id, d.source);
     if (s) d.status = s;
   }
-}
-
-function normalizeTraccarDevice(d) {
-  return {
-    id: d.id, name: d.name, uniqueId: d.uniqueId,
-    status: d.status || 'offline',
-    phone: d.phone || undefined, model: d.model || undefined,
-    source: 'traccar', group: `traccar_${d.groupId}`,
-    lastUpdate: d.lastUpdate || (d.attributes?.motionTime ? new Date(d.attributes.motionTime).toISOString() : undefined),
-    voltage: d.attributes?.power ?? undefined,
-    internalBattery: d.attributes?.addr_IB ?? undefined,
-    batteryLevel: d.attributes?.batteryLevel ?? undefined,
-    ignition: d.attributes?.ignition ?? undefined,
-    attributes: d.attributes || {},
-  };
 }
 
 async function enrichMetadata(devices) {

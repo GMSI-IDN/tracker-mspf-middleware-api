@@ -198,6 +198,7 @@ Untuk admin, semua device. Untuk customer, hanya device di Group/BC yang di-assi
 > - Satu custom group dapat memuat kendaraan dari berbagai aturan sinkronisasi (multi-sync rules) dan penambahan manual.
 > - Perangkat hasil group sync terhubung secara dinamis (tidak di-insert ke `device_groups` manual). Hanya perangkat manual yang dapat dihapus per-unit via `DELETE /api/admin/device-groups/:id`. Jika aturan sync dihapus, seluruh perangkat dari sync group tersebut langsung hilang seketika.
 > - Jika user level customer memiliki beberapa custom group yang memuat kendaraan yang sama, daftar kendaraan **dijamin hanya menampilkan kendaraan tersebut sebanyak 1 kali (ter-deduplikasi)**, dan atribut `customGroups` akan mencantumkan semua grup terkait.
+> - Perangkat Traccar pada respons perangkat (`GET /api/devices`) kini secara konsisten menyertakan field telemetri dasar opsional jika tersedia di upstream attributes: `phone`, `model`, `voltage`, `internalBattery` (dari `addr_IB`), `batteryLevel`, dan `ignition`.
 
 **Response 200:**
 ```json
@@ -2037,7 +2038,8 @@ Mengembalikan ringkasan dashboard untuk tampilan awal aplikasi. Menggabungkan de
   "status": "healthy",
   "dependencies": [
     { "name": "traccar", "status": "healthy" },
-    { "name": "mspf", "status": "healthy" }
+    { "name": "mspf", "status": "healthy" },
+    { "name": "foxlogger", "status": "healthy" }
   ]
 }
 ```

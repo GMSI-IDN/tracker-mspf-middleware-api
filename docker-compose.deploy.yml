@@ -5,7 +5,7 @@ services:
     environment:
       # Otomatis untuk nginx-proxy + acme-companion (HTTPS)
       - VIRTUAL_HOST=${VIRTUAL_HOST}
-      - VIRTUAL_PORT=${PORT}
+      - VIRTUAL_PORT=${PORT:-3000}
       - LETSENCRYPT_HOST=${LETSENCRYPT_HOST}
       - LETSENCRYPT_EMAIL=${LETSENCRYPT_EMAIL}
 
@@ -64,7 +64,7 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-}
       - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-}
     expose:
-      - "${PORT}"
+      - "${PORT:-3000}"
     volumes:
       - ./data:/app/data
     networks:

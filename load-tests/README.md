@@ -15,10 +15,10 @@ Berdasarkan analisis kode sumber (`src/`) dan konfigurasi environment aktual (`.
 | **Upstream GPS Services** | 1. **Traccar** (`TRACCAR_URL`)<br>2. **MSPF** (`MSPF_URL`)<br>3. **FoxLogger** (`api-auth` & `api-v2.foxlogger.app`) | • Traccar: Basic Auth.<br>• MSPF: OAuth2 Client Credentials (`/v1/oauth2/token`).<br>• FoxLogger: Basic Auth $\to$ JWT Bearer token.<br>Semua upstream **WAJIB** digantikan oleh Mock Server lokal saat pengujian. |
 | **HTTP Client & Keep-Alive** | `axios` `v1.18.0` tanpa custom `httpAgent`/`httpsAgent` | Pada Node.js v24.15.0, `http.globalAgent.keepAlive` bernilai `true` secara default dengan `maxSockets: Infinity` dan `maxFreeSockets: 256`. Namun, connection reuse antar request upstream tetap bergantung pada pooling agent bawaan dan perilaku mock server. |
 | **Request Timeout** | `REQUEST_TIMEOUT=30000` (30 detik) | Batas waktu tunggu request HTTP ke upstream sebelum abort. |
-| **In-Memory Caching** | `node-cache` (`CACHE_PROVIDER=node-cache`) | • `devices:merged`: TTL 120 detik (`CACHE_DEVICE_TTL=120`).<br>• `positions:merged`: TTL 30 detik (diperbarui worker tiap 10s).<br>• `mccsCache`: TTL 30 detik (`MCCS_CACHE_TTL=30000`). |
+| **In-Memory Caching** | `node-cache` (`CACHE_PROVIDER=node-cache`, `useClones: false`) | • `devices:merged`: TTL 120 detik (`CACHE_DEVICE_TTL=120`).<br>• `positions:merged`: TTL 30 detik (diperbarui worker tiap 10s).<br>• `mccsStore`: Persistent in-memory `Map` (didecouple ke `MccsWorker` mandiri dengan jeda unit pasif).<br>• `useClones: false`: Menghilangkan 81% CPU overhead deep clone. Objek cache bersifat immutable.<br>• `CACHE_FREEZE=1`: Mengaktifkan deep freeze otomatis saat tes. |
 | **Rate Limiter** | `express-rate-limit` `v8.5.2` | • `RATE_LIMIT_WINDOW_MS=60000` (1 menit).<br>• `RATE_LIMIT_MAX=500` request / window (global).<br>• `RATE_LIMIT_AUTH_MAX=20` request / window (login endpoint). |
 | **Logging Level** | `LOG_LEVEL=info` (Winston + Morgan) | **Baseline Requirement:** `LOG_LEVEL` tidak diturunkan ke silent/error pada baseline load test agar mengukur performa riil sistem beserta beban I/O logging produksi. |
-| **Background Sync Worker** | `src/services/positionSync.js` | Berjalan tiap 10 detik. Memanggil upstream positions Traccar, MSPF, dan FoxLogger, lalu memperbarui cache `positions:merged` serta menghitung status online/offline device. |
+| **Background Sync & Workers** | `positionSync.js` & `MccsWorker` (`mspf.js`) | • `positionSync`: Berjalan tiap 10s dibungkus `guardedJob` (watchdog 180s, timeout request upstream 10s).<br>• `MccsWorker`: Worker latar belakang mandiri untuk rotasi telemetri MCCS, jeda 25–35 menit untuk unit `empty_data` (pasif 90–367 hari), reaktivasi dinamis maks 1x per masa jeda.<br>• Pengukuran waktu menggunakan jam monoton `performance.now()`. |
 | **Kapasitas Target Device** | **~1.200 Device** | Berdasarkan data produksi: MSPF (~1.109 unit WORKING), Traccar (~90 unit), FoxLogger (~1 unit). Mock server menyimulasikan armada dengan jumlah tersebut agar beban serialisasi memori dan pencocokan cache valid. |
 
 ---
@@ -40,8 +40,8 @@ Penting untuk memahami perbedaan mendasar antara lingkungan pengetesan lokal dan
 ## Tool Load Test yang Dipilih
 
 Sesuai aturan `skill.md` (Node.js ecosystem & larangan k6):
-- **Tool:** **Artillery** (`artillery`)
-- **Plugin:** `artillery-plugin-ensure` (untuk assertions p95, p99, dan error rate).
+- **HTTP Load Testing:** **Artillery** (`artillery`) dengan plugin `artillery-plugin-ensure` (untuk assertions p95, p99, dan error rate).
+- **WebSocket Concurrency & Hybrid Testing:** Custom runner Node.js berbasis **`socket.io-client`** (`ws-load-runner.js`, `run-ws-suite.js`, `run-c5-storm.js`, `soak-test.js`) untuk mengukur handshake latency, fan-out delivery, cycle time, memory footprint, dan thundering herd reconnect.
 
 ---
 
@@ -52,18 +52,40 @@ load-tests/
 ├── mock-upstream/
 │   └── server.js               # Mock server Traccar (90), MSPF (1.109), FoxLogger (1)
 ├── scripts/
-│   ├── preflight.js            # SAFETY GATE: Batalkan tes jika mendeteksi URL produksi
+│   ├── preflight.js            # SAFETY GATE: Batalkan tes jika mendeteksi URL non-lokal
 │   ├── generate-tokens.js      # Generator JWT token admin & customer -> tokens.csv
-│   ├── run-test.js             # Runner otomatis (Preflight -> Token -> Artillery -> HTML Report)
-│   ├── smoke.yml               # Skenario 1-2 VU, 30s (sanity check)
-│   ├── load.yml                # Skenario sustained target load (5 menit, 25 RPS)
-│   └── stress.yml              # Skenario bertahap (50 -> 100 -> 200 -> 400 -> 800 RPS)
+│   ├── seed-realistic-groups.js# Seed relasi grup & user realistis untuk benchmark
+│   ├── run-test.js             # Runner otomatis Artillery (Preflight -> Token -> Report)
+│   ├── smoke.yml               # Skenario HTTP 1-2 VU, 30s (sanity check)
+│   ├── load.yml                # Skenario HTTP sustained target load (5 menit, 25 RPS)
+│   ├── stress.yml              # Skenario HTTP bertahap (50 -> 100 -> 200 -> 400 -> 800 RPS)
+│   ├── devices-only.yml        # Skenario isolasi endpoint /api/devices
+│   ├── positions-only.yml      # Skenario isolasi endpoint /api/positions
+│   ├── run-improved-baseline.js# Script pengujian baseline Jalur A bertahap
+│   ├── run-ws-suite.js         # Orkestrator rangkaian tes WebSocket (C1 - C4)
+│   ├── run-ws-tier.js          # Runner uji tangga koneksi WebSocket per tier
+│   ├── ws-load-runner.js       # Worker thread simulasi client socket.io
+│   ├── ws-users.json           # Fixture kredensial user untuk WebSocket runner
+│   ├── run-c5-storm.js         # Skenario reconnect storm (thundering herd)
+│   ├── run-c5a-tiered.js       # Runner bertingkat thundering herd reconnect
+│   ├── c5b-integrity-reconnect.js # Uji kelengkapan data posisi pasca-reconnect
+│   ├── test-c5b-position-completeness.js # Verifikasi integritas armada setelah restart
+│   ├── soak-test.js            # Skenario soak test durasi panjang (15-45 menit)
+│   ├── profile-endpoints.js    # Pengambil CPU profile (node --cpu-prof)
+│   ├── analyze-profile.js      # Analisis flamegraph & pembagian waktu CPU
+│   ├── prove-mccs-coverage.js  # Uji pembuktian rotasi & cakupan worker MCCS
+│   ├── prove-mccs-delay-position-sync.js # Simulasi dampak latensi MCCS ke positionSync
+│   ├── prove-overlapping-sync.js # Uji pembuktian risiko sync bertumpuk tanpa guard
+│   ├── prove-window-zero.js    # Simulasi jendela 0 kendaraan saat cache kedaluwarsa
+│   ├── test-cache-leak.js      # Uji kebocoran mutasi cache antar-request
+│   ├── test-sync-guard.js      # Uji pembuktian ketahanan guardedJob watchdog
+│   └── start-server.js         # Helper pemula server middleware terisolasi
 ├── results/                    # Output file JSON & HTML hasil tes (masuk .gitignore)
-│   └── stress-report-jalur-a.md# Laporan analisis hasil stress test Jalur A
-├── CATATAN_IMPROVISASI.md      # Rekomendasi teknis & perbaikan bottleneck hasil tes
+├── CATATAN_IMPROVISASI.md      # Rekomendasi teknis & evaluasi performa hasil profiling
+├── HANDOFF.md                  # Status teknis & handoff antar-sesi pengembang
+├── PLAYBOOK.md                 # SOP dan urutan kerja load test middleware
 ├── README.md                   # Dokumentasi ini
-├── SKILL.md                    # Pedoman SOP Load Test Middleware
-docker-compose.loadtest.yml     # Lingkungan pengujian terisolasi (CPU: 2, RAM: 2G)
+└── docker-compose.loadtest.yml # Lingkungan pengujian terisolasi (CPU: 2, RAM: 2G)
 ```
 
 ---
@@ -156,12 +178,17 @@ node load-tests/scripts/run-test.js stress
 
 ## Analisis Hasil & Menentukan Jumlah Max Concurrent Users
 
-Setelah skenario `stress` selesai dieksekusi, Artillery akan menghasilkan:
-- `load-tests/results/stress-[timestamp].json`
-- `load-tests/results/stress-[timestamp].html` (Grafik interaktif)
+Setelah skenario pengujian dieksekusi, perhatikan batasan interpretasi angka berikut:
 
-**Cara Menentukan Kapasitas Maksimum:**
-1. Buka file `.html` di browser.
+1. **Hasil Uji Beban di Lingkungan LAPTOP (i5-12450HX, WSL2, Mock Upstream):**
+   - Angka titik jenuh **250–300 RPS** dan kapasitas aman **150–180 RPS** pada Jalur A diperoleh pada mesin laptop pengembang.
+   - Angka koneksi WebSocket **1.000 soket** diperoleh pada mesin laptop pengembang dengan mock upstream.
+   - **PENTING:** Perkiraan kapasitas di server produksi adalah **~setengahnya (~50–60%)** dari kapasitas laptop dan belum diukur secara langsung. Jangan mengasumsikan angka laptop setara dengan kapasitas produksi.
+2. **Hasil Verifikasi di Lingkungan STAGING (Armada Riil):**
+   - Durasi sync posisi **4–8 detik**, server siap **~2 detik**, posisi awal siap **~12 detik**, dan siklus MCCS **~1,5 menit** tanpa error adalah hasil verifikasi aktual pada server STAGING.
+
+**Cara Menentukan Kapasitas Maksimum dari Hasil Uji:**
+1. Buka file laporan HTML atau JSON di `load-tests/results/`.
 2. Periksa grafik **Response Time (p95 & p99)** vs **Arrival Rate (RPS)**:
    - **Kapasitas Puncak (Peak Saturation Point):** Tahap RPS / Concurrent VU tertinggi di mana `p95 < 800 ms` dan `error_rate < 1%`.
    - **Kapasitas Aman Rekomendasi (Safe Operating Capacity):** Ambil **70% – 80%** dari angka titik jenuh tersebut.

@@ -2,6 +2,72 @@
 
 > Semua perubahan signifikan dicatat di file ini.
 
+## 2026-09-30
+
+### Pilar 2 — Device Cache Stale-While-Revalidate (SWR) & Single-Flight Rebuild
+
+#### Dampak bagi Tim & Pengguna (Bahasa Sederhana)
+Pembaruan ini menuntaskan implementasi **Pilar 2** pada branch `agent/p2-devices-merged`:
+- **Armada Tidak Lagi Hilang Saat Cache Kedaluwarsa:** Sebelumnya saat cache kedaluwarsa (120 detik) atau upstream mengalami gangguan sementara, pengguna dapat melihat 0 kendaraan di dashboard/daftar armada. Kini dengan pola *Stale-While-Revalidate* dan hard TTL 24 jam, data armada lama tetap disajikan seketika dan tidak pernah ditimpa array kosong. Pengecualian: saat cold start atau setelah hard TTL 24 jam habis, jika upstream juga gagal, belum ada data lama untuk disajikan.
+- **Pencegahan Beban Ganda ke Server Upstream (Single-Flight Rebuild):** Request konkuren yang masuk bersamaan saat data kedaluwarsa digabungkan menjadi **1 kali pemanggilan ke server upstream** (*promise coalescing*), termasuk antara rute `/api/devices` dan `positionSync` (diuji dengan 3–5 pemanggil bersamaan pada mock upstream; belum diukur di staging).
+- **Toleransi Gangguan Parsial Vendor:** Jika salah satu vendor GPS (misal MSPF) gagal atau lambat, armada dari vendor lain (Traccar & FoxLogger) tetap diperbarui secara normal, dan data armada lama dari vendor yang gagal tetap dipertahankan tanpa melenyapkan kendaraan dari tampilan pengguna.
+
+#### Detail Teknis Singkat
+- **Modul Sentralisasi Cache Armada (`src/services/deviceCache.js`):**
+  - Menyediakan API terpusat: `getOrBuildDeviceCache()`, `setDevices(devices)`, `getDevices()`, `invalidate()`, `triggerRebuild()`, `normalizeTraccarDevice()`, dan `stop()`.
+  - Menerapkan **Hard TTL 24 jam** (`86400 detik`) pada `node-cache` dan evaluasi kesegaran **Soft TTL 120 detik** (`freshUntil`) berbasis jam monoton `performance.now()`.
+  - Mengimplementasikan **Single-Flight Rebuild** menggunakan variabel `inFlightRebuildPromise` dengan pembersihan deterministik di blok `finally`.
+  - **Ketahanan Kegagalan Upstream:** Jika seluruh upstream gagal, snapshot data lama dipertahankan, cache tidak pernah ditimpa dengan array kosong `[]`, dan retry diberi jeda backoff 10 detik. Jika terjadi kegagalan parsial (sebagian vendor gagal), gateway mempertahankan data lama khusus untuk vendor yang gagal (*source-level partial merge*).
+  - Menerapkan batas timeout request HTTP upstream sebesar **10 detik** (`REBUILD_REQUEST_TIMEOUT_MS = 10000`) pada seluruh pemanggilan upstream (`traccar`, `mspf`, `foxlogger`) saat rebuild.
+- **Sentralisasi Seluruh Penulis Cache ke `deviceCache.js`:**
+  - `src/routes/devices.js`: Logika duplikat lokal dihapus dan dialihkan sepenuhnya ke `getOrBuildDeviceCache()`.
+  - `src/server.js`: Fungsi `buildDeviceCache()` kini memanggil `deviceCache.getOrBuildDeviceCache()`, mengeliminasi duplikasi logika rebuild saat startup.
+  - `src/services/positionSync.js`: Blok rebuild mandiri lokal (baris 198–239) dan penulisan cache lokal ber-TTL 120 detik diganti dengan `await deviceCache.getOrBuildDeviceCache()`.
+  - `src/utils/engineControl.js`: Pembaruan status mesin (`updateMergedDeviceCache`) dialihkan menggunakan `deviceCache.setDevices(newMerged)`.
+  - Seluruh pemanggilan `cache.set('devices:merged')` ber-TTL 120 detik di luar modul berhasil dieliminasi 100%.
+- **Penghapusan Event Listener Reaktif:**
+  - Listener event `cache.on('set')`, `cache.on('del')`, dan `cache.on('expired')` pada `src/services/deviceCache.js` dihapus bersih setelah semua penulis dialihkan ke API eksplisit.
+- **Perubahan Perilaku yang Terlihat:**
+  - **(a) Normalisasi Traccar Konsisten Sejak Startup:** Kendaraan Traccar pada cache startup (`server.js`) kini konsisten membawa field opsional `phone`, `model`, `voltage`, `internalBattery` (dari `addr_IB`), `batteryLevel`, dan `ignition` (sama persis dengan yang dikembalikan rute `/api/devices`).
+  - **(b) Batas Waktu Request Rebuild Terproteksi:** Pemanggilan rebuild melalui rute `/api/devices` kini memiliki batas timeout 10 detik per request upstream, mencegah request client tertahan tanpa batas saat upstream lambat.
+  - **(c) Sinkronisasi Mapping Router Real-Time:** `setDevices()` otomatis membangun ulang pemetaan perangkat (`deviceRouter.buildDeviceMap`) setiap kali status mesin di-patch oleh `engineControl`.
+
+---
+
+## 2026-09-28
+
+### Core Performance Optimization, Upstream Decoupling & High-Concurrency Hardening (Pilar 1 + 3)
+
+#### Dampak bagi Tim & Pengguna (Bahasa Sederhana)
+Pembaruan ini menuntaskan implementasi **Pilar 1 dan Pilar 3** yang saat ini **SUDAH AKTIF DI STAGING DAN PRODUCTION**:
+- **Sinkronisasi Posisi Jauh Lebih Cepat & Teratur:** Siklus pembaruan posisi kendaraan tidak lagi tersendat atau bertumpuk. Pada verifikasi aktual di server **STAGING**, proses sinkronisasi kini selesai teratur dalam **4–8 detik** (turun drastis dari sebelumnya yang mencapai ~57 detik).
+- **Waktu Kesiapan Pasca-Restart Sangat Cepat:** Server siap menerima koneksi dalam **~2 detik**, dan data posisi armada pertama kali siap disajikan ke REST API serta WebSocket dalam **~12 detik** setelah server aktif (sebelumnya client harus menunggu hingga ~57 detik).
+- **Pengalaman Frontend Lebih Responsif & Peta Live Bergerak:** Beban CPU backend berkurang drastis sehingga waktu muat (*load time*) antarmuka web jauh lebih cepat dan pergerakan armada di peta terpantau live secara stabil.
+- **Kapasitas Cache Melonjak (Hasil Pengujian di LAPTOP):** Pengujian beban pada laptop pengembang (i5-12450HX, WSL2, mock) menunjukkan kapasitas aman endpoint cache (Jalur A) melonjak dari 35–50 RPS menjadi **150–180 RPS** (titik jenuh 250–300 RPS) dengan latensi p95 terpangkas dari ribuan milidetik ke belasan milidetik. Perkiraan kapasitas di server adalah ~setengahnya dan belum diukur langsung.
+
+#### Detail Teknis Singkat
+- **Pilar 1 — Concurrency Guard pada Sync Posisi (`src/utils/guardedJob.js` & `src/services/positionSync.js`):**
+  - Mencegah eksekusi bertumpuk (*overlapping sync*) dengan membungkus proses sinkronisasi ke dalam `guardedJob` berbasis token kepemilikan unik (`Symbol`) dan watchdog timer 180 detik. Jika sync sebelumnya masih berjalan, tick berikutnya dilewati (*skipped*) secara aman tanpa risiko lock tersangkut.
+  - Menerapkan batas timeout request HTTP upstream sebesar **10 detik** pada seluruh jalur sinkronisasi (`traccar`, `mspf`, `foxlogger`).
+- **Pilar 3 — Pemisahan (Decoupling) Worker MCCS (`src/services/mspf.js`):**
+  - Pengambilan telemetri tambahan MCCS dipisahkan sepenuhnya dari jalur kritis sinkronisasi posisi ke worker latar belakang mandiri (`MccsWorker`).
+  - Menyimpan telemetri ke dalam persistent in-memory `Map` store (`mccsStore`) dengan rotasi batch mandiri.
+  - **Mekanisme Jeda Unit Pasif:** Sebanyak ~450 unit yang mengembalikan data kosong (`empty_data`) secara otomatis dijeda selama 25–35 menit dari rotasi worker. Pengecekan manual membuktikan kendaraan-kendaraan tersebut tidak aktif selama 90–367 hari (bukan error API MSPF).
+  - **Reaktivasi Dinamis:** Jika unit yang dijeda mengirimkan `deviceTime` baru pada sinkronisasi posisi, unit langsung diprioritaskan di antrean terdepan (maksimal 1 kali reaktivasi per masa jeda).
+  - Pada verifikasi di **STAGING**, worker MCCS berjalan konsisten mencatat `627 with data, ~456 paused` per putaran (~1,5 menit) dengan **0 cycle failure**.
+- **Optimasi Memori & CPU Cache (`src/services/cache.js`):**
+  - Profiling CPU pada `/api/positions` menunjukkan **81% waktu CPU terbuang untuk deep clone** akibat konfigurasi `useClones: true` di NodeCache. Biaya komputasi tersebut dihilangkan sepenuhnya dengan menyetel `useClones: false` dan menerapkan batasan shallow-copy yang aman di seluruh titik mutasi.
+  - Menerapkan `'use strict'` di seluruh file `src/` dan menegakkan aturan ESLint `strict: ["error", "global"]`.
+  - Mengaktifkan pengaman `deepFreeze` otomatis pada objek cache saat `NODE_ENV=test` atau `CACHE_FREEZE=1`.
+- **Ketahanan Jam Monoton (`performance.now()`):**
+  - Seluruh pengukuran durasi, elapsed time, watchdog, dan interval jeda dimigrasikan dari `Date.now()` ke jam monoton `performance.now()` untuk mencegah durasi negatif atau false timeout akibat NTP sync/WSL2 clock drift. Variabel penanda awal menggunakan sentinel eksplisit `null`.
+- **Perbaikan Test Suite Device Groups (`src/__tests__/gateway.test.js`):**
+  - Memperbaiki assertion pengujian `GET /api/admin/device-groups` yang sebelumnya memeriksa `device_name` usang menjadi `deviceName` (sesuai kontrak API sejak awal dibuat) dan menerapkan deterministic seeding data.
+- **Keputusan Penundaan Open Handle Jest:**
+  - Penanganan open handle Jest sengaja ditunda agar tidak memasukkan branching `NODE_ENV` ke dalam kode aplikasi produksi; penanganan arsitektural bersih dicatat di backlog.
+
+---
+
 ## 2026-09-20
 
 ### Route Playback Historical Running Status Fix

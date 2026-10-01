@@ -187,6 +187,10 @@ Tanda bahaya yang pernah muncul:
 - **Pengaman yang tidak dibuktikan bekerja.** Contoh: `Object.freeze` di kode non-strict, atau Proxy yang hanya membungkus objek terluar.
 - **Artefak mock disebut "realistis".**
 - **Overhead pengaman ikut di angka kapasitas.** Contoh: baseline diambil dengan `CACHE_FREEZE=1`.
+- **Assertion di dalam if bisa diam-diam tidak jalan.** Guard seperti `if (res.body.length > 0) expect(...)` membuat tes lolos secara palsu saat data kosong. Selalu seed data secara deterministik.
+- **Jest menggantung tanpa batas waktu.** Selalu jalankan dengan batas waktu (`timeout 300 npm test`) dan cari handle yang bocor dengan `--detectOpenHandles`.
+- **Jalur WebSocket di staging baru terbukti setelah browser benar-benar terhubung.** Jangan hanya mengandalkan log atau unit test mock; verifikasi langsung di browser bahwa socket tersambung dan peta live bergerak. Pastikan juga metrik yang dipantau memang mengukur hal yang benar (misal metrik WS Traccar tidak mengukur emisi `positionSync`).
+- **Data kosong dari upstream belum tentu error.** Cek sampel secara manual. Kasus ~450 unit `empty_data` di MSPF ternyata kendaraan yang memang pasif 90–367 hari, bukan kerusakan API.
 
 ---
 
@@ -232,12 +236,13 @@ Sertakan juga: commit yang dites, skenario, durasi per tahap, jumlah pengulangan
 - User bersamaan saat ini ±50, diperkirakan bertambah.
 - Posisi dikirim lewat WebSocket (Socket.io, transport polling lalu upgrade). HTTP `/api/positions` dan `/api/devices` hanya dipanggil saat halaman dibuka dan saat user berinteraksi.
 
-### Hasil tes (lokal, mock cepat)
+### Hasil tes (di LAPTOP i5-12450HX, WSL2, mock)
 
+*(Catatan: Seluruh angka di bawah adalah hasil di LAPTOP pengembang. Perkiraan kapasitas di server adalah ~setengahnya dan belum diukur langsung).*
 - Jalur A setelah perbaikan `useClones`: titik jenuh ~250–300 req/s (perkiraan di server ~110–190 req/s). Beban nyata jauh di bawah itu.
-- WebSocket: lolos semua target sampai 1.000 koneksi (perkiraan di server ~450–650). Tingkat 2.000 tidak valid karena CPU runner 90%.
-- Reconnect storm: lolos di 50 dan 150 user, gagal target di 500.
-- Soak 45 menit, 150 koneksi: memori datar, 0 disconnect (dengan mock yang hanya menggerakkan kendaraan di sebagian grup).
+- WebSocket: lolos semua target sampai 1.000 koneksi pada pengujian awal di laptop (perkiraan di server ~450–650). Tingkat 2.000 tidak valid karena CPU runner 90%.
+- Reconnect storm: lolos di 50 dan 150 user di laptop, gagal target di 500.
+- Soak 45 menit, 150 koneksi di laptop: memori datar, 0 disconnect (dengan mock yang hanya menggerakkan kendaraan di sebagian grup).
 
 ### Temuan yang sudah diperbaiki
 
@@ -260,14 +265,15 @@ Rencana perbaikan (satu per iterasi):
 
 ### Status
 
-- Commit terdahulu `4f645d6` (useClones) dan `b9c75cc` ('use strict') belum diuji di staging.
-- Masalah terbuka 3a–3d pada commit `24035ae` sudah diperbaiki:
-  - **3a**: Token kepemilikan watchdog `guardedJob` pada `positionSync` (commit `d9b0e2a`).
-  - **3b & 3d**: Persistent MCCS Map store, boundary purge, `missingCount`, dan worker `guardedJob` (commit `c519381`).
-  - **3c**: Audit pemanggil `getPositions` selesai (terbukti aman tanpa perubahan kode).
-- **3e**: Timeout request jalur sync 10 s (commit `7759324`) selesai dengan watchdog dinaikkan ke 180 s.
-- **Pilar 1 + Pilar 3** siap diuji di staging.
-- **Pilar 2 dan Pilar 4** belum dikerjakan.
+- **Pilar 1 + Pilar 3 (3a–3g) SUDAH LENGKAP DAN DIAKTIFKAN DI STAGING DAN PRODUCTION.**
+- **Verifikasi Aktual di STAGING:**
+  - Sync posisi berjalan konsisten dan cepat di **4–8 detik** (sebelumnya ~57 detik).
+  - Server siap dalam **~2 detik** dan data posisi armada pertama kali tersedia dalam **~12 detik** pasca-restart (sebelumnya ~57 detik).
+  - MCCS worker berjalan teratur mencatat `627 with data, ~456 paused` per putaran **~1,5 menit** tanpa cycle failure. Reaktivasi unit pasif dibatasi maksimal 1x per masa jeda (~1x per jam).
+  - Peta live di staging terbukti bergerak real-time dan koneksi WebSocket stabil.
+- Perbaikan tes `device-groups` (`deviceName`) selesai (commit `d03b51e`).
+- Penundaan open handle Jest sengaja dilakukan agar tidak memasukkan branching `NODE_ENV` ke kode aplikasi.
+- **Pilar 2 dan Pilar 4** adalah target pekerjaan berikutnya.
 
 ### Pekerjaan tertunda
 
@@ -284,7 +290,12 @@ Rencana perbaikan (satu per iterasi):
 - Optimasi emit WebSocket (hanya yang berubah sudah ada; berikutnya emit per grup lewat room atau batch per siklus). Pemicu: diturunkan ke ~100 user bersamaan (waktu siklus C4 @150 user naik dari 60–203 ms ke 1.923 ms di laptop dengan mock realistis karena mock lama hanya menggerakkan kendaraan di sebagian grup; di server ~2x lebih lambat, 150 user bisa melewati batas SLA 3 s, sementara 50 user saat ini masih aman). Tangga WebSocket (C2–C3) perlu diulang dengan mock realistis sebelum user mendekati angka itu.
 - Aktifkan `compression`, diukur sebagai iterasi terpisah. Cek dulu reverse proxy di production.
 - Cache `device_groups` dengan TTL atau invalidasi berbasis event.
-- Response cache `/api/positions` 2–3 detik. Kunci cache wajib per user atau cakupan device, tidak boleh per role.
+- Response cache `/api/positions` 2–3 detik. Kunci cache wajib per user atau cakupan device, TIDAK BOLEH per role, karena data antar customer bisa bocor.
+- Metrik `[WS Metrics]` selalu bernilai 0: log event loop monitor mencatat `messages=0 devices=0 positions=0 events=0` karena counter hanya di-increment oleh WS Traccar langsung.
+- Tes `device-groups` memutasi `devices:merged` tanpa pemulihan state cache sebelumnya di `src/__tests__/gateway.test.js`.
+- Fallback `course` ke `dir` MCCS pada `enrichPositions`.
+- Voltase kendaraan parkir tidak ter-update via WebSocket karena filter `emitChangeOnly`.
+- Log warning startup `GET /v2/bc/1 404` akibat panggilan `syncSourceGroupNames`.
 - Cluster mode. Syarat: `positionSync` hanya di satu worker, cache ke Redis atau invalidasi lintas proses, total koneksi DB dihitung ulang, Socket.io dengan sticky session dan Redis adapter aktif.
 - Rate limiter 100 request/menit per IP: tinjau untuk banyak user di balik satu IP kantor.
 - Keamanan: PostgreSQL staging dan production tidak boleh terbuka ke internet publik.
