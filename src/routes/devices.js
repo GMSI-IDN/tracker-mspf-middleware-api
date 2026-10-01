@@ -73,55 +73,6 @@ async function enrichMetadata(devices) {
   }
 }
 
-async function getOrBuildDeviceCache() {
-  const cacheKey = 'devices:merged';
-  let merged = require('../services/cache').get(cacheKey);
-
-  if (!merged) {
-    const mspfPromise = mspf.waitForInit ? mspf.waitForInit().then(() => mspf.getDevices()) : mspf.getDevices();
-    const foxloggerPromise = foxlogger.waitForInit ? foxlogger.waitForInit().then(() => foxlogger.getDevices()) : foxlogger.getDevices();
-
-    const [traccarResult, mspfResult, foxloggerResult] = await Promise.allSettled([
-      traccar.getDevices({ all: true }),
-      mspfPromise,
-      foxloggerPromise,
-    ]);
-
-    merged = [];
-    let traccarCount = 0, mspfCount = 0, foxCount = 0;
-    if (traccarResult.status === 'fulfilled' && traccarResult.value) {
-      const mapped = traccarResult.value.map(normalizeTraccarDevice);
-      merged.push(...mapped);
-      traccarCount = mapped.length;
-    }
-    if (mspfResult.status === 'fulfilled' && mspfResult.value?.data) {
-      merged.push(...mspfResult.value.data);
-      mspfCount = mspfResult.value.data.length;
-    }
-    if (foxloggerResult.status === 'fulfilled' && foxloggerResult.value?.data) {
-      merged.push(...foxloggerResult.value.data);
-      foxCount = foxloggerResult.value.data.length;
-    }
-
-    logger.info(`Device cache built: ${traccarCount} Traccar + ${mspfCount} MSPF + ${foxCount} FoxLogger = ${merged.length} total`);
-
-    merged.sort((a, b) => {
-      const aId = String(a.id).padStart(20, '0');
-      const bId = String(b.id).padStart(20, '0');
-      if (aId !== bId) return aId < bId ? -1 : 1;
-      if (a.source < b.source) return -1;
-      if (a.source > b.source) return 1;
-      return 0;
-    });
-
-    deviceRouter.buildDeviceMap(merged);
-    require('../services/cache').set(cacheKey, merged, config.cache.ttl || 120);
-    Promise.resolve(runAutoSync?.()).catch(() => {});
-  }
-
-  return merged;
-}
-
 router.get('/', async (req, res, next) => {
   try {
     const { group, source, status, keyword, search, offset = 0, limit = 50 } = req.query;
